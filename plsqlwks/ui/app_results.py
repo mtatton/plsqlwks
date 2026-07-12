@@ -38,6 +38,14 @@ from .state import *
 class AppResultsMixin:
     def enter_results_focus(self) -> None:
         if self.state.active_result is None and self.state.explain_result is None:
+            if self.state.show_dbms_output and self.state.dbms_output:
+                self.state.focus = FOCUS_RESULTS
+                self.state.status = f"DBMS_OUTPUT: {len(self.state.dbms_output)} line(s)"
+                return
+            if self.state.results:
+                self.state.focus = FOCUS_RESULTS
+                self.state.status = "Results transcript"
+                return
             self.state.status = "No table result is available"
             return
         self.state.show_dbms_output = False

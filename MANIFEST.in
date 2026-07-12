@@ -1,0 +1,6 @@
+include pytest.ini
+include rchar.py
+include requirements.txt
+include tests/conftest.py
+include tests/fixtures/config_exports.txt
+include tests/fixtures/ui_exports.txt

@@ -106,10 +106,16 @@ class AppInputMixin:
             self.close_active_tab()
             return True
         if key == KEY_CTRL_PAGEUP:
-            self.switch_tab(-1)
+            if self.focused_results_are_scrollable():
+                self.scroll_results_page(-1)
+            else:
+                self.switch_tab(-1)
             return True
         if key == KEY_CTRL_PAGEDOWN:
-            self.switch_tab(1)
+            if self.focused_results_are_scrollable():
+                self.scroll_results_page(1)
+            else:
+                self.switch_tab(1)
             return True
         alt_digit = alt_digit_from_key(key)
         if alt_digit is not None:
@@ -128,6 +134,13 @@ class AppInputMixin:
             self.refresh_autocomplete_cache()
             return True
         return False
+
+    def focused_results_are_scrollable(self) -> bool:
+        if self.state.focus != FOCUS_RESULTS:
+            return False
+        if self.state.show_dbms_output and self.state.dbms_output:
+            return True
+        return bool(self.state.explain_result is not None or self.state.active_result is not None or self.state.results)
 
     def request_quit(self) -> None:
         if not self.confirm_quit():
@@ -539,6 +552,21 @@ class AppInputMixin:
                 self.scroll_result_grid_window(delta)
             return
         self.scroll_text_results_window(delta)
+
+    def scroll_results_page(self, direction: int) -> None:
+        if direction == 0:
+            return
+        if self.state.show_dbms_output and self.state.dbms_output:
+            _, result_h, _, _ = self.current_pane_sizes()
+            page = max(1, result_h - 1)
+        elif self.state.explain_result is not None:
+            page = max(1, self.state.explain_page_size)
+        elif self.state.active_result is not None:
+            page = max(1, self.state.result_page_size)
+        else:
+            _, result_h, _, _ = self.current_pane_sizes()
+            page = max(1, result_h - 1)
+        self.scroll_results_window(direction * page)
 
     def scroll_explain_window(self, delta: int) -> None:
         result = self.state.explain_result

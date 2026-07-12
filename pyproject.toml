@@ -82,11 +82,3 @@ module = [
     "plsqlwks.db.metadata",
 ]
 ignore_errors = true
-
-[tool.pytest.ini_options]
-markers = [
-    "integration: integration tests",
-    "oracle: requires a live Oracle database",
-    "pty: requires a compatible pseudo-terminal",
-    "slow: long-running tests",
-]

@@ -3562,7 +3562,7 @@ def test_editor_plain_page_keys_clear_selection():
     assert app.state.buffer.selection_range() is None
 
 
-def test_ctrl_page_shortcuts_still_switch_tabs():
+def test_ctrl_page_shortcuts_still_switch_tabs_outside_results_focus():
     app = object.__new__(App)
     app.state = UIState(
         config=make_config(),
@@ -3580,6 +3580,183 @@ def test_ctrl_page_shortcuts_still_switch_tabs():
 
     App.handle_key(app, KEY_CTRL_PAGEDOWN)
     assert app.state.active_tab_idx == 1
+
+    app.state.focus = FOCUS_BROWSER
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    assert app.state.active_tab_idx == 0
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    assert app.state.active_tab_idx == 1
+
+
+def test_ctrl_page_does_not_scroll_dbms_output_with_editor_focus():
+    app = object.__new__(App)
+    app.screen = FakeScreen(height=12, width=80)
+    output_tab = FileTab(
+        buffer=Buffer(title="output.sql"),
+        dbms_output=[f"line {idx}" for idx in range(8)],
+        show_dbms_output=True,
+    )
+    app.state = UIState(
+        config=make_config(),
+        db=object(),
+        tabs=[FileTab(buffer=Buffer(title="one.sql")), output_tab],
+        active_tab_idx=1,
+    )
+    app.state.focus = FOCUS_EDITOR
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+
+    assert app.state.active_tab_idx == 0
+    assert output_tab.dbms_output_scroll is None
+
+
+def test_ctrl_page_scrolls_dbms_output_by_page_from_tail_and_clamps():
+    app = object.__new__(App)
+    app.screen = FakeScreen(height=12, width=80)
+    app.state = UIState(
+        config=make_config(),
+        db=object(),
+        tabs=[FileTab(buffer=Buffer(title="one.sql")), FileTab(buffer=Buffer(title="output.sql"))],
+        active_tab_idx=1,
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.dbms_output = [f"line {idx}" for idx in range(8)]
+    app.state.show_dbms_output = True
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+
+    assert app.state.active_tab_idx == 1
+    assert app.state.active_tab.dbms_output_scroll == 2
+    assert app.state.status == "DBMS_OUTPUT: lines 3-5/8"
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    assert app.state.active_tab.dbms_output_scroll == 0
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    assert app.state.active_tab_idx == 1
+    assert app.state.active_tab.dbms_output_scroll == 5
+    assert app.state.status == "DBMS_OUTPUT: lines 6-8/8"
+
+
+def test_ctrl_page_scrolls_text_results_by_page_from_tail_and_clamps():
+    app = object.__new__(App)
+    app.screen = FakeScreen(height=12, width=80)
+    app.state = UIState(
+        config=make_config(),
+        db=object(),
+        tabs=[FileTab(buffer=Buffer(title="one.sql")), FileTab(buffer=Buffer(title="results.sql"))],
+        active_tab_idx=1,
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.results = [f"line {idx}" for idx in range(8)]
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+
+    assert app.state.active_tab_idx == 1
+    assert app.state.active_tab.results_scroll == 2
+    assert app.state.status == "Results: lines 3-5/8"
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    assert app.state.active_tab.results_scroll == 0
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    assert app.state.active_tab_idx == 1
+    assert app.state.active_tab.results_scroll == 5
+    assert app.state.status == "Results: lines 6-8/8"
+
+
+def test_ctrl_page_scrolls_explain_plan_by_page_and_clamps():
+    app = object.__new__(App)
+    app.screen = FakeScreen()
+    app.state = UIState(
+        config=make_config(),
+        db=object(),
+        tabs=[FileTab(buffer=Buffer(title="plan.sql")), FileTab(buffer=Buffer(title="other.sql"))],
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.explain_result = ExplainPlanResult("plan", sample_plan_steps(), "ok")
+    app.state.explain_page_size = 2
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+
+    assert app.state.active_tab_idx == 0
+    assert app.state.explain_scroll == 2
+    assert app.state.status == "Explain plan: lines 3-4/4"
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    assert app.state.explain_scroll == 2
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    assert app.state.active_tab_idx == 0
+    assert app.state.explain_scroll == 0
+
+
+def test_ctrl_page_scrolls_result_grid_by_page_and_keeps_selection_visible():
+    app = object.__new__(App)
+    app.screen = FakeScreen()
+    app.state = UIState(
+        config=make_config(),
+        db=object(),
+        tabs=[FileTab(buffer=Buffer(title="grid.sql")), FileTab(buffer=Buffer(title="other.sql"))],
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.active_result = QueryResult("data", ["A"], [[str(idx)] for idx in range(7)], "7 rows")
+    app.state.result_page_size = 2
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+
+    assert app.state.active_tab_idx == 0
+    assert (app.state.result_row_scroll, app.state.result_row) == (2, 2)
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    assert (app.state.result_row_scroll, app.state.result_row) == (5, 5)
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    assert app.state.active_tab_idx == 0
+    assert (app.state.result_row_scroll, app.state.result_row) == (3, 4)
+
+
+def test_ctrl_page_scrolls_result_detail_by_page_and_keeps_selection_visible():
+    app = object.__new__(App)
+    app.screen = FakeScreen()
+    app.state = UIState(
+        config=make_config(),
+        db=object(),
+        tabs=[FileTab(buffer=Buffer(title="detail.sql")), FileTab(buffer=Buffer(title="other.sql"))],
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.active_result = QueryResult(
+        "data",
+        ["A", "B", "C", "D", "E", "F", "G"],
+        [["1", "2", "3", "4", "5", "6", "7"]],
+        "1 row",
+    )
+    app.state.result_mode = RESULT_ROW_DETAIL
+    app.state.result_page_size = 2
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+
+    assert app.state.active_tab_idx == 0
+    assert (app.state.result_col_scroll, app.state.result_col) == (2, 2)
+
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    assert (app.state.result_col_scroll, app.state.result_col) == (5, 5)
+
+    App.handle_key(app, KEY_CTRL_PAGEUP)
+    assert app.state.active_tab_idx == 0
+    assert (app.state.result_col_scroll, app.state.result_col) == (3, 4)
 
 
 def test_ctrl_up_down_scrolls_editor_window_without_dirtying_buffer():

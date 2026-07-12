@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -15,6 +15,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 GITLAB_REPOSITORY_URL = "https://gitlab.com/unununu/plsqlwks"
 GITLAB_PREVIEW_URL = f"{GITLAB_REPOSITORY_URL}/-/raw/main/img/preview.png"
+SDIST_ONLY_FILES = {
+    "pytest.ini",
+    "rchar.py",
+    "requirements.txt",
+    "tests/conftest.py",
+    "tests/fixtures/config_exports.txt",
+    "tests/fixtures/ui_exports.txt",
+}
 
 
 def test_pyproject_declares_runtime_package_and_console_script():
@@ -134,6 +142,7 @@ def test_built_wheel_contains_runtime_package_only(tmp_path):
     assert not any(name.startswith("tools/") for name in names)
     assert not any(name.startswith("workspace/") for name in names)
     assert not any(name.startswith("vdb/") for name in names)
+    assert not SDIST_ONLY_FILES.intersection(names)
 
 
 @pytest.mark.integration
@@ -147,6 +156,19 @@ def test_built_sdist_contains_license_and_gitlab_metadata(tmp_path, monkeypatch)
 
     with tarfile.open(source_archive) as archive:
         names = archive.getnames()
+        archive_root = PurePosixPath(names[0]).parts[0]
+        archive_files = {
+            str(path.relative_to(archive_root))
+            for name in names
+            if len((path := PurePosixPath(name)).parts) > 1
+        }
+        top_level_python_files = {
+            path.name
+            for name in names
+            if len((path := PurePosixPath(name)).parts) == 2 and path.suffix == ".py"
+        }
+        assert SDIST_ONLY_FILES <= archive_files
+        assert top_level_python_files == {"rchar.py"}
         assert any(name.endswith("/README.md") for name in names)
         assert any(name.endswith("/pyproject.toml") for name in names)
         assert any(name.endswith("/license.txt") for name in names)

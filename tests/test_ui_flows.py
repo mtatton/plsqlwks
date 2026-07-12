@@ -68,6 +68,30 @@ def test_enter_results_focus_and_escape_back_to_editor():
     assert app.state.status == "Editor focus"
 
 
+def test_tab_focuses_text_results_without_a_table_result():
+    app = make_app()
+    app.state.results = ["diagnostic line"]
+
+    App.handle_key(app, ui.TAB)
+
+    assert app.state.active_result is None
+    assert app.state.focus == FOCUS_RESULTS
+    assert app.state.show_dbms_output is False
+
+
+def test_tab_focuses_visible_dbms_output_without_a_table_result():
+    app = make_app()
+    app.state.results = ["[Block] 2 dbms_output line(s)"]
+    app.state.dbms_output = ["first", "second"]
+    app.state.show_dbms_output = True
+
+    App.handle_key(app, ui.TAB)
+
+    assert app.state.active_result is None
+    assert app.state.focus == FOCUS_RESULTS
+    assert app.state.show_dbms_output is True
+
+
 def test_result_navigation_updates_selection_and_mode():
     app = make_app()
     app.state.active_result = QueryResult("data", ["A", "B"], [["1", "2"], ["3", "4"]], "2 rows")

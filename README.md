@@ -146,9 +146,9 @@ After a successful quit, plsqlwks records the open file-backed tabs, active tab,
 | `F8` | Toggle result grid / row-detail output |
 | `F9` | Show/focus/hide schema browser |
 | `F12` | Choose autocommit or manual transaction mode |
-| `Ctrl-Up` / `Ctrl-Down` | Scroll the focused pane or visible DBMS_OUTPUT |
+| `Ctrl-Up` / `Ctrl-Down` | Scroll the focused pane or visible DBMS_OUTPUT by one line |
 | `Ctrl-W` | Close current file tab |
-| `Ctrl-PageUp` / `Ctrl-PageDown` | Switch file tabs |
+| `Ctrl-PageUp` / `Ctrl-PageDown` | Scroll focused results by one page; otherwise switch file tabs |
 | `Alt-1`..`Alt-9` | Jump to visible file tab |
 | `Ctrl-Q` | Quit |
 | `Ctrl-C` while running | Interrupt the active database operation |
@@ -174,7 +174,7 @@ After a successful quit, plsqlwks records the open file-backed tabs, active tab,
 | `Delete` | Delete at the cursor |
 | `Ctrl-Backspace` / `Ctrl-Delete` | Delete the previous/next word |
 | `Enter` | Insert a new line |
-| `Tab` | Focus the result table |
+| `Tab` | Focus the results or DBMS_OUTPUT pane |
 | `Shift-Tab` | Autocomplete keywords, schema objects, and columns |
 | `F2` / `Ctrl-S` | Save buffer |
 | `F3` / `Ctrl-O` | Open file |
