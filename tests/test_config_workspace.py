@@ -26,7 +26,7 @@ def test_config_facade_export_contract_matches_pre_package_surface():
         .splitlines()
     )
 
-    assert len(expected_exports) == 54
+    assert len(expected_exports) == 56
     assert len(config_module.__all__) == len(expected_exports)
     assert set(config_module.__all__) == expected_exports
     assert all(hasattr(config_module, name) for name in expected_exports)
@@ -44,6 +44,8 @@ def test_config_facade_reexports_owning_module_symbols():
     assert config_module.resolve_password_file is config_paths.resolve_password_file
     assert config_module.read_password is config_paths.read_password
     assert config_module.EDITOR_COLOR_SECTION is settings.EDITOR_COLOR_SECTION
+    assert config_module.CSV_EXPORT_SECTION == "plugin.csv-export"
+    assert config_module.read_csv_export_settings is settings.read_csv_export_settings
     assert config_module.read_editor_colors is settings.read_editor_colors
     assert config_module.save_autocommit is settings.save_autocommit
     assert config_module.SESSION_TABS_SECTION is session.SESSION_TABS_SECTION
@@ -348,6 +350,61 @@ def test_app_config_rejects_noninteger_paging_values(tmp_path, field_name, value
         )
 
 
+@pytest.mark.parametrize("separator", ["", "||", 1, None])
+def test_app_config_rejects_invalid_csv_export_separator(tmp_path, separator):
+    with pytest.raises(ValueError, match="csv_export_separator must be exactly one character"):
+        AppConfig(
+            user="hr",
+            dsn="db",
+            password_file=tmp_path / "orapass",
+            workspace_dir=tmp_path / "workspace",
+            csv_export_separator=separator,
+        )
+
+
+def test_app_config_accepts_empty_csv_null_value_and_date_format(tmp_path):
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path / "workspace",
+        csv_export_null_value="",
+        csv_export_date_format="",
+    )
+
+    assert config.csv_export_null_value == ""
+    assert config.csv_export_date_format == ""
+
+
+def test_csv_settings_preserve_existing_app_config_positional_arguments(tmp_path):
+    session_tab = SessionTab(tmp_path / "query.sql", row=2, col=3)
+    config = AppConfig(
+        "hr",
+        "db",
+        tmp_path / "orapass",
+        tmp_path / "workspace",
+        50,
+        25,
+        tmp_path / "config.ini",
+        False,
+        True,
+        True,
+        (session_tab,),
+        0,
+        {"keyword": 6},
+        {"text": 7},
+        ("warning",),
+    )
+
+    assert config.session_tabs == (session_tab,)
+    assert config.editor_colors == {"keyword": 6}
+    assert config.explain_colors == {"text": 7}
+    assert config.startup_warnings == ("warning",)
+    assert config.csv_export_separator == ","
+    assert config.csv_export_null_value == "<NULL>"
+    assert config.csv_export_date_format == ""
+
+
 def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
@@ -358,6 +415,9 @@ def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch,
     assert config.autocommit is True
     assert config.read_only is False
     assert config.remember_bind_values is False
+    assert config.csv_export_separator == ","
+    assert config.csv_export_null_value == "<NULL>"
+    assert config.csv_export_date_format == ""
     assert config.session_tabs == ()
     assert config.active_session_tab == 0
 
@@ -412,6 +472,46 @@ def test_load_config_reads_remember_bind_values_from_workspace_config_ini(monkey
 
     config_file.write_text("[database]\nremember_bind_values = no\n", encoding="utf-8")
     assert load_config().remember_bind_values is False
+
+
+def test_load_config_reads_csv_export_settings_without_interpolation(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "config.ini").write_text(
+        "\n".join(
+            [
+                "[plugin.csv-export]",
+                "separator = |",
+                "null_value = ",
+                "date_format = %Y-%m-%d %H:%M:%S",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
+
+    config = load_config()
+
+    assert config.csv_export_separator == "|"
+    assert config.csv_export_null_value == ""
+    assert config.csv_export_date_format == "%Y-%m-%d %H:%M:%S"
+
+
+@pytest.mark.parametrize("separator", ["", "comma", "  "])
+def test_load_config_falls_back_to_comma_for_invalid_csv_separator(
+    monkeypatch,
+    tmp_path,
+    separator,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "config.ini").write_text(
+        f"[plugin.csv-export]\nseparator = {separator}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
+
+    assert load_config().csv_export_separator == ","
 
 
 def test_load_config_reads_editor_colors_from_workspace_config_ini(monkeypatch, tmp_path):

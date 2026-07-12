@@ -1,5 +1,6 @@
 APP_NAME
 AppConfig
+CSV_EXPORT_SECTION
 DEFAULT_DSN
 EDITOR_COLOR_KINDS
 EDITOR_COLOR_NAME_VALUES
@@ -32,6 +33,7 @@ platform_workspace_dir
 re
 read_autocommit
 read_color_section
+read_csv_export_settings
 read_editor_colors
 read_explain_colors
 read_ini

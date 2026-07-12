@@ -218,11 +218,15 @@ class AppInputMixin:
         self.transform_selection_sql_code_case(str.lower, "Lowercased selection")
 
     def open_commands_menu(self) -> None:
-        command = self.pick_command_menu(COMMAND_MENU_ITEMS)
+        commands = getattr(self, "command_menu_items", COMMAND_MENU_ITEMS)
+        command = self.pick_command_menu(commands)
         if command is None:
             self.state.status = "Command menu cancelled"
             return
         self.refresh_modal_background()
+        plugin_host = getattr(self, "_plugin_host", None)
+        if plugin_host is not None and plugin_host.execute(command.handler):
+            return
         getattr(self, command.handler)()
 
     def pick_command_menu(self, commands: tuple[CommandMenuItem, ...]) -> CommandMenuItem | None:

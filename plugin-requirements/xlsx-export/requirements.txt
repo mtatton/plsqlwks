@@ -1,0 +1,2 @@
+# Optional dependency for the built-in XLSX result export plugin.
+openpyxl>=3.1

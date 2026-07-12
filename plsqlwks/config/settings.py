@@ -12,6 +12,7 @@ EDITOR_COLOR_SECTION = "editor.colors"
 EDITOR_COLOR_KINDS = ("keyword", "string", "number", "comment", "bind", "operator")
 EXPLAIN_COLOR_SECTION = "explain.colors"
 EXPLAIN_COLOR_KINDS = ("connector", "operation", "object", "metrics", "text")
+CSV_EXPORT_SECTION = "plugin.csv-export"
 EDITOR_COLOR_NAME_VALUES = {
     "black": 0,
     "red": 1,
@@ -88,6 +89,22 @@ def read_remember_bind_values(parser: configparser.ConfigParser) -> bool:
         return parser.getboolean("database", "remember_bind_values", fallback=False)
     except ValueError:
         return False
+
+
+def read_csv_export_settings(parser: configparser.ConfigParser) -> tuple[str, str, str]:
+    """Read CSV plugin settings, tolerating an invalid separator in a user INI.
+
+    Empty null markers and date formats are intentional values. A separator is
+    useful only when it is one character, so malformed values fall back to the
+    standard comma instead of preventing application startup.
+    """
+
+    separator = parser.get(CSV_EXPORT_SECTION, "separator", fallback=",")
+    if len(separator) != 1:
+        separator = ","
+    null_value = parser.get(CSV_EXPORT_SECTION, "null_value", fallback="<NULL>")
+    date_format = parser.get(CSV_EXPORT_SECTION, "date_format", fallback="")
+    return separator, null_value, date_format
 
 
 def read_editor_colors(parser: configparser.ConfigParser) -> dict[str, int]:

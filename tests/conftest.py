@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 
 import pytest
 
@@ -14,6 +15,31 @@ class LongSpecialSqlCase:
     expected_statements: list[str]
     expected_ranges: list[tuple[int, int]]
     cursor_checks: list[tuple[int, int, int]]
+
+
+def _marker_is_positively_selected(markexpr: str, marker: str) -> bool:
+    """Return whether a marker occurs outside a negated expression."""
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[()]", markexpr)
+    group_negated = [False]
+    pending_not = False
+    for token in tokens:
+        if token == "not":
+            pending_not = not pending_not
+        elif token == "(":
+            group_negated.append(group_negated[-1] ^ pending_not)
+            pending_not = False
+        elif token == ")":
+            if len(group_negated) > 1:
+                group_negated.pop()
+            pending_not = False
+        elif token in {"and", "or"}:
+            pending_not = False
+        else:
+            negated = group_negated[-1] ^ pending_not
+            if token == marker and not negated:
+                return True
+            pending_not = False
+    return False
 
 
 @pytest.fixture
@@ -95,12 +121,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             run_oracle = True
     run_pty = os.environ.get("PLSQLWKS_TEST_PTY") == "1" or "pty" in markexpr
     run_slow = os.environ.get("PLSQLWKS_TEST_SLOW") == "1" or "slow" in markexpr
+    run_plugins = os.environ.get("PLSQLWKS_TEST_PLUGINS") == "1" or _marker_is_positively_selected(
+        markexpr, "plugin"
+    )
 
     selected: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     for item in items:
         if (
             ("oracle" in item.keywords and not oracle_explicit)
+            or ("plugin" in item.keywords and not run_plugins)
             or ("pty" in item.keywords and not run_pty)
             or ("slow" in item.keywords and not run_slow)
         ):

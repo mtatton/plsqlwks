@@ -6,17 +6,21 @@ from pathlib import Path
 
 from ..config import AppConfig, load_config
 from ..db import OracleWorkspace, workspace_health
+from ..plugins.csv_export import CsvExportOptions
+from ..plugins.loader import load_plugin_registry
 from ..workspace import ensure_workspace, list_workspace_files
-from .keys import configure_utf8_locale, disable_extended_keyboard_reporting, enable_extended_keyboard_reporting
-from .db_worker import DatabaseWorker
-from .state import UIState
-from .app_render import AppRenderMixin
 from .app_db import AppDbMixin
-from .app_input import AppInputMixin
-from .app_tabs_browser import AppTabsBrowserMixin
-from .app_results import AppResultsMixin
 from .app_editor import AppEditorMixin
 from .app_files import AppFilesMixin
+from .app_input import AppInputMixin
+from .app_results import AppResultsMixin
+from .app_render import AppRenderMixin
+from .app_tabs_browser import AppTabsBrowserMixin
+from .db_worker import DatabaseWorker
+from .keys import configure_utf8_locale, disable_extended_keyboard_reporting, enable_extended_keyboard_reporting
+from .plugin_host import PluginHost, UIPluginContext, snapshot_result
+from .state import UIState
+
 
 def main(argv: list[str] | None = None) -> None:
     configure_utf8_locale()
@@ -78,6 +82,17 @@ class App(
 ):
     def __init__(self, screen: curses.window, config: AppConfig):
         self.screen = screen
+        csv_export_options = CsvExportOptions(
+            separator=config.csv_export_separator,
+            null_value=config.csv_export_null_value,
+            date_format=config.csv_export_date_format,
+        )
+        self._plugin_host = PluginHost(
+            load_plugin_registry(csv_export_options=csv_export_options),
+            self._create_plugin_context,
+        )
+        self.command_menu_items = self._plugin_host.command_menu_items
+        self._plugin_startup_warnings = self._plugin_host.startup_warnings
         self.db_worker = DatabaseWorker(OracleWorkspace(config))
         self.state = UIState(config=config, db=self.db_worker.session_state)
         self.state.files = list_workspace_files(config)
@@ -86,6 +101,21 @@ class App(
         self.draw_offset_x = 0
         self.syntax_colors_enabled = False
         self.explain_color_kinds_enabled: set[str] = set()
+
+    def _create_plugin_context(self) -> UIPluginContext:
+        insert_draft = self.active_insert_draft() is not None
+        result_snapshot = None if insert_draft else snapshot_result(self.state.active_result)
+        return UIPluginContext(
+            self.state.config.results_dir,
+            result_snapshot=result_snapshot,
+            insert_draft=insert_draft,
+            prompt=lambda label, default, strip: self.prompt_text_box(label, default, strip),
+            set_status=lambda message: setattr(self.state, "status", message),
+            set_results=lambda lines, clear_table: self.set_results(
+                lines,
+                clear_table=clear_table,
+            ),
+        )
 
     def run(self) -> None:
         self.show_cursor()
@@ -105,7 +135,11 @@ class App(
             self.init_colors()
             self.restore_session_tabs()
             self.show_help(
-                [*self.state.config.startup_warnings, *workspace_health(self.state.config)],
+                [
+                    *self.state.config.startup_warnings,
+                    *getattr(self, "_plugin_startup_warnings", ()),
+                    *workspace_health(self.state.config),
+                ],
                 focus_results=False,
             )
             self.try_connect()

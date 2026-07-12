@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import oracledb
 
+from .. import exporting
 from ..sqlsplit import split_script, strip_leading_sql_comments
 from .models import (
     DBMS_OUTPUT_BUFFER_SIZE,
@@ -258,12 +259,7 @@ class ExecutionMixin:
         results.append(result)
 
     def export_result(self, result: QueryResult, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            if result.columns:
-                handle.write(",".join(csv_cell(col) for col in result.columns) + "\n")
-            for row in result.rows:
-                handle.write(",".join(csv_cell(cell) for cell in row) + "\n")
+        exporting.write_csv(path, result.columns, result.rows)
 
     def enable_dbms_output(self) -> None:
         if self.connection is None:
@@ -533,6 +529,4 @@ def materialize_result_rows(rows: list[Any]) -> tuple[list[list[str]], list[list
 
 
 def csv_cell(value: str) -> str:
-    if any(ch in value for ch in [",", '"', "\n", "\r"]):
-        return '"' + value.replace('"', '""') + '"'
-    return value
+    return exporting.csv_cell(value)

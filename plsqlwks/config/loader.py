@@ -8,6 +8,7 @@ from . import paths
 from .session import read_session_tabs
 from .settings import (
     read_autocommit,
+    read_csv_export_settings,
     read_editor_colors,
     read_explain_colors,
     read_ini,
@@ -39,6 +40,7 @@ def load_config(
     config_autocommit = read_autocommit(parser) if autocommit is None else autocommit
     config_read_only = read_read_only(parser) if read_only is None else read_only
     config_remember_bind_values = read_remember_bind_values(parser)
+    csv_export_separator, csv_export_null_value, csv_export_date_format = read_csv_export_settings(parser)
     session_tabs, active_session_tab = read_session_tabs(parser, workspace)
     return AppConfig(
         user=os.environ.get("ORACLE_USER", "hr"),
@@ -51,6 +53,9 @@ def load_config(
         autocommit=config_autocommit,
         read_only=config_read_only,
         remember_bind_values=config_remember_bind_values,
+        csv_export_separator=csv_export_separator,
+        csv_export_null_value=csv_export_null_value,
+        csv_export_date_format=csv_export_date_format,
         session_tabs=session_tabs,
         active_session_tab=active_session_tab,
         editor_colors=read_editor_colors(parser),

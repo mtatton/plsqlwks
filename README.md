@@ -64,11 +64,28 @@ python3 -m pytest -q
 python3 -m ruff check .
 ```
 
+Plugin API and built-in plugin tests are optional and are not part of the
+default core test run. Run them with either opt-in form:
+
+```bash
+PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q
+python3 -m pytest -q -m plugin
+```
+
+Each built-in plugin has an optional dependency manifest under
+`plugin-requirements/<plugin-id>/requirements.txt`. The CSV and HTML export
+plugins have no additional dependencies. XLSX export uses `openpyxl`, which is
+kept out of the PLSQLWKS runtime dependencies and can be installed with:
+
+```bash
+python3 -m pip install -r plugin-requirements/xlsx-export/requirements.txt
+```
+
 Oracle integration tests require the connection environment variables shown
 above and an accessible password file. Enable every test group with:
 
 ```bash
-PLSQLWKS_TEST_ORACLE=1 PLSQLWKS_TEST_PTY=1 PLSQLWKS_TEST_SLOW=1 \
+PLSQLWKS_TEST_ORACLE=1 PLSQLWKS_TEST_PLUGINS=1 PLSQLWKS_TEST_PTY=1 PLSQLWKS_TEST_SLOW=1 \
   python3 -m pytest -q -rs
 ```
 
@@ -276,6 +293,89 @@ bytes and include a truncation marker with the full size. Truncated LOB cells
 cannot be edited safely. Schema-browser DDL is always read in full.
 `F7` cycles a grid fullscreen view that starts with the table header on the first terminal line and uses the last line for data, an editor-only fullscreen view, and a split layout with 2/3 editor and 1/3 data grid.
 
+To export the active table, use one of these command paths:
+
+- `Alt-O -> Results -> Export loaded rows to CSV`
+- `Alt-O -> Results -> Export loaded rows to HTML`
+- `Alt-O -> Results -> Export loaded rows to XLSX`
+
+All three built-in Plugin API commands write the columns and exactly the rows
+currently loaded in the grid; they never fetch additional result pages.
+Relative names and the timestamped default name are resolved under the active
+workspace's `results/` directory; absolute paths are also accepted, and an
+existing file requires confirmation before replacement. Commit or cancel an
+active insert draft before exporting so its temporary row cannot be included.
+All three exports remain available in read-only mode because they do not
+execute SQL or change a transaction.
+
+The HTML command writes a standalone UTF-8 HTML5 document with a result title,
+loaded-row count, column headings, and table rows. Document titles, visible
+headings, column headers, and cell values are escaped as untrusted text. The
+document contains a static embedded stylesheet, no JavaScript, and no external
+resources. It reports when more rows are available in PLSQLWKS but does not
+fetch them, and it does not open a browser after export.
+
+The XLSX command writes one `Query result` worksheet with a header row and the
+currently loaded display rows. Every header and cell is stored explicitly as a
+string, including values beginning with `=`, `+`, `-`, or `@`; result text is
+therefore never interpreted as a spreadsheet formula. The workbook contains no
+macros, external links, or fetched continuation rows and is not opened after
+export. XLSX support is optional and requires `openpyxl>=3.1` from the plugin's
+requirements file shown above.
+
+The HTML plugin accepts three plugin-owned environment settings. They are
+captured when PLSQLWKS loads the plugin:
+
+```bash
+PLSQLWKS_HTML_EXPORT_NULL_VALUE="(null)"
+PLSQLWKS_HTML_EXPORT_THEME="dark"
+PLSQLWKS_HTML_EXPORT_DATE_FORMAT="%d.%m.%Y"
+```
+
+`PLSQLWKS_HTML_EXPORT_NULL_VALUE` replaces the exact `<NULL>` grid display
+token and may be empty. `PLSQLWKS_HTML_EXPORT_THEME` is `bright` (the default)
+or `dark`; both select only bundled static CSS, and printing uses a readable
+bright palette. `PLSQLWKS_HTML_EXPORT_DATE_FORMAT` is empty by default and
+otherwise uses Python `strftime` syntax with the same conservative ISO-display
+matching described for CSV below. These settings affect only generated HTML
+and do not expand Plugin API v1.
+
+The XLSX plugin has equivalent plugin-owned environment settings, captured when
+PLSQLWKS loads it:
+
+```bash
+PLSQLWKS_XLSX_EXPORT_NULL_VALUE="(null)"
+PLSQLWKS_XLSX_EXPORT_THEME="dark"
+PLSQLWKS_XLSX_EXPORT_DATE_FORMAT="%d.%m.%Y"
+```
+
+`PLSQLWKS_XLSX_EXPORT_NULL_VALUE` replaces the exact `<NULL>` display token and
+may be empty. `PLSQLWKS_XLSX_EXPORT_THEME` selects the bundled `bright`
+(default) or `dark` cell styles. `PLSQLWKS_XLSX_EXPORT_DATE_FORMAT` is empty by
+default and otherwise applies Python `strftime` directives to the same strict
+ISO-shaped display strings as CSV and HTML. Formatted values remain literal
+spreadsheet strings rather than formulas or typed Excel dates. These settings
+belong to the built-in XLSX plugin and do not expand Plugin API v1.
+
+The built-in exporter can be customized in the active `config.ini`:
+
+```ini
+[plugin.csv-export]
+separator = ,
+null_value = <NULL>
+date_format =
+```
+
+`separator` must be one character and defaults to a comma. `null_value`
+replaces the exact `<NULL>` display value and may be empty. `date_format`
+defaults to empty, which preserves displayed date values. When set, it uses
+Python `strftime` syntax and formats only calendar-valid, full-string ISO
+display values shaped as `YYYY-MM-DD` or
+`YYYY-MM-DD HH:MM:SS[.digits][+/-HH:MM]`, with one to six fractional digits;
+other text is exported unchanged. This deliberately strict heuristic cannot
+identify non-ISO or otherwise preformatted database date text, while matching
+text-column values are indistinguishable from dates and are formatted too.
+
 ### Schema Browser
 
 The `F9` schema browser groups tables, views, procedures, functions, packages, triggers, sequences, indexes, and private synonyms from the current schema. Type while the browser is focused to filter object names with a case-insensitive substring match; groups without matches are hidden and matching groups expand automatically without changing their saved expansion state.
@@ -321,8 +421,65 @@ currently be loaded from it.
 workspace/
   sql/       saved SQL files
   plsql/     saved PL/SQL files
-  results/   reserved output directory
+  results/   CSV, HTML, XLSX, and other result output
 ```
 
-The first launch creates the workspace folders and starter SQL/PLSQL files. The
-terminal UI does not currently provide a query-export command.
+The first launch creates the workspace folders and starter SQL/PLSQL files.
+
+## Plugin API
+
+Plugin API version 1 is a deliberately small, command-only extension point.
+See [PLUGINS.md](PLUGINS.md) for the focused plugin author and testing guide.
+PLSQLWKS uses that same API for its built-in loaded-row CSV, HTML, and XLSX
+exporters; adding formats requires no direct App integration or public API
+expansion.
+Installed Python packages can add commands to the `Alt-O` menu through the
+standard `plsqlwks.plugins` entry-point group:
+
+```toml
+[project.entry-points."plsqlwks.plugins"]
+example = "example_package.plugin:create_plugin"
+```
+
+A minimal plugin factory is:
+
+```python
+from plsqlwks.plugins import Plugin, PluginCommand, PluginContext
+
+
+def show_loaded_count(context: PluginContext) -> None:
+    result = context.get_active_result()
+    count = len(result.rows) if result is not None else 0
+    context.set_status(f"{count} row(s) are currently loaded")
+
+
+def create_plugin() -> Plugin:
+    return Plugin(
+        id="example",
+        name="Example commands",
+        commands=(
+            PluginCommand(
+                id="show-loaded-count",
+                section="Results",
+                title="Show loaded row count",
+                handler=show_loaded_count,
+            ),
+        ),
+    )
+```
+
+The entry point must resolve to a zero-argument callable returning `Plugin`.
+Handlers receive only `PluginContext`: it provides an immutable snapshot of the
+active tabular result, the results directory, insert-draft detection, text and
+overwrite prompts, status updates, and UI error reporting. API v1 does not
+provide database execution, mutable results, the application or UI state,
+keyboard registration, drawing, events, lifecycle hooks, background jobs,
+settings schemas, hot reload, or workspace-local executable plugins.
+
+The `[plugin.csv-export]` section and the documented HTML/XLSX environment
+variables configure only their corresponding PLSQLWKS-supplied plugins. Plugin
+API v1 does not provide a generic settings schema or pass these values to
+installed third-party plugins.
+
+Installed plugins are trusted, in-process Python code. They are not sandboxed;
+install plugins only from sources you trust.

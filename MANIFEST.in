@@ -1,6 +1,8 @@
 include pytest.ini
+include PLUGINS.md
 include rchar.py
 include requirements.txt
+recursive-include plugin-requirements requirements.txt
 include tests/conftest.py
 include tests/fixtures/config_exports.txt
 include tests/fixtures/ui_exports.txt

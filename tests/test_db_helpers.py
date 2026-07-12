@@ -8,6 +8,7 @@ import pytest
 
 import plsqlwks.db as db_module
 import plsqlwks.db.execution as execution_module
+import plsqlwks.exporting as exporting_module
 from plsqlwks.config import AppConfig
 from plsqlwks.db import (
     DBMS_OUTPUT_FETCH_LINES,
@@ -158,6 +159,19 @@ def test_csv_cell_quotes_commas_quotes_and_newlines():
     assert csv_cell("a\nb") == '"a\nb"'
 
 
+def test_csv_cell_delegates_to_shared_csv_encoder(monkeypatch):
+    calls: list[str] = []
+
+    def fake_csv_cell(value: str) -> str:
+        calls.append(value)
+        return "encoded"
+
+    monkeypatch.setattr(exporting_module, "csv_cell", fake_csv_cell)
+
+    assert csv_cell("value") == "encoded"
+    assert calls == ["value"]
+
+
 def test_export_result_writes_utf8_csv(tmp_path):
     workspace = OracleWorkspace(make_config(tmp_path))
     result = QueryResult("data", ["NAME", "NOTE"], [["kůň", 'a,b "quoted"'], ["NULL", "line\nbreak"]], "2 rows")
@@ -166,6 +180,22 @@ def test_export_result_writes_utf8_csv(tmp_path):
     workspace.export_result(result, path)
 
     assert path.read_text(encoding="utf-8") == 'NAME,NOTE\nkůň,"a,b ""quoted"""\nNULL,"line\nbreak"\n'
+
+
+def test_export_result_delegates_to_shared_csv_writer(monkeypatch, tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    result = QueryResult("data", ["NAME"], [["kůň"]], "1 row")
+    path = tmp_path / "results" / "out.csv"
+    calls: list[tuple[Path, object, object]] = []
+
+    def fake_write_csv(destination, columns, rows):
+        calls.append((destination, columns, rows))
+
+    monkeypatch.setattr(exporting_module, "write_csv", fake_write_csv)
+
+    workspace.export_result(result, path)
+
+    assert calls == [(path, result.columns, result.rows)]
 
 
 def test_execute_script_uses_statement_titles_and_empty_script_message(tmp_path):
