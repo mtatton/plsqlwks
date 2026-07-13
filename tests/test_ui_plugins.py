@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import curses
 from dataclasses import replace
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 import zipfile
@@ -113,6 +115,79 @@ def test_context_returns_an_immutable_copy_of_the_loaded_result(tmp_path):
     assert snapshot.columns == ("A", "B")
     assert snapshot.rows == (("one", "two"),)
     assert snapshot.has_more is True
+
+
+def test_snapshot_copies_only_aligned_numeric_source_values():
+    result = QueryResult(
+        "Current statement",
+        ["DECIMAL", "INTEGER", "FLOAT", "TEXT", "DATE", "BOOL", "FORMULA", "NULL"],
+        [["10.50", "42", "1.25", "007", "2026-07-13 10:30:00", "True", "=1+1", "<NULL>"]],
+        "1 row",
+        original_rows=[
+            [
+                Decimal("10.50"),
+                42,
+                1.25,
+                "007",
+                datetime(2026, 7, 13, 10, 30),
+                True,
+                "=1+1",
+                None,
+            ]
+        ],
+    )
+
+    snapshot = snapshot_result(result)
+
+    assert snapshot is not None
+    assert snapshot.numeric_values == (
+        (Decimal("10.50"), 42, 1.25, None, None, None, None, None),
+    )
+    assert isinstance(snapshot.numeric_values, tuple)
+    assert isinstance(snapshot.numeric_values[0], tuple)
+
+    result.original_rows[0][0] = Decimal("99")
+    result.rows[0][0] = "99"
+    assert snapshot.numeric_values[0][0] == Decimal("10.50")
+    assert snapshot.rows[0][0] == "10.50"
+
+
+@pytest.mark.parametrize(
+    "original_rows",
+    [
+        [],
+        [[Decimal("1")]],
+        [[Decimal("1"), 2], [Decimal("3"), 4]],
+    ],
+)
+def test_snapshot_discards_misaligned_numeric_source_rows(original_rows):
+    result = QueryResult(
+        "Current statement",
+        ["A", "B"],
+        [["1", "2"]],
+        "1 row",
+        original_rows=original_rows,
+    )
+
+    snapshot = snapshot_result(result)
+
+    assert snapshot is not None
+    assert snapshot.numeric_values == ()
+
+
+def test_snapshot_discards_numeric_source_value_that_does_not_match_display():
+    result = QueryResult(
+        "Current statement",
+        ["A", "B"],
+        [["1", "2"]],
+        "1 row",
+        original_rows=[[Decimal("9"), 2]],
+    )
+
+    snapshot = snapshot_result(result)
+
+    assert snapshot is not None
+    assert snapshot.numeric_values == ((None, 2),)
 
 
 def test_context_captures_insert_draft_without_a_result(tmp_path):
@@ -579,7 +654,7 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
         ),
         ("Plugin warning",),
     )
-    loaded_options: list[CsvExportOptions | None] = []
+    loaded_options: list[dict[str, object]] = []
 
     class FakeWorker:
         def __init__(self, workspace: object) -> None:
@@ -587,8 +662,8 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
 
     monkeypatch.setattr(app_module, "OracleWorkspace", lambda config: object())
     monkeypatch.setattr(app_module, "DatabaseWorker", FakeWorker)
-    def load_registry(*, csv_export_options=None):
-        loaded_options.append(csv_export_options)
+    def load_registry(**options):
+        loaded_options.append(options)
         return registry
 
     monkeypatch.setattr(app_module, "load_plugin_registry", load_registry)
@@ -599,6 +674,9 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
         csv_export_separator=";",
         csv_export_null_value="NULL",
         csv_export_date_format="%d.%m.%Y",
+        csv_export_enabled=False,
+        html_export_enabled=True,
+        xlsx_export_enabled=False,
     )
     app = App(FakeScreen(), config)
 
@@ -610,15 +688,50 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
     ]
     assert app._plugin_startup_warnings == ("Plugin warning",)
     assert loaded_options == [
-        CsvExportOptions(
-            separator=";",
-            null_value="NULL",
-            date_format="%d.%m.%Y",
-        )
+        {
+            "csv_export_options": CsvExportOptions(
+                separator=";",
+                null_value="NULL",
+                date_format="%d.%m.%Y",
+            ),
+            "csv_export_enabled": False,
+            "html_export_enabled": True,
+            "xlsx_export_enabled": False,
+        }
     ]
 
 
-def test_app_configures_the_builtin_csv_handler(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("config_changes", "expected_titles"),
+    (
+        (
+            {"csv_export_enabled": False},
+            ["Export loaded rows to HTML", "Export loaded rows to XLSX"],
+        ),
+        (
+            {"html_export_enabled": False},
+            ["Export loaded rows to CSV", "Export loaded rows to XLSX"],
+        ),
+        (
+            {"xlsx_export_enabled": False},
+            ["Export loaded rows to CSV", "Export loaded rows to HTML"],
+        ),
+        (
+            {
+                "csv_export_enabled": False,
+                "html_export_enabled": False,
+                "xlsx_export_enabled": False,
+            },
+            [],
+        ),
+    ),
+)
+def test_app_command_menu_exposes_only_enabled_builtin_exporters(
+    monkeypatch,
+    tmp_path,
+    config_changes,
+    expected_titles,
+):
     class FakeWorker:
         def __init__(self, workspace: object) -> None:
             self.session_state = object()
@@ -631,12 +744,48 @@ def test_app_configures_the_builtin_csv_handler(monkeypatch, tmp_path):
         lambda **kwargs: load_plugin_registry(entry_points=(), **kwargs),
     )
     monkeypatch.setattr(app_module, "list_workspace_files", lambda config: [])
-    config = replace(
-        make_config(tmp_path),
-        csv_export_separator=";",
-        csv_export_null_value="NULL",
-        csv_export_date_format="%d.%m.%Y",
+
+    app = App(FakeScreen(), replace(make_config(tmp_path), **config_changes))
+
+    assert [
+        command.title for command in app.command_menu_items[len(COMMAND_MENU_ITEMS) :]
+    ] == expected_titles
+
+
+@pytest.mark.parametrize(
+    ("config_changes", "expected"),
+    (
+        ({}, "MISSING,CREATED\n,2026-07-12\n"),
+        (
+            {
+                "csv_export_separator": ";",
+                "csv_export_null_value": "NULL",
+                "csv_export_date_format": "%d.%m.%Y",
+            },
+            "MISSING;CREATED\nNULL;12.07.2026\n",
+        ),
+    ),
+    ids=("defaults", "configured"),
+)
+def test_app_configures_the_builtin_csv_handler(
+    monkeypatch,
+    tmp_path,
+    config_changes,
+    expected,
+):
+    class FakeWorker:
+        def __init__(self, workspace: object) -> None:
+            self.session_state = object()
+
+    monkeypatch.setattr(app_module, "OracleWorkspace", lambda config: object())
+    monkeypatch.setattr(app_module, "DatabaseWorker", FakeWorker)
+    monkeypatch.setattr(
+        app_module,
+        "load_plugin_registry",
+        lambda **kwargs: load_plugin_registry(entry_points=(), **kwargs),
     )
+    monkeypatch.setattr(app_module, "list_workspace_files", lambda config: [])
+    config = replace(make_config(tmp_path), **config_changes)
     app = App(FakeScreen(), config)
     destination = config.results_dir / "configured.csv"
     app.state.active_result = QueryResult(
@@ -655,9 +804,7 @@ def test_app_configures_the_builtin_csv_handler(monkeypatch, tmp_path):
     )
     assert app._plugin_host.execute(csv_command.handler) is True
 
-    assert destination.read_text(encoding="utf-8") == (
-        "MISSING;CREATED\nNULL;12.07.2026\n"
-    )
+    assert destination.read_text(encoding="utf-8") == expected
 
 
 def test_app_context_factory_checks_draft_before_snapshot(monkeypatch, tmp_path):

@@ -305,23 +305,51 @@ Relative names and the timestamped default name are resolved under the active
 workspace's `results/` directory; absolute paths are also accepted, and an
 existing file requires confirmation before replacement. Commit or cancel an
 active insert draft before exporting so its temporary row cannot be included.
-All three exports remain available in read-only mode because they do not
+Each enabled export remains available in read-only mode because it does not
 execute SQL or change a transaction.
 
-The HTML command writes a standalone UTF-8 HTML5 document with a result title,
-loaded-row count, column headings, and table rows. Document titles, visible
-headings, column headers, and cell values are escaped as untrusted text. The
-document contains a static embedded stylesheet, no JavaScript, and no external
-resources. It reports when more rows are available in PLSQLWKS but does not
-fetch them, and it does not open a browser after export.
+The bundled exporters can be enabled independently in the active `config.ini`:
+
+```ini
+[plugin.csv-export]
+enabled = yes
+
+[plugin.html-export]
+enabled = yes
+
+[plugin.xlsx-export]
+enabled = yes
+```
+
+Set an exporter's `enabled` value to `no` to omit its command from the
+**Results** menu. A missing or malformed value defaults to enabled so existing
+configurations keep all three commands. These switches affect only the bundled
+exporters, not installed entry-point plugins, and take effect after restarting
+PLSQLWKS.
+
+The HTML command writes a standalone UTF-8 HTML5 document with column headings
+and table rows, followed by the loaded-row count and any additional-row notice.
+The result title is used only as browser-tab document metadata, not as a visible
+heading. Document titles, column headers, and cell values are escaped as
+untrusted text. The document contains a static embedded stylesheet, no
+JavaScript, and no external resources. It reports when more rows are available
+in PLSQLWKS but does not fetch them, and it does not open a browser after export.
 
 The XLSX command writes one `Query result` worksheet with a header row and the
-currently loaded display rows. Every header and cell is stored explicitly as a
-string, including values beginning with `=`, `+`, `-`, or `@`; result text is
-therefore never interpreted as a spreadsheet formula. The workbook contains no
-macros, external links, or fetched continuation rows and is not opened after
-export. XLSX support is optional and requires `openpyxl>=3.1` from the plugin's
-requirements file shown above.
+currently loaded display rows. Genuine source numbers become native Excel
+numeric cells when they fit Excel's range and 15-significant-digit precision;
+fixed-point scale such as `10.50` is preserved. Numeric-looking character data
+and unsafe-precision numbers remain exact text and can still receive Excel's
+number-as-text warning. Headers and other values, including text beginning with
+`=`, `+`, `-`, or `@`, remain literal strings and are never interpreted as
+spreadsheet formulas. The workbook contains no macros, external links, or
+fetched continuation rows and is not opened after export. XLSX support is
+optional and requires `openpyxl>=3.1` from the plugin's requirements file shown
+above. Each column uses the larger of its bold column name or widest data value,
+estimated with Calibri 11-compatible proportional glyph widths, clamped from 3
+through 60 units, and given a 17-pixel fit margin. Wrapping remains based on
+logical visual length: values over 60 visual units or containing explicit line
+breaks are wrapped.
 
 The HTML plugin accepts three plugin-owned environment settings. They are
 captured when PLSQLWKS loads the plugin:
@@ -333,8 +361,9 @@ PLSQLWKS_HTML_EXPORT_DATE_FORMAT="%d.%m.%Y"
 ```
 
 `PLSQLWKS_HTML_EXPORT_NULL_VALUE` replaces the exact `<NULL>` grid display
-token and may be empty. `PLSQLWKS_HTML_EXPORT_THEME` is `bright` (the default)
-or `dark`; both select only bundled static CSS, and printing uses a readable
+token and defaults to empty; set it to `<NULL>` or another marker to keep NULL
+values visible. `PLSQLWKS_HTML_EXPORT_THEME` is `bright` (the default) or
+`dark`; both select only bundled static CSS, and printing uses a readable
 bright palette. `PLSQLWKS_HTML_EXPORT_DATE_FORMAT` is empty by default and
 otherwise uses Python `strftime` syntax with the same conservative ISO-display
 matching described for CSV below. These settings affect only generated HTML
@@ -347,30 +376,47 @@ PLSQLWKS loads it:
 PLSQLWKS_XLSX_EXPORT_NULL_VALUE="(null)"
 PLSQLWKS_XLSX_EXPORT_THEME="dark"
 PLSQLWKS_XLSX_EXPORT_DATE_FORMAT="%d.%m.%Y"
+PLSQLWKS_XLSX_EXPORT_AUTO_FILTER="no"
+PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH="no"
 ```
 
 `PLSQLWKS_XLSX_EXPORT_NULL_VALUE` replaces the exact `<NULL>` display token and
-may be empty. `PLSQLWKS_XLSX_EXPORT_THEME` selects the bundled `bright`
-(default) or `dark` cell styles. `PLSQLWKS_XLSX_EXPORT_DATE_FORMAT` is empty by
-default and otherwise applies Python `strftime` directives to the same strict
-ISO-shaped display strings as CSV and HTML. Formatted values remain literal
-spreadsheet strings rather than formulas or typed Excel dates. These settings
-belong to the built-in XLSX plugin and do not expand Plugin API v1.
+defaults to empty; set it to `<NULL>` or another marker to keep NULL values
+visible. `PLSQLWKS_XLSX_EXPORT_THEME` selects the bundled `bright` (default) or
+`dark` cell styles. `PLSQLWKS_XLSX_EXPORT_DATE_FORMAT` is empty by default and
+otherwise applies Python `strftime` directives to the same strict ISO-shaped
+display strings as CSV and HTML. Formatted date and text values remain literal
+spreadsheet strings rather than formulas or typed Excel dates. The
+`PLSQLWKS_XLSX_EXPORT_AUTO_FILTER` setting enables Excel's column filter
+controls by default. It accepts case-insensitive, whitespace-tolerant `1`,
+`yes`, `true`, or `on` to enable them and `0`, `no`, `false`, or `off` to
+disable them; an unset or malformed value falls back to enabled. When enabled,
+the filter range spans exactly the header and currently loaded rows, without
+applying filter criteria or initially hiding any rows.
+`PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH` controls proportional sizing from the widest
+header or loaded data value and uses the same boolean syntax. When filtering is
+enabled, the header candidate includes three extra character units for the filter
+dropdown. Auto-width defaults to enabled; disabling it leaves Excel's default
+column widths while preserving the existing multiline and over-60-unit cell
+wrapping. These settings belong to the built-in XLSX plugin and do not expand
+Plugin API v1.
 
-The built-in exporter can be customized in the active `config.ini`:
+The built-in CSV export formatting can also be customized in the active
+`config.ini`:
 
 ```ini
 [plugin.csv-export]
 separator = ,
-null_value = <NULL>
+null_value =
 date_format =
 ```
 
 `separator` must be one character and defaults to a comma. `null_value`
-replaces the exact `<NULL>` display value and may be empty. `date_format`
-defaults to empty, which preserves displayed date values. When set, it uses
-Python `strftime` syntax and formats only calendar-valid, full-string ISO
-display values shaped as `YYYY-MM-DD` or
+defaults to empty, replacing the exact `<NULL>` display value with an empty CSV
+field. Set it to `<NULL>` or another marker to retain a visible value.
+`date_format` defaults to empty, which preserves displayed date values. When
+set, it uses Python `strftime` syntax and formats only calendar-valid,
+full-string ISO display values shaped as `YYYY-MM-DD` or
 `YYYY-MM-DD HH:MM:SS[.digits][+/-HH:MM]`, with one to six fractional digits;
 other text is exported unchanged. This deliberately strict heuristic cannot
 identify non-ISO or otherwise preformatted database date text, while matching

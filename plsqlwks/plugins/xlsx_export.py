@@ -1,9 +1,11 @@
-"""Built-in Plugin API v1 command for literal-string XLSX result export.
+"""Built-in Plugin API v1 command for type-aware XLSX result export.
 
 The command uses only the immutable result snapshot and UI-mediated operations
-from :class:`PluginContext`.  Workbook support is loaded lazily by the neutral
-writer, so the optional ``openpyxl`` dependency is unnecessary for core
-PLSQLWKS startup and for plugins that do not export XLSX files.
+from :class:`PluginContext`.  Source-number hints let the neutral writer create
+precision-safe Excel numbers without guessing from display text; every other
+value remains a formula-safe literal string.  Workbook support is loaded lazily,
+so the optional ``openpyxl`` dependency is unnecessary for core PLSQLWKS
+startup and for plugins that do not export XLSX files.
 """
 
 from __future__ import annotations
@@ -29,18 +31,39 @@ class XlsxExportOptions:
 
     ``null_value`` replaces the exact ``<NULL>`` display sentinel,
     ``date_format`` formats strict ISO-shaped display values with ``strftime``,
-    and ``theme`` selects bundled static cell styles.  These settings do not
+    ``theme`` selects bundled static cell styles, and ``auto_filter`` controls
+    whether Excel filtering is enabled for the exported table.  ``auto_width``
+    controls deterministic content-based column sizing.  These settings do not
     expand the public Plugin API.
     """
 
-    null_value: str = "<NULL>"
+    null_value: str = ""
     theme: str = "bright"
     date_format: str = ""
+    auto_filter: bool = True
+    auto_width: bool = True
 
 
 _NULL_VALUE_ENV = "PLSQLWKS_XLSX_EXPORT_NULL_VALUE"
 _THEME_ENV = "PLSQLWKS_XLSX_EXPORT_THEME"
 _DATE_FORMAT_ENV = "PLSQLWKS_XLSX_EXPORT_DATE_FORMAT"
+_AUTO_FILTER_ENV = "PLSQLWKS_XLSX_EXPORT_AUTO_FILTER"
+_AUTO_WIDTH_ENV = "PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH"
+_TRUE_ENV_VALUES = frozenset(("1", "yes", "true", "on"))
+_FALSE_ENV_VALUES = frozenset(("0", "no", "false", "off"))
+
+
+def _environment_boolean(name: str, default: bool) -> bool:
+    """Return a recognized environment boolean or ``default``."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+    return default
 
 
 def _environment_options() -> XlsxExportOptions:
@@ -50,6 +73,14 @@ def _environment_options() -> XlsxExportOptions:
         null_value=os.environ.get(_NULL_VALUE_ENV, defaults.null_value),
         theme=os.environ.get(_THEME_ENV, defaults.theme),
         date_format=os.environ.get(_DATE_FORMAT_ENV, defaults.date_format),
+        auto_filter=_environment_boolean(
+            _AUTO_FILTER_ENV,
+            defaults.auto_filter,
+        ),
+        auto_width=_environment_boolean(
+            _AUTO_WIDTH_ENV,
+            defaults.auto_width,
+        ),
     )
 
 
@@ -76,7 +107,10 @@ def export_loaded_rows_to_xlsx(
                 null_value=options.null_value,
                 date_format=options.date_format,
             ),
+            numeric_values=snapshot.numeric_values,
             theme=options.theme,
+            auto_filter=options.auto_filter,
+            auto_width=options.auto_width,
         )
     except Exception as error:
         context.set_status(f"XLSX export failed: {short_error(error)}")

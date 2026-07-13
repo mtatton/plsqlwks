@@ -5,7 +5,7 @@ from pathlib import Path
 import os
 import tempfile
 
-from .models import AppConfig
+from .models import AppConfig, _CSV_EXPORT_DEFAULT_NULL_VALUE
 
 
 EDITOR_COLOR_SECTION = "editor.colors"
@@ -13,6 +13,8 @@ EDITOR_COLOR_KINDS = ("keyword", "string", "number", "comment", "bind", "operato
 EXPLAIN_COLOR_SECTION = "explain.colors"
 EXPLAIN_COLOR_KINDS = ("connector", "operation", "object", "metrics", "text")
 CSV_EXPORT_SECTION = "plugin.csv-export"
+HTML_EXPORT_SECTION = "plugin.html-export"
+XLSX_EXPORT_SECTION = "plugin.xlsx-export"
 EDITOR_COLOR_NAME_VALUES = {
     "black": 0,
     "red": 1,
@@ -102,9 +104,22 @@ def read_csv_export_settings(parser: configparser.ConfigParser) -> tuple[str, st
     separator = parser.get(CSV_EXPORT_SECTION, "separator", fallback=",")
     if len(separator) != 1:
         separator = ","
-    null_value = parser.get(CSV_EXPORT_SECTION, "null_value", fallback="<NULL>")
+    null_value = parser.get(
+        CSV_EXPORT_SECTION,
+        "null_value",
+        fallback=_CSV_EXPORT_DEFAULT_NULL_VALUE,
+    )
     date_format = parser.get(CSV_EXPORT_SECTION, "date_format", fallback="")
     return separator, null_value, date_format
+
+
+def read_plugin_enabled(parser: configparser.ConfigParser, section: str) -> bool:
+    """Return whether a plugin is enabled, defaulting safely to enabled."""
+
+    try:
+        return parser.getboolean(section, "enabled", fallback=True)
+    except ValueError:
+        return True
 
 
 def read_editor_colors(parser: configparser.ConfigParser) -> dict[str, int]:

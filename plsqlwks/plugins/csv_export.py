@@ -24,7 +24,7 @@ from ._result_export import (
 from .api import Plugin, PluginCommand, PluginContext
 
 
-_NULL_DISPLAY_VALUE = "<NULL>"
+_NULL_DISPLAY_VALUE = ""
 
 
 @dataclass(frozen=True)
@@ -32,9 +32,10 @@ class CsvExportOptions:
     """Formatting choices owned by the built-in CSV plugin.
 
     These options intentionally are not part of Plugin API v1.  The defaults
-    retain the result grid's comma-separated, ``<NULL>``, ISO-display output.
-    ``date_format`` uses :meth:`datetime.strftime` syntax; an empty format
-    leaves date and timestamp display strings unchanged.
+    use comma-separated output, write the result grid's ``<NULL>`` sentinel as
+    an empty CSV field, and preserve ISO-display values.  ``date_format`` uses
+    :meth:`datetime.strftime` syntax; an empty format leaves date and timestamp
+    display strings unchanged.
     """
 
     separator: str = ","

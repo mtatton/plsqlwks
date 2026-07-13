@@ -6,6 +6,7 @@ from typing import Any, Callable
 import pytest
 
 import plsqlwks.plugins as public_plugins
+import plsqlwks.plugins.loader as loader_module
 from plsqlwks.plugins import (
     PLUGIN_API_VERSION,
     PLUGIN_ENTRY_POINT_GROUP,
@@ -82,6 +83,15 @@ def test_public_plugin_api_exports_only_supported_names():
     assert PluginHandler is not None
 
     snapshot = ResultSnapshot("Result", ("ID",), (("1",),), False)
+    assert snapshot.numeric_values == ()
+    assert ResultSnapshot.__match_args__ == (
+        "title",
+        "columns",
+        "rows",
+        "has_more",
+    )
+    with pytest.raises(TypeError):
+        ResultSnapshot("Result", ("ID",), (("1",),), False, ((1,),))  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         snapshot.title = "Changed"  # type: ignore[misc]
 
@@ -134,6 +144,45 @@ def test_external_entry_point_factories_load_in_deterministic_order():
         "alpha-b",
         "zeta",
     ]
+
+
+@pytest.mark.parametrize(
+    ("disabled_option", "expected_ids"),
+    (
+        ("csv_export_enabled", ["html-export", "xlsx-export"]),
+        ("html_export_enabled", ["csv-export", "xlsx-export"]),
+        ("xlsx_export_enabled", ["csv-export", "html-export"]),
+    ),
+)
+def test_builtin_export_plugins_can_be_disabled_independently(
+    disabled_option,
+    expected_ids,
+):
+    registry = load_plugin_registry(entry_points=(), **{disabled_option: False})
+
+    assert [plugin.id for plugin in registry.plugins] == expected_ids
+    assert registry.warnings == ()
+
+
+def test_all_disabled_builtins_are_not_invoked_and_external_plugins_still_load(
+    monkeypatch,
+):
+    def fail_factory(*args, **kwargs):
+        pytest.fail("disabled built-in factory was invoked")
+
+    monkeypatch.setattr(loader_module, "create_csv_export_plugin", fail_factory)
+    monkeypatch.setattr(loader_module, "create_html_export_plugin", fail_factory)
+    monkeypatch.setattr(loader_module, "create_xlsx_export_plugin", fail_factory)
+
+    registry = load_plugin_registry(
+        entry_points=(_entry_point("external", _plugin("external")),),
+        csv_export_enabled=False,
+        html_export_enabled=False,
+        xlsx_export_enabled=False,
+    )
+
+    assert [plugin.id for plugin in registry.plugins] == ["external"]
+    assert registry.warnings == ()
 
 
 @pytest.mark.parametrize(
@@ -246,7 +295,7 @@ def test_invalid_builtin_plugin_fails_fast():
         load_plugin_registry(builtin_factories=(invalid_factory,), entry_points=())
 
 
-def test_explicit_builtin_factories_do_not_receive_csv_specific_options():
+def test_explicit_builtin_factories_ignore_default_builtin_options():
     def explicit_factory() -> Plugin:
         return _plugin("explicit")
 
@@ -254,6 +303,9 @@ def test_explicit_builtin_factories_do_not_receive_csv_specific_options():
         builtin_factories=(explicit_factory,),
         entry_points=(),
         csv_export_options=CsvExportOptions(separator=";"),
+        csv_export_enabled=False,
+        html_export_enabled=False,
+        xlsx_export_enabled=False,
     )
 
     assert [plugin.id for plugin in registry.plugins] == ["explicit"]

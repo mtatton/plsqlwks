@@ -7,6 +7,9 @@ from .models import AppConfig
 from . import paths
 from .session import read_session_tabs
 from .settings import (
+    CSV_EXPORT_SECTION,
+    HTML_EXPORT_SECTION,
+    XLSX_EXPORT_SECTION,
     read_autocommit,
     read_csv_export_settings,
     read_editor_colors,
@@ -14,6 +17,7 @@ from .settings import (
     read_ini,
     read_read_only,
     read_remember_bind_values,
+    read_plugin_enabled,
 )
 
 
@@ -41,6 +45,9 @@ def load_config(
     config_read_only = read_read_only(parser) if read_only is None else read_only
     config_remember_bind_values = read_remember_bind_values(parser)
     csv_export_separator, csv_export_null_value, csv_export_date_format = read_csv_export_settings(parser)
+    csv_export_enabled = read_plugin_enabled(parser, CSV_EXPORT_SECTION)
+    html_export_enabled = read_plugin_enabled(parser, HTML_EXPORT_SECTION)
+    xlsx_export_enabled = read_plugin_enabled(parser, XLSX_EXPORT_SECTION)
     session_tabs, active_session_tab = read_session_tabs(parser, workspace)
     return AppConfig(
         user=os.environ.get("ORACLE_USER", "hr"),
@@ -56,6 +63,9 @@ def load_config(
         csv_export_separator=csv_export_separator,
         csv_export_null_value=csv_export_null_value,
         csv_export_date_format=csv_export_date_format,
+        csv_export_enabled=csv_export_enabled,
+        html_export_enabled=html_export_enabled,
+        xlsx_export_enabled=xlsx_export_enabled,
         session_tabs=session_tabs,
         active_session_tab=active_session_tab,
         editor_colors=read_editor_colors(parser),

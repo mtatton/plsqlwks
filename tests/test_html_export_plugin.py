@@ -123,7 +123,7 @@ def test_plugin_metadata_uses_api_v1_without_shortcut():
 
 def test_html_export_options_have_documented_defaults():
     assert html_export.HtmlExportOptions() == html_export.HtmlExportOptions(
-        null_value="<NULL>",
+        null_value="",
         theme="bright",
         date_format="",
     )
@@ -141,8 +141,12 @@ def test_renderer_writes_complete_standalone_document_and_loaded_rows():
     assert '<meta charset="utf-8">' in document
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in document
     assert "<title>Current data</title>" in document
-    assert "<h1>Current data</h1>" in document
+    assert "Current data" not in document.partition("<body>\n")[2]
+    assert "<h1" not in document
     assert "2 loaded row(s)" in document
+    assert document.index("  </div>\n") < document.index(
+        '  <p class="summary">2 loaded row(s)</p>\n'
+    )
     assert document.count('<th scope="col">') == 2
     assert document.count("<tbody>") == 1
     assert document.count("<td>") == 4
@@ -196,7 +200,8 @@ def test_renderer_uses_fallback_title_and_keeps_headers_for_zero_rows():
     )
 
     assert f"<title>{DEFAULT_HTML_TITLE}</title>" in document
-    assert f"<h1>{DEFAULT_HTML_TITLE}</h1>" in document
+    assert DEFAULT_HTML_TITLE not in document.partition("<body>\n")[2]
+    assert "<h1" not in document
     assert "0 loaded row(s)" in document
     assert '<th scope="col">A</th>' in document
     assert '<th scope="col">B</th>' in document
@@ -214,6 +219,9 @@ def test_renderer_reports_unexported_continuation_rows():
 
     assert "1 loaded row(s)" in document
     assert "Additional rows are available in PLSQLWKS and were not exported." in document
+    assert document.index("  </div>\n") < document.index("1 loaded row(s)") < document.index(
+        "Additional rows are available"
+    )
 
 
 @pytest.mark.parametrize(
@@ -419,7 +427,7 @@ def test_unset_environment_uses_default_options(monkeypatch, tmp_path):
     plugin.commands[0].handler(context)
 
     document = (tmp_path / "defaults.html").read_text(encoding="utf-8")
-    assert "<td>&lt;NULL&gt;</td>" in document
+    assert "<td></td>" in document
     assert "<td>2026-07-13</td>" in document
     assert ":root { color-scheme: light; }" in document
 

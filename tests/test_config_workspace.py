@@ -401,8 +401,11 @@ def test_csv_settings_preserve_existing_app_config_positional_arguments(tmp_path
     assert config.explain_colors == {"text": 7}
     assert config.startup_warnings == ("warning",)
     assert config.csv_export_separator == ","
-    assert config.csv_export_null_value == "<NULL>"
+    assert config.csv_export_null_value == ""
     assert config.csv_export_date_format == ""
+    assert config.csv_export_enabled is True
+    assert config.html_export_enabled is True
+    assert config.xlsx_export_enabled is True
 
 
 def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch, tmp_path):
@@ -416,8 +419,11 @@ def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch,
     assert config.read_only is False
     assert config.remember_bind_values is False
     assert config.csv_export_separator == ","
-    assert config.csv_export_null_value == "<NULL>"
+    assert config.csv_export_null_value == ""
     assert config.csv_export_date_format == ""
+    assert config.csv_export_enabled is True
+    assert config.html_export_enabled is True
+    assert config.xlsx_export_enabled is True
     assert config.session_tabs == ()
     assert config.active_session_tab == 0
 
@@ -481,6 +487,7 @@ def test_load_config_reads_csv_export_settings_without_interpolation(monkeypatch
         "\n".join(
             [
                 "[plugin.csv-export]",
+                "enabled = no",
                 "separator = |",
                 "null_value = ",
                 "date_format = %Y-%m-%d %H:%M:%S",
@@ -495,6 +502,70 @@ def test_load_config_reads_csv_export_settings_without_interpolation(monkeypatch
     assert config.csv_export_separator == "|"
     assert config.csv_export_null_value == ""
     assert config.csv_export_date_format == "%Y-%m-%d %H:%M:%S"
+    assert config.csv_export_enabled is False
+    assert config.html_export_enabled is True
+    assert config.xlsx_export_enabled is True
+
+
+def test_load_config_reads_export_enabled_flags_independently(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "config.ini").write_text(
+        "\n".join(
+            [
+                "[plugin.csv-export]",
+                "enabled = no",
+                "[plugin.html-export]",
+                "enabled = yes",
+                "[plugin.xlsx-export]",
+                "enabled = off",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
+
+    config = load_config()
+
+    assert config.csv_export_enabled is False
+    assert config.html_export_enabled is True
+    assert config.xlsx_export_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("malformed_section", "expected"),
+    [
+        ("plugin.csv-export", (True, False, False)),
+        ("plugin.html-export", (False, True, False)),
+        ("plugin.xlsx-export", (False, False, True)),
+    ],
+)
+def test_load_config_invalid_export_enabled_falls_back_independently(
+    monkeypatch,
+    tmp_path,
+    malformed_section,
+    expected,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sections = ("plugin.csv-export", "plugin.html-export", "plugin.xlsx-export")
+    (workspace / "config.ini").write_text(
+        "\n".join(
+            line
+            for section in sections
+            for line in (f"[{section}]", f"enabled = {'invalid' if section == malformed_section else 'no'}")
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
+
+    config = load_config()
+
+    assert (
+        config.csv_export_enabled,
+        config.html_export_enabled,
+        config.xlsx_export_enabled,
+    ) == expected
 
 
 @pytest.mark.parametrize("separator", ["", "comma", "  "])

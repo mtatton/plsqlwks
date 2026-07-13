@@ -88,7 +88,12 @@ class App(
             date_format=config.csv_export_date_format,
         )
         self._plugin_host = PluginHost(
-            load_plugin_registry(csv_export_options=csv_export_options),
+            load_plugin_registry(
+                csv_export_options=csv_export_options,
+                csv_export_enabled=config.csv_export_enabled,
+                html_export_enabled=config.html_export_enabled,
+                xlsx_export_enabled=config.xlsx_export_enabled,
+            ),
             self._create_plugin_context,
         )
         self.command_menu_items = self._plugin_host.command_menu_items

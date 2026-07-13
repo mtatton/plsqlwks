@@ -123,29 +123,34 @@ def load_plugin_registry(
     builtin_factories: Iterable[PluginFactory] | None = None,
     entry_points: Iterable[metadata.EntryPoint] | None = None,
     csv_export_options: CsvExportOptions | None = None,
+    csv_export_enabled: bool = True,
+    html_export_enabled: bool = True,
+    xlsx_export_enabled: bool = True,
 ) -> PluginRegistry:
     """Load built-in plugins, then isolate failures from installed entry points.
 
     ``builtin_factories`` and ``entry_points`` are injectable to keep discovery
     and validation testable.  In normal use they default to the application
     built-ins and the ``plsqlwks.plugins`` entry-point group respectively.
-    ``csv_export_options`` configures only the default built-in CSV plugin; it
-    is deliberately ignored when callers supply their own built-in factories.
+    The exporter options configure only the default built-in factories.  They
+    are deliberately ignored when callers supply their own built-in factories.
     """
     plugins: list[Plugin] = []
     warnings: list[str] = []
     plugin_ids: set[str] = set()
     command_keys: set[tuple[str, str]] = set()
 
-    factories = (
-        (
-            lambda: create_csv_export_plugin(csv_export_options),
-            create_html_export_plugin,
-            create_xlsx_export_plugin,
-        )
-        if builtin_factories is None
-        else tuple(builtin_factories)
-    )
+    if builtin_factories is None:
+        default_factories: list[PluginFactory] = []
+        if csv_export_enabled:
+            default_factories.append(lambda: create_csv_export_plugin(csv_export_options))
+        if html_export_enabled:
+            default_factories.append(create_html_export_plugin)
+        if xlsx_export_enabled:
+            default_factories.append(create_xlsx_export_plugin)
+        factories = tuple(default_factories)
+    else:
+        factories = tuple(builtin_factories)
     for factory in factories:
         if not callable(factory):
             raise TypeError("built-in plugin factory must be callable")

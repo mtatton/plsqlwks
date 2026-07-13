@@ -17,8 +17,6 @@ DEFAULT_HTML_TITLE = "PLSQLWKS query result"
 _COMMON_STYLESHEET = """\
 :root { font-family: system-ui, sans-serif; }
 body { margin: 1.5rem; line-height: 1.4; }
-h1 { margin-bottom: 0.25rem; }
-.summary { margin-top: 0; }
 .notice { padding: 0.75rem; border: 1px solid currentColor; }
 .table-container { max-width: 100%; overflow-x: auto; }
 table { border-collapse: collapse; min-width: 100%; }
@@ -87,8 +85,9 @@ def render_html_result(
 
     The result is deterministic apart from its inputs and uses LF line endings.
     Row widths and the theme name are validated before any markup is returned.
-    Titles, headings, column labels, and cells are escaped with attribute-safe
-    HTML escaping even though result data is never placed in an attribute.
+    The document title, column labels, and cells are escaped with attribute-safe
+    HTML escaping even though result data is never placed in an attribute.  The
+    result title is metadata only and is not repeated as a visible page heading.
     Themes select only bundled static CSS; result values can never affect CSS.
     """
     _validate_row_widths(columns, rows)
@@ -115,13 +114,6 @@ def render_html_result(
     output.write("  </style>\n")
     output.write("</head>\n")
     output.write("<body>\n")
-    output.write(f"  <h1>{escaped_title}</h1>\n")
-    output.write(f'  <p class="summary">{len(rows)} loaded row(s)</p>\n')
-    if has_more:
-        output.write(
-            '  <p class="notice">Additional rows are available in PLSQLWKS '
-            "and were not exported.</p>\n"
-        )
     output.write('  <div class="table-container">\n')
     output.write("    <table>\n")
     output.write("      <thead>\n")
@@ -139,6 +131,12 @@ def render_html_result(
     output.write("      </tbody>\n")
     output.write("    </table>\n")
     output.write("  </div>\n")
+    output.write(f'  <p class="summary">{len(rows)} loaded row(s)</p>\n')
+    if has_more:
+        output.write(
+            '  <p class="notice">Additional rows are available in PLSQLWKS '
+            "and were not exported.</p>\n"
+        )
     output.write("</body>\n")
     output.write("</html>\n")
     return output.getvalue()

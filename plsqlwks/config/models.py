@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..plugins.csv_export import _NULL_DISPLAY_VALUE as _CSV_EXPORT_DEFAULT_NULL_VALUE
+
 
 @dataclass(frozen=True)
 class SessionTab:
@@ -31,8 +33,11 @@ class AppConfig:
     explain_colors: dict[str, int] = field(default_factory=dict)
     startup_warnings: tuple[str, ...] = ()
     csv_export_separator: str = ","
-    csv_export_null_value: str = "<NULL>"
+    csv_export_null_value: str = _CSV_EXPORT_DEFAULT_NULL_VALUE
     csv_export_date_format: str = ""
+    csv_export_enabled: bool = True
+    html_export_enabled: bool = True
+    xlsx_export_enabled: bool = True
 
     def __post_init__(self) -> None:
         if isinstance(self.max_rows, bool) or not isinstance(self.max_rows, int) or self.max_rows <= 0:

@@ -8,7 +8,8 @@ not part of this contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -23,13 +24,21 @@ class ResultSnapshot:
 
     ``rows`` contains only values already loaded into the result grid.  A true
     ``has_more`` flag reports that further rows exist, but intentionally gives
-    the plugin no continuation token or way to fetch them.
+    the plugin no continuation token or way to fetch them.  When available,
+    ``numeric_values`` parallels ``rows`` with immutable source numbers and
+    ``None`` for every other cell.
     """
 
     title: str
     columns: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
     has_more: bool
+    numeric_values: tuple[tuple[Decimal | int | float | None, ...], ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
 
 
 class PluginContext(Protocol):

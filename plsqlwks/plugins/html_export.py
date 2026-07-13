@@ -35,7 +35,7 @@ class HtmlExportOptions:
     values, and ``theme`` selects one of the renderer's static CSS themes.
     """
 
-    null_value: str = "<NULL>"
+    null_value: str = ""
     theme: str = "bright"
     date_format: str = ""
 

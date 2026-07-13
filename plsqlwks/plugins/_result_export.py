@@ -82,10 +82,11 @@ def format_export_value(
 ) -> str:
     """Apply shared NULL and strict ISO-display transformations to one cell.
 
-    Plugin API v1 intentionally carries display strings without Oracle type
-    metadata.  Date formatting therefore applies only to the exact ISO shapes
-    emitted by PLSQLWKS.  A text cell with the same shape is indistinguishable
-    and is formatted as well; invalid or nonmatching values remain unchanged.
+    Plugin API v1 carries dates as display strings; its optional numeric
+    provenance does not identify date or timestamp values.  Date formatting
+    therefore applies only to the exact ISO shapes emitted by PLSQLWKS.  A text
+    cell with the same shape is indistinguishable and is formatted as well;
+    invalid or nonmatching values remain unchanged.
     """
     if value == _NULL_DISPLAY_VALUE:
         return null_value

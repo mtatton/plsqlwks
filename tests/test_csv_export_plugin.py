@@ -154,7 +154,15 @@ def test_configured_separator_and_null_value_transform_display_rows(tmp_path):
     assert path.read_text(encoding="utf-8") == 'FIRST;SECOND;THIRD\n"a;b";;\n'
 
 
-def test_configured_custom_null_value_replaces_only_exact_display_token(tmp_path):
+@pytest.mark.parametrize(
+    ("null_value", "exported_null"),
+    (("(none)", "(none)"), ("<NULL>", "<NULL>")),
+)
+def test_configured_custom_null_value_replaces_only_exact_display_token(
+    tmp_path,
+    null_value,
+    exported_null,
+):
     context = RecordingContext(
         tmp_path,
         ResultSnapshot(
@@ -168,12 +176,13 @@ def test_configured_custom_null_value_replaces_only_exact_display_token(tmp_path
 
     csv_export.export_loaded_rows(
         context,
-        csv_export.CsvExportOptions(null_value="(none)"),
+        csv_export.CsvExportOptions(null_value=null_value),
     )
 
     path = (tmp_path / "nulls.csv").resolve()
     assert path.read_text(encoding="utf-8") == (
-        "NULL_VALUE,TEXT_VALUE,SPACED_VALUE\n(none),literal NULL, <NULL> \n"
+        "NULL_VALUE,TEXT_VALUE,SPACED_VALUE\n"
+        f"{exported_null},literal NULL, <NULL> \n"
     )
 
 
@@ -228,7 +237,7 @@ def test_date_format_preserves_nonmatching_and_invalid_display_strings(tmp_path)
     )
 
 
-def test_default_options_preserve_null_and_iso_display_values(tmp_path):
+def test_default_options_write_null_as_empty_and_preserve_iso_display_values(tmp_path):
     context = RecordingContext(
         tmp_path,
         ResultSnapshot(
@@ -245,7 +254,7 @@ def test_default_options_preserve_null_and_iso_display_values(tmp_path):
     path = (tmp_path / "defaults.csv").resolve()
     assert path.read_text(encoding="utf-8") == (
         "NULL_VALUE,DATE_VALUE,TIMESTAMP_VALUE\n"
-        "<NULL>,2026-07-12,2026-07-12 09:08:07\n"
+        ",2026-07-12,2026-07-12 09:08:07\n"
     )
 
 

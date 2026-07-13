@@ -9,6 +9,7 @@ attribute dispatch.
 from __future__ import annotations
 
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 
 from ..db import QueryResult
@@ -26,11 +27,34 @@ ResultsCallback = Callable[[list[str], bool], None]
 PluginContextFactory = Callable[[], "UIPluginContext"]
 
 
+def _snapshot_numeric_values(
+    result: QueryResult,
+) -> tuple[tuple[Decimal | int | float | None, ...], ...]:
+    """Copy only aligned immutable numeric source values into a snapshot."""
+    if len(result.original_rows) != len(result.rows):
+        return ()
+    if any(
+        len(original_row) != len(display_row)
+        for original_row, display_row in zip(result.original_rows, result.rows)
+    ):
+        return ()
+    return tuple(
+        tuple(
+            original
+            if type(original) in (Decimal, int, float) and str(original) == display
+            else None
+            for original, display in zip(original_row, display_row)
+        )
+        for original_row, display_row in zip(result.original_rows, result.rows)
+    )
+
+
 def snapshot_result(result: QueryResult | None) -> ResultSnapshot | None:
     """Copy a mutable query result into the tuple-based public snapshot shape.
 
-    Only display columns and rows cross the boundary.  Continuation presence is
-    reduced to ``has_more``; original rows and editable context are not exposed.
+    Display columns and rows plus aligned immutable numeric values cross the
+    boundary.  Continuation presence is reduced to ``has_more``; arbitrary
+    original values and editable context are not exposed.
     """
     if result is None:
         return None
@@ -39,6 +63,7 @@ def snapshot_result(result: QueryResult | None) -> ResultSnapshot | None:
         columns=tuple(result.columns),
         rows=tuple(tuple(row) for row in result.rows),
         has_more=result.continuation is not None,
+        numeric_values=_snapshot_numeric_values(result),
     )
 
 
