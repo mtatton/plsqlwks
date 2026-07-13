@@ -406,6 +406,7 @@ def test_csv_settings_preserve_existing_app_config_positional_arguments(tmp_path
     assert config.csv_export_enabled is True
     assert config.html_export_enabled is True
     assert config.xlsx_export_enabled is True
+    assert config.csv_export_protect_formulas is False
 
 
 def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch, tmp_path):
@@ -424,6 +425,7 @@ def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch,
     assert config.csv_export_enabled is True
     assert config.html_export_enabled is True
     assert config.xlsx_export_enabled is True
+    assert config.csv_export_protect_formulas is False
     assert config.session_tabs == ()
     assert config.active_session_tab == 0
 
@@ -491,6 +493,7 @@ def test_load_config_reads_csv_export_settings_without_interpolation(monkeypatch
                 "separator = |",
                 "null_value = ",
                 "date_format = %Y-%m-%d %H:%M:%S",
+                "protect_formulas = yes",
             ]
         ),
         encoding="utf-8",
@@ -502,9 +505,31 @@ def test_load_config_reads_csv_export_settings_without_interpolation(monkeypatch
     assert config.csv_export_separator == "|"
     assert config.csv_export_null_value == ""
     assert config.csv_export_date_format == "%Y-%m-%d %H:%M:%S"
+    assert config.csv_export_protect_formulas is True
     assert config.csv_export_enabled is False
     assert config.html_export_enabled is True
     assert config.xlsx_export_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    (("no", False), ("on", True), ("invalid", False)),
+)
+def test_load_config_reads_csv_formula_protection_safely(
+    monkeypatch,
+    tmp_path,
+    configured,
+    expected,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "config.ini").write_text(
+        f"[plugin.csv-export]\nprotect_formulas = {configured}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
+
+    assert load_config().csv_export_protect_formulas is expected
 
 
 def test_load_config_reads_export_enabled_flags_independently(monkeypatch, tmp_path):

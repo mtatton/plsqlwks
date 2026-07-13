@@ -72,14 +72,18 @@ PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q
 python3 -m pytest -q -m plugin
 ```
 
-Each built-in plugin has an optional dependency manifest under
-`plugin-requirements/<plugin-id>/requirements.txt`. The CSV and HTML export
-plugins have no additional dependencies. XLSX export uses `openpyxl`, which is
-kept out of the PLSQLWKS runtime dependencies and can be installed with:
+The CSV and HTML export plugins have no additional dependencies. XLSX export
+uses the optional `openpyxl` package, kept out of the base PLSQLWKS runtime.
+Install a distribution with XLSX support through the standard extra:
 
 ```bash
-python3 -m pip install -r plugin-requirements/xlsx-export/requirements.txt
+python3 -m pip install 'plsqlwks[xlsx]'
 ```
+
+For an editable development checkout, install the development and XLSX extras
+together with `python3 -m pip install -e '.[dev,xlsx]'`. The repository also
+retains `plugin-requirements/xlsx-export/requirements.txt` as a compatible
+fallback for existing checkout automation.
 
 Oracle integration tests require the connection environment variables shown
 above and an accessible password file. Enable every test group with:
@@ -336,7 +340,8 @@ JavaScript, and no external resources. It reports when more rows are available
 in PLSQLWKS but does not fetch them, and it does not open a browser after export.
 
 The XLSX command writes one `Query result` worksheet with a header row and the
-currently loaded display rows. Genuine source numbers become native Excel
+currently loaded display rows. The header row is frozen by default so it stays
+visible while scrolling. Genuine source numbers become native Excel
 numeric cells when they fit Excel's range and 15-significant-digit precision;
 fixed-point scale such as `10.50` is preserved. Numeric-looking character data
 and unsafe-precision numbers remain exact text and can still receive Excel's
@@ -344,8 +349,9 @@ number-as-text warning. Headers and other values, including text beginning with
 `=`, `+`, `-`, or `@`, remain literal strings and are never interpreted as
 spreadsheet formulas. The workbook contains no macros, external links, or
 fetched continuation rows and is not opened after export. XLSX support is
-optional and requires `openpyxl>=3.1` from the plugin's requirements file shown
-above. Each column uses the larger of its bold column name or widest data value,
+optional and obtains `openpyxl>=3.1` from the standard `plsqlwks[xlsx]` extra;
+the repository plugin requirements file remains a source-checkout fallback.
+Each column uses the larger of its bold column name or widest data value,
 estimated with Calibri 11-compatible proportional glyph widths, clamped from 3
 through 60 units, and given a 17-pixel fit margin. Wrapping remains based on
 logical visual length: values over 60 visual units or containing explicit line
@@ -378,6 +384,7 @@ PLSQLWKS_XLSX_EXPORT_THEME="dark"
 PLSQLWKS_XLSX_EXPORT_DATE_FORMAT="%d.%m.%Y"
 PLSQLWKS_XLSX_EXPORT_AUTO_FILTER="no"
 PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH="no"
+PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW="no"
 ```
 
 `PLSQLWKS_XLSX_EXPORT_NULL_VALUE` replaces the exact `<NULL>` display token and
@@ -398,8 +405,11 @@ header or loaded data value and uses the same boolean syntax. When filtering is
 enabled, the header candidate includes three extra character units for the filter
 dropdown. Auto-width defaults to enabled; disabling it leaves Excel's default
 column widths while preserving the existing multiline and over-60-unit cell
-wrapping. These settings belong to the built-in XLSX plugin and do not expand
-Plugin API v1.
+wrapping. `PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW` uses the same boolean syntax,
+defaults to enabled, and keeps row 1 visible while scrolling; disabling it
+leaves the worksheet unfrozen. Freezing is independent of filtering and
+automatic widths. These settings belong to the built-in XLSX plugin and do not
+expand Plugin API v1.
 
 The built-in CSV export formatting can also be customized in the active
 `config.ini`:
@@ -409,6 +419,7 @@ The built-in CSV export formatting can also be customized in the active
 separator = ,
 null_value =
 date_format =
+protect_formulas = no
 ```
 
 `separator` must be one character and defaults to a comma. `null_value`
@@ -421,6 +432,16 @@ full-string ISO display values shaped as `YYYY-MM-DD` or
 other text is exported unchanged. This deliberately strict heuristic cannot
 identify non-ISO or otherwise preformatted database date text, while matching
 text-column values are indistinguishable from dates and are formatted too.
+
+`protect_formulas` defaults to `no`, preserving the exact field content and
+existing CSV representation. Set it to `yes` for CSV files intended to be
+opened by people in spreadsheet software. The protected mode quotes every
+field and prefixes formula-triggering values with a tab, including risky ASCII
+and full-width prefixes and leading control characters. This also makes
+legitimate leading signed values such as `-42` text and leaves the tab in data
+seen by programmatic CSV readers. OWASP notes that no CSV neutralization is
+universal across all spreadsheet applications and save/re-open workflows, so
+validate this opt-in mode with the applications in use.
 
 ### Schema Browser
 

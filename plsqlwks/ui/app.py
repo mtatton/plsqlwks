@@ -86,6 +86,7 @@ class App(
             separator=config.csv_export_separator,
             null_value=config.csv_export_null_value,
             date_format=config.csv_export_date_format,
+            protect_formulas=config.csv_export_protect_formulas,
         )
         self._plugin_host = PluginHost(
             load_plugin_registry(

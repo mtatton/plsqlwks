@@ -113,6 +113,15 @@ def read_csv_export_settings(parser: configparser.ConfigParser) -> tuple[str, st
     return separator, null_value, date_format
 
 
+def read_csv_protect_formulas(parser: configparser.ConfigParser) -> bool:
+    """Read the opt-in CSV formula-injection guard, defaulting safely to off."""
+
+    try:
+        return parser.getboolean(CSV_EXPORT_SECTION, "protect_formulas", fallback=False)
+    except ValueError:
+        return False
+
+
 def read_plugin_enabled(parser: configparser.ConfigParser, section: str) -> bool:
     """Return whether a plugin is enabled, defaulting safely to enabled."""
 

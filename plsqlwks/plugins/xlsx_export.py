@@ -33,8 +33,9 @@ class XlsxExportOptions:
     ``date_format`` formats strict ISO-shaped display values with ``strftime``,
     ``theme`` selects bundled static cell styles, and ``auto_filter`` controls
     whether Excel filtering is enabled for the exported table.  ``auto_width``
-    controls deterministic content-based column sizing.  These settings do not
-    expand the public Plugin API.
+    controls deterministic content-based column sizing, while
+    ``freeze_top_row`` keeps the header visible during vertical scrolling.
+    These settings do not expand the public Plugin API.
     """
 
     null_value: str = ""
@@ -42,6 +43,7 @@ class XlsxExportOptions:
     date_format: str = ""
     auto_filter: bool = True
     auto_width: bool = True
+    freeze_top_row: bool = True
 
 
 _NULL_VALUE_ENV = "PLSQLWKS_XLSX_EXPORT_NULL_VALUE"
@@ -49,6 +51,7 @@ _THEME_ENV = "PLSQLWKS_XLSX_EXPORT_THEME"
 _DATE_FORMAT_ENV = "PLSQLWKS_XLSX_EXPORT_DATE_FORMAT"
 _AUTO_FILTER_ENV = "PLSQLWKS_XLSX_EXPORT_AUTO_FILTER"
 _AUTO_WIDTH_ENV = "PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH"
+_FREEZE_TOP_ROW_ENV = "PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW"
 _TRUE_ENV_VALUES = frozenset(("1", "yes", "true", "on"))
 _FALSE_ENV_VALUES = frozenset(("0", "no", "false", "off"))
 
@@ -81,6 +84,10 @@ def _environment_options() -> XlsxExportOptions:
             _AUTO_WIDTH_ENV,
             defaults.auto_width,
         ),
+        freeze_top_row=_environment_boolean(
+            _FREEZE_TOP_ROW_ENV,
+            defaults.freeze_top_row,
+        ),
     )
 
 
@@ -111,6 +118,7 @@ def export_loaded_rows_to_xlsx(
             theme=options.theme,
             auto_filter=options.auto_filter,
             auto_width=options.auto_width,
+            freeze_top_row=options.freeze_top_row,
         )
     except Exception as error:
         context.set_status(f"XLSX export failed: {short_error(error)}")

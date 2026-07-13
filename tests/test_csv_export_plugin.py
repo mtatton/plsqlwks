@@ -83,6 +83,12 @@ def test_plugin_metadata_and_deterministic_default_filename(monkeypatch, tmp_pat
     )
     assert command.shortcut == ""
     assert "csv" in command.keywords
+    assert csv_export.CsvExportOptions() == csv_export.CsvExportOptions(
+        separator=",",
+        null_value="",
+        date_format="",
+        protect_formulas=False,
+    )
     assert context.prompts == [
         ("Export loaded rows to CSV", str(tmp_path / "result_20260712_090807.csv"), True)
     ]
@@ -258,6 +264,32 @@ def test_default_options_write_null_as_empty_and_preserve_iso_display_values(tmp
     )
 
 
+def test_formula_protection_runs_after_null_and_date_formatting(tmp_path):
+    active = ResultSnapshot(
+        "Data",
+        ("NULL_VALUE", "DATE_VALUE"),
+        (("<NULL>", "2026-07-12"),),
+        False,
+    )
+    context = RecordingContext(tmp_path, active, response="protected.csv")
+
+    csv_export.export_loaded_rows(
+        context,
+        csv_export.CsvExportOptions(
+            null_value="=NULL",
+            date_format="=%Y",
+            protect_formulas=True,
+        ),
+    )
+
+    path = (tmp_path / "protected.csv").resolve()
+    assert path.read_text(encoding="utf-8") == (
+        '"NULL_VALUE","DATE_VALUE"\n'
+        '"\t=NULL","\t=2026"\n'
+    )
+    assert active.rows == (("<NULL>", "2026-07-12"),)
+
+
 def test_create_plugin_captures_options_without_changing_zero_argument_factory(tmp_path):
     configured = csv_export.create_plugin(
         csv_export.CsvExportOptions(separator=";", null_value="NULL")
@@ -324,7 +356,7 @@ def test_write_failure_reports_error_and_preserves_snapshot(monkeypatch, tmp_pat
     context = RecordingContext(tmp_path, active, response="out.csv")
     failure = OSError("disk full\ninternal detail")
 
-    def fail_write(path, columns, rows, *, delimiter=","):
+    def fail_write(path, columns, rows, *, delimiter=",", protect_formulas=False):
         raise failure
 
     monkeypatch.setattr(csv_export, "write_csv", fail_write)
@@ -343,7 +375,7 @@ def test_write_failure_bounds_status_but_reports_complete_error(monkeypatch, tmp
     context = RecordingContext(tmp_path, snapshot(), response="out.csv")
     failure = OSError("x" * 500)
 
-    def fail_write(path, columns, rows, *, delimiter=","):
+    def fail_write(path, columns, rows, *, delimiter=",", protect_formulas=False):
         raise failure
 
     monkeypatch.setattr(csv_export, "write_csv", fail_write)

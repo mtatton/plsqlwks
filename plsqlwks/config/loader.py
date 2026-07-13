@@ -12,6 +12,7 @@ from .settings import (
     XLSX_EXPORT_SECTION,
     read_autocommit,
     read_csv_export_settings,
+    read_csv_protect_formulas,
     read_editor_colors,
     read_explain_colors,
     read_ini,
@@ -45,6 +46,7 @@ def load_config(
     config_read_only = read_read_only(parser) if read_only is None else read_only
     config_remember_bind_values = read_remember_bind_values(parser)
     csv_export_separator, csv_export_null_value, csv_export_date_format = read_csv_export_settings(parser)
+    csv_export_protect_formulas = read_csv_protect_formulas(parser)
     csv_export_enabled = read_plugin_enabled(parser, CSV_EXPORT_SECTION)
     html_export_enabled = read_plugin_enabled(parser, HTML_EXPORT_SECTION)
     xlsx_export_enabled = read_plugin_enabled(parser, XLSX_EXPORT_SECTION)
@@ -66,6 +68,7 @@ def load_config(
         csv_export_enabled=csv_export_enabled,
         html_export_enabled=html_export_enabled,
         xlsx_export_enabled=xlsx_export_enabled,
+        csv_export_protect_formulas=csv_export_protect_formulas,
         session_tabs=session_tabs,
         active_session_tab=active_session_tab,
         editor_colors=read_editor_colors(parser),

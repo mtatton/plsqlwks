@@ -143,9 +143,9 @@ def test_renderer_writes_complete_standalone_document_and_loaded_rows():
     assert "<title>Current data</title>" in document
     assert "Current data" not in document.partition("<body>\n")[2]
     assert "<h1" not in document
-    assert "2 loaded row(s)" in document
+    assert "2 row(s)" in document
     assert document.index("  </div>\n") < document.index(
-        '  <p class="summary">2 loaded row(s)</p>\n'
+        '  <p class="summary">2 row(s)</p>\n'
     )
     assert document.count('<th scope="col">') == 2
     assert document.count("<tbody>") == 1
@@ -202,7 +202,7 @@ def test_renderer_uses_fallback_title_and_keeps_headers_for_zero_rows():
     assert f"<title>{DEFAULT_HTML_TITLE}</title>" in document
     assert DEFAULT_HTML_TITLE not in document.partition("<body>\n")[2]
     assert "<h1" not in document
-    assert "0 loaded row(s)" in document
+    assert "0 row(s)" in document
     assert '<th scope="col">A</th>' in document
     assert '<th scope="col">B</th>' in document
     assert "      <tbody>\n      </tbody>" in document
@@ -217,9 +217,9 @@ def test_renderer_reports_unexported_continuation_rows():
         has_more=True,
     )
 
-    assert "1 loaded row(s)" in document
+    assert "1 row(s)" in document
     assert "Additional rows are available in PLSQLWKS and were not exported." in document
-    assert document.index("  </div>\n") < document.index("1 loaded row(s)") < document.index(
+    assert document.index("  </div>\n") < document.index("1 row(s)") < document.index(
         "Additional rows are available"
     )
 

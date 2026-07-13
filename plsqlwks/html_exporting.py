@@ -131,7 +131,7 @@ def render_html_result(
     output.write("      </tbody>\n")
     output.write("    </table>\n")
     output.write("  </div>\n")
-    output.write(f'  <p class="summary">{len(rows)} loaded row(s)</p>\n')
+    output.write(f'  <p class="summary">{len(rows)} row(s)</p>\n')
     if has_more:
         output.write(
             '  <p class="notice">Additional rows are available in PLSQLWKS '

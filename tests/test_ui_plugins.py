@@ -557,7 +557,7 @@ def test_html_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp
 
     document = destination.read_text(encoding="utf-8")
     assert document.startswith("<!doctype html>\n")
-    assert "1 loaded row(s)" in document
+    assert "1 row(s)" in document
     assert "Additional rows are available in PLSQLWKS and were not exported." in document
     assert app.state.active_result is result
     assert result.rows == [["1", "display value"]]
@@ -674,6 +674,7 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
         csv_export_separator=";",
         csv_export_null_value="NULL",
         csv_export_date_format="%d.%m.%Y",
+        csv_export_protect_formulas=True,
         csv_export_enabled=False,
         html_export_enabled=True,
         xlsx_export_enabled=False,
@@ -693,6 +694,7 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
                 separator=";",
                 null_value="NULL",
                 date_format="%d.%m.%Y",
+                protect_formulas=True,
             ),
             "csv_export_enabled": False,
             "html_export_enabled": True,

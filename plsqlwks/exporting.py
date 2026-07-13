@@ -17,6 +17,9 @@ from typing import BinaryIO, Callable, Iterable, Sequence, TextIO, cast
 
 
 CSV_LINE_TERMINATOR = "\n"
+CSV_FORMULA_PREFIXES = frozenset(
+    ("=", "+", "-", "@", "\t", "\r", "\n", "\0", "＝", "＋", "－", "＠")
+)
 
 
 def atomic_write_binary(path: Path, writer: Callable[[BinaryIO], None]) -> None:
@@ -93,6 +96,7 @@ def write_csv(
     rows: Iterable[Sequence[str]],
     *,
     delimiter: str = ",",
+    protect_formulas: bool = False,
 ) -> None:
     """Atomically write display-ready columns and rows as UTF-8 CSV.
 
@@ -101,6 +105,9 @@ def write_csv(
     the temporary file is removed where possible and an existing destination
     remains intact until replacement succeeds.  ``delimiter`` must be exactly
     one character and is forwarded to the standard-library CSV encoder.
+    ``protect_formulas`` is an opt-in mode for files intended for spreadsheet
+    viewing: formula-like fields receive a leading tab and every field is
+    quoted so the tab stays inside its CSV field.
     """
     if not isinstance(delimiter, str) or len(delimiter) != 1:
         raise ValueError("CSV delimiter must be exactly one character")
@@ -110,12 +117,26 @@ def write_csv(
             handle,
             delimiter=delimiter,
             lineterminator=CSV_LINE_TERMINATOR,
+            quoting=csv.QUOTE_ALL if protect_formulas else csv.QUOTE_MINIMAL,
         )
         if columns:
-            writer.writerow(columns)
-        writer.writerows(rows)
+            writer.writerow(_protect_csv_formulas(columns) if protect_formulas else columns)
+        output_rows = (
+            (_protect_csv_formulas(row) for row in rows)
+            if protect_formulas
+            else rows
+        )
+        writer.writerows(output_rows)
 
     atomic_write_text(path, write_rows)
+
+
+def _protect_csv_formulas(values: Sequence[str]) -> tuple[str, ...]:
+    """Neutralize spreadsheet formula prefixes without changing other text."""
+    return tuple(
+        f"\t{value}" if value and value[0] in CSV_FORMULA_PREFIXES else value
+        for value in values
+    )
 
 
 def csv_cell(value: str) -> str:

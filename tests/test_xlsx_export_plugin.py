@@ -123,6 +123,7 @@ def test_plugin_metadata_options_and_api_version():
         date_format="",
         auto_filter=True,
         auto_width=True,
+        freeze_top_row=True,
     )
     with pytest.raises(FrozenInstanceError):
         plugin.id = "changed"  # type: ignore[misc]
@@ -177,6 +178,7 @@ def test_writes_exact_loaded_rows_as_formula_safe_strings_with_options(tmp_path)
         assert not any(cell.font.bold for cell in sheet[2])
         assert sheet["A1"].fill.fgColor.rgb != sheet["A2"].fill.fgColor.rgb
         assert sheet.auto_filter.ref is None
+        assert sheet.freeze_panes == "A2"
     finally:
         workbook.close()
 
@@ -445,6 +447,7 @@ def test_auto_width_can_be_disabled_without_affecting_wrapping_or_filter(tmp_pat
         assert list(sheet.column_dimensions) == []
         assert sheet["A2"].alignment.wrap_text is True
         assert sheet.auto_filter.ref == "A1:B2"
+        assert sheet.freeze_panes == "A2"
     finally:
         workbook.close()
 
@@ -468,6 +471,7 @@ def test_zero_rows_produces_header_only_workbook_and_plain_success(tmp_path):
             sheet.column_dimensions[letter].width for letter in "AB"
         ] == pytest.approx([4.17626 + 17 / 7, 4.10519 + 17 / 7])
         assert sheet.auto_filter.ref == "A1:B1"
+        assert sheet.freeze_panes == "A2"
     finally:
         workbook.close()
     assert context.statuses == [f"Exported 0 loaded row(s) to {destination.resolve()}"]
@@ -661,6 +665,26 @@ def test_auto_filter_can_be_disabled_for_direct_writer(tmp_path):
     workbook = load_workbook(destination)
     try:
         assert workbook.active.auto_filter.ref is None
+        assert workbook.active.freeze_panes == "A2"
+    finally:
+        workbook.close()
+
+
+def test_freeze_top_row_can_be_disabled_for_direct_writer(tmp_path):
+    destination = tmp_path / "scrolling-header.xlsx"
+
+    xlsx_exporting.write_xlsx_result(
+        destination,
+        title="scrolling header",
+        columns=("A", "B"),
+        rows=(("one", "two"),),
+        freeze_top_row=False,
+    )
+
+    workbook = load_workbook(destination)
+    try:
+        assert workbook.active.freeze_panes is None
+        assert workbook.active.auto_filter.ref == "A1:B2"
     finally:
         workbook.close()
 
@@ -679,6 +703,7 @@ def test_auto_filter_ignores_columnless_direct_writer_result(tmp_path):
     workbook = load_workbook(destination)
     try:
         assert workbook.active.auto_filter.ref is None
+        assert workbook.active.freeze_panes is None
     finally:
         workbook.close()
 
@@ -760,6 +785,7 @@ def test_zero_argument_factory_captures_environment_options(monkeypatch, tmp_pat
     monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_DATE_FORMAT", "%Y/%m/%d")
     monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_AUTO_FILTER", "off")
     monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH", "off")
+    monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW", "off")
     plugin = xlsx_export.create_plugin()
     destination = tmp_path / "configured.xlsx"
     context = RecordingContext(
@@ -775,6 +801,7 @@ def test_zero_argument_factory_captures_environment_options(monkeypatch, tmp_pat
         assert [cell.value for cell in workbook.active[2]] == ["NULL", "2026/07/13"]
         assert workbook.active.auto_filter.ref is None
         assert list(workbook.active.column_dimensions) == []
+        assert workbook.active.freeze_panes is None
     finally:
         workbook.close()
 
@@ -786,6 +813,7 @@ def test_unset_environment_uses_default_options(monkeypatch, tmp_path):
         "PLSQLWKS_XLSX_EXPORT_DATE_FORMAT",
         "PLSQLWKS_XLSX_EXPORT_AUTO_FILTER",
         "PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH",
+        "PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW",
     ):
         monkeypatch.delenv(name, raising=False)
     plugin = xlsx_export.create_plugin()
@@ -805,6 +833,7 @@ def test_unset_environment_uses_default_options(monkeypatch, tmp_path):
         assert sheet["A2"].fill.fgColor.rgb.endswith("FFFFFF")
         assert sheet.auto_filter.ref == "A1:B2"
         assert list(sheet.column_dimensions) == ["A", "B"]
+        assert sheet.freeze_panes == "A2"
     finally:
         workbook.close()
 
@@ -919,6 +948,50 @@ def test_malformed_environment_auto_width_value_uses_enabled_default(
     workbook = load_workbook(destination)
     try:
         assert list(workbook.active.column_dimensions) == ["A"]
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("configured_value", "later_value", "expected_pane"),
+    [("on", "off", "A2"), ("off", "on", None)],
+)
+def test_environment_freeze_top_row_boolean_is_captured_by_factory(
+    monkeypatch,
+    tmp_path,
+    configured_value,
+    later_value,
+    expected_pane,
+):
+    monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW", configured_value)
+    plugin = xlsx_export.create_plugin()
+    monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW", later_value)
+    destination = tmp_path / "environment-freeze.xlsx"
+    context = RecordingContext(tmp_path, snapshot(), response=str(destination))
+
+    plugin.commands[0].handler(context)
+
+    workbook = load_workbook(destination)
+    try:
+        assert workbook.active.freeze_panes == expected_pane
+    finally:
+        workbook.close()
+
+
+def test_malformed_environment_freeze_top_row_value_uses_enabled_default(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW", "sometimes")
+    plugin = xlsx_export.create_plugin()
+    destination = tmp_path / "fallback-freeze.xlsx"
+    context = RecordingContext(tmp_path, snapshot(), response=str(destination))
+
+    plugin.commands[0].handler(context)
+
+    workbook = load_workbook(destination)
+    try:
+        assert workbook.active.freeze_panes == "A2"
     finally:
         workbook.close()
 

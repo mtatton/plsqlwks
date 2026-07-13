@@ -29,6 +29,16 @@ SDIST_ONLY_FILES = {
 }
 
 
+def assert_xlsx_extra_metadata(metadata: str) -> None:
+    """Require openpyxl only through the optional XLSX dependency group."""
+    lines = metadata.splitlines()
+    assert "Requires-Dist: oracledb>=2.0" in lines
+    assert "Provides-Extra: xlsx" in lines
+    assert [line for line in lines if line.lower().startswith("requires-dist: openpyxl")] == [
+        'Requires-Dist: openpyxl>=3.1; extra == "xlsx"'
+    ]
+
+
 def test_pyproject_declares_runtime_package_and_console_script():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     requirements = {
@@ -36,11 +46,25 @@ def test_pyproject_declares_runtime_package_and_console_script():
         for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
+    xlsx_manifest_requirements = {
+        line.strip()
+        for line in (ROOT / "plugin-requirements/xlsx-export/requirements.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
 
     assert 'name = "plsqlwks"' in pyproject
     assert 'plsqlwks = "plsqlwks.ui:main"' in pyproject
     runtime_block = pyproject.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert [line.strip().strip('",') for line in runtime_block.splitlines() if line.strip()] == ["oracledb>=2.0"]
+    xlsx_block = pyproject.split("xlsx = [", 1)[1].split("]", 1)[0]
+    xlsx_requirements = {
+        line.strip().strip('",')
+        for line in xlsx_block.splitlines()
+        if line.strip()
+    }
+    assert xlsx_requirements == xlsx_manifest_requirements == {"openpyxl>=3.1"}
     assert 'requires = ["setuptools>=77", "wheel"]' in pyproject
     assert 'license = "LicenseRef-plsqlwks-Donationware"' in pyproject
     assert 'license-files = ["license.txt"]' in pyproject
@@ -153,8 +177,7 @@ def test_built_wheel_contains_runtime_package_only(tmp_path):
     assert "plsqlwks/db.py" not in names
     assert any(name.endswith(".dist-info/METADATA") for name in names)
     assert any(name.endswith(".dist-info/licenses/license.txt") for name in names)
-    assert "Requires-Dist: oracledb>=2.0" in metadata
-    assert "requires-dist: openpyxl" not in metadata.lower()
+    assert_xlsx_extra_metadata(metadata)
     assert "License-Expression: LicenseRef-plsqlwks-Donationware" in metadata
     assert "License-File: license.txt" in metadata
     assert "Version: 0.1.6" in metadata
@@ -216,6 +239,7 @@ def test_built_sdist_contains_license_and_gitlab_metadata(tmp_path, monkeypatch)
 
     assert "License-Expression: LicenseRef-plsqlwks-Donationware" in metadata
     assert "License-File: license.txt" in metadata
+    assert_xlsx_extra_metadata(metadata)
     assert "Version: 0.1.6" in metadata
     assert f"Project-URL: Repository, {GITLAB_REPOSITORY_URL}" in metadata
     assert GITLAB_PREVIEW_URL in metadata

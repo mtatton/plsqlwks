@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from io import StringIO
 from pathlib import Path
 
@@ -162,6 +163,53 @@ def test_write_csv_accepts_a_custom_single_character_delimiter(tmp_path):
     write_csv(path, ("A", "B"), (("a;b", "value"),), delimiter=";")
 
     assert path.read_text(encoding="utf-8") == 'A;B\n"a;b";value\n'
+
+
+def test_write_csv_formula_protection_is_opt_in(tmp_path):
+    path = tmp_path / "formula.csv"
+
+    write_csv(path, ("=HEADER",), (("=1+1",),))
+
+    assert path.read_text(encoding="utf-8") == "=HEADER\n=1+1\n"
+
+
+def test_write_csv_formula_protection_quotes_fields_and_contains_breakout_text(tmp_path):
+    path = tmp_path / "protected.csv"
+
+    write_csv(
+        path,
+        ("=HEADER", "PLAIN"),
+        (('=1+2";=1+2', "safe"),),
+        delimiter=";",
+        protect_formulas=True,
+    )
+
+    assert path.read_text(encoding="utf-8") == (
+        '"\t=HEADER";"PLAIN"\n'
+        '"\t=1+2"";=1+2";"safe"\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ("=", "+", "-", "@", "\t", "\r", "\n", "\0", "＝", "＋", "－", "＠"),
+)
+def test_write_csv_formula_protection_covers_spreadsheet_prefixes(tmp_path, prefix):
+    path = tmp_path / "protected-prefix.csv"
+
+    write_csv(
+        path,
+        (f"{prefix}HEADER", "SAFE"),
+        ((f"{prefix}VALUE", "ordinary"),),
+        protect_formulas=True,
+    )
+
+    with path.open(encoding="utf-8", newline="") as handle:
+        exported = list(csv.reader(handle))
+    assert exported == [
+        [f"\t{prefix}HEADER", "SAFE"],
+        [f"\t{prefix}VALUE", "ordinary"],
+    ]
 
 
 def test_write_csv_delegates_serialization_to_atomic_text_writer(tmp_path, monkeypatch):

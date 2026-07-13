@@ -311,6 +311,7 @@ def write_xlsx_result(
     theme: str = "bright",
     auto_filter: bool = True,
     auto_width: bool = True,
+    freeze_top_row: bool = True,
 ) -> None:
     """Atomically write one styled worksheet containing exactly ``rows``.
 
@@ -318,12 +319,14 @@ def write_xlsx_result(
     are validated before the optional backend or atomic writer is invoked.
     When ``auto_width`` is enabled, columns use the widest proportional header
     or data line up to a readable maximum; otherwise no explicit column widths
-    are emitted.  An enabled auto-filter adds three character units to the header
-    candidate for its dropdown control.  Wrapping remains based on visual
+    are emitted.  An enabled auto-filter adds three character units to the
+    header candidate for its dropdown control.  When ``freeze_top_row`` is
+    enabled and columns exist, the first data row anchors a frozen pane so the
+    header remains visible while scrolling.  Wrapping remains based on visual
     character count regardless of those settings, so only over-limit or
     explicitly multiline cells use wrapped alignment.  A correctly shaped
-    ``numeric_values`` matrix may
-    identify original numeric values.  A hint is used only when its exact
+    ``numeric_values`` matrix may identify original numeric values.  A hint is
+    used only when its exact
     supported Python type and text agree with the display value and Excel can
     preserve its range, precision, and fixed-point scale; malformed or unsafe
     hints fall back to literal text.  The snapshot title is stored only as
@@ -413,6 +416,9 @@ def write_xlsx_result(
                 worksheet.column_dimensions[column_letter].width = (
                     _fitted_column_width(content_width)
                 )
+
+        if freeze_top_row and copied_columns:
+            worksheet.freeze_panes = "A2"
 
         if auto_filter and copied_columns:
             last_cell = worksheet.cell(

@@ -194,13 +194,17 @@ font rendering from clipping the last characters. Wrapping remains based on
 logical visual length: values over 60 visual units or containing explicit line
 breaks are wrapped.
 
-XLSX generation uses the optional `openpyxl>=3.1` dependency. It is not a
-PLSQLWKS runtime dependency. Install the built-in plugin's manifest before
-using or testing the command:
+XLSX generation uses the optional `openpyxl>=3.1` dependency. It is not a base
+PLSQLWKS runtime dependency. Install a distribution with XLSX support through
+the standard extra:
 
 ```bash
-python3 -m pip install -r plugin-requirements/xlsx-export/requirements.txt
+python3 -m pip install 'plsqlwks[xlsx]'
 ```
+
+For an editable checkout, use `python3 -m pip install -e '.[xlsx]'`. The
+repository keeps `plugin-requirements/xlsx-export/requirements.txt` as a
+compatible fallback for existing source-checkout automation.
 
 If the dependency is unavailable, invoking the command reports a concise XLSX
 export error through the normal Plugin API UI boundary instead of preventing
@@ -217,6 +221,7 @@ PLSQLWKS_XLSX_EXPORT_THEME="dark"
 PLSQLWKS_XLSX_EXPORT_DATE_FORMAT="%d.%m.%Y"
 PLSQLWKS_XLSX_EXPORT_AUTO_FILTER="no"
 PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH="no"
+PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW="no"
 ```
 
 - `PLSQLWKS_XLSX_EXPORT_NULL_VALUE` replaces values exactly equal to the grid's
@@ -235,11 +240,15 @@ PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH="no"
   candidate includes three extra character units for the filter dropdown. It
   accepts the same boolean values, defaults to enabled, and leaves Excel's
   default column widths when disabled.
+- `PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW` keeps the first-row header visible
+  while scrolling. It accepts the same boolean values, defaults to enabled,
+  and leaves the worksheet unfrozen when disabled.
 
 When enabled, the auto-filter covers exactly the header row and currently
 loaded rows. It applies no filter criteria, so no data rows are initially
 hidden. Disabling automatic widths does not change cell wrapping: multiline
 values and values above the 60-character-unit wrapping threshold still wrap.
+Freezing is independent of the auto-filter and automatic-width settings.
 
 NULL and date transformations follow the same display-string limitations as
 CSV and HTML and remain literal spreadsheet strings. Numeric provenance is
@@ -258,6 +267,7 @@ active `config.ini`:
 separator = ,
 null_value =
 date_format =
+protect_formulas = no
 ```
 
 - `separator` is one character and defaults to `,`.
@@ -266,6 +276,12 @@ date_format =
   another marker.
 - `date_format` uses Python `strftime` directives. It defaults to empty, which
   preserves the displayed value.
+- `protect_formulas` accepts normal INI boolean values and defaults to `no`.
+  When enabled, the plugin protects both headers and formatted data fields
+  that begin with spreadsheet formula-triggering ASCII, control, or full-width
+  characters. It prefixes those values with a tab and quotes every field so
+  the tab remains inside its CSV cell. Missing or malformed values fall back
+  to `no`.
 
 Date formatting is deliberately conservative because Plugin API snapshots
 contain display strings rather than Oracle type metadata. It is applied only
@@ -275,6 +291,12 @@ Invalid dates, ISO values using other shapes, and all nonmatching text remain
 unchanged. A character value with the same valid shape is indistinguishable
 from a date and is formatted too. The directives supported by `strftime` can
 vary slightly by platform.
+
+Formula protection is intended for human spreadsheet viewing. It deliberately
+turns leading signed values such as `-42` into text and exposes the added tab
+to programmatic CSV readers. There is no universal neutralization across all
+spreadsheet applications or save/re-open workflows, so use this opt-in mode
+for the target spreadsheet workflow rather than as a lossless round trip.
 
 This section configures only the PLSQLWKS-supplied plugin. Plugin API v1 has no
 generic configuration schema and does not expose these settings to installed
@@ -290,9 +312,9 @@ python3 -m pytest -q -m plugin
 PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q
 ```
 
-Additional requirements for each repository plugin belong in
-`plugin-requirements/<plugin-id>/requirements.txt`. Install the relevant file
-before its optional tests. The built-in `csv-export` plugin has no extra
-dependencies beyond PLSQLWKS and the Python standard library; neither does the
-built-in `html-export` plugin. The built-in `xlsx-export` plugin requires
-`openpyxl>=3.1`; it remains outside the core runtime dependency set.
+Compatibility manifests for repository plugins remain under
+`plugin-requirements/<plugin-id>/requirements.txt`. The built-in `csv-export`
+and `html-export` plugins have no extra dependencies beyond PLSQLWKS and the
+Python standard library. The built-in `xlsx-export` plugin uses the standard
+`xlsx` extra for `openpyxl>=3.1`; its manifest is retained as a synchronized
+source-checkout fallback.

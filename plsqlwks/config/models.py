@@ -38,6 +38,7 @@ class AppConfig:
     csv_export_enabled: bool = True
     html_export_enabled: bool = True
     xlsx_export_enabled: bool = True
+    csv_export_protect_formulas: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.max_rows, bool) or not isinstance(self.max_rows, int) or self.max_rows <= 0:

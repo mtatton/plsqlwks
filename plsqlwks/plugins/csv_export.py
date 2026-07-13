@@ -36,11 +36,15 @@ class CsvExportOptions:
     an empty CSV field, and preserve ISO-display values.  ``date_format`` uses
     :meth:`datetime.strftime` syntax; an empty format leaves date and timestamp
     display strings unchanged.
+    ``protect_formulas`` opts into spreadsheet-oriented formula-injection
+    protection; it is disabled by default so machine-readable CSV output stays
+    byte-for-byte compatible.
     """
 
     separator: str = ","
     null_value: str = _NULL_DISPLAY_VALUE
     date_format: str = ""
+    protect_formulas: bool = False
 
 
 def local_now() -> datetime:
@@ -87,6 +91,7 @@ def export_loaded_rows(
                 date_format=options.date_format,
             ),
             delimiter=options.separator,
+            protect_formulas=options.protect_formulas,
         )
     except Exception as error:
         context.set_status(f"CSV export failed: {short_error(error)}")
