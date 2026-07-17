@@ -12,14 +12,27 @@ import csv
 from io import StringIO
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import BinaryIO, Callable, Iterable, Sequence, TextIO, cast
 
 
 CSV_LINE_TERMINATOR = "\n"
+CSV_WRITER_LINE_TERMINATOR = "\r\n"
 CSV_FORMULA_PREFIXES = frozenset(
     ("=", "+", "-", "@", "\t", "\r", "\n", "\0", "＝", "＋", "－", "＠")
 )
+
+
+def preserve_existing_posix_permissions(path: Path, temporary_path: Path) -> None:
+    """Copy an existing destination's permission bits to its replacement."""
+    if os.name != "posix":
+        return
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        return
+    temporary_path.chmod(mode)
 
 
 def atomic_write_binary(path: Path, writer: Callable[[BinaryIO], None]) -> None:
@@ -44,6 +57,7 @@ def atomic_write_binary(path: Path, writer: Callable[[BinaryIO], None]) -> None:
         ) as handle:
             temporary_path = Path(handle.name)
             writer(cast(BinaryIO, handle))
+        preserve_existing_posix_permissions(path, temporary_path)
         os.replace(temporary_path, path)
         temporary_path = None
     except BaseException:
@@ -55,7 +69,12 @@ def atomic_write_binary(path: Path, writer: Callable[[BinaryIO], None]) -> None:
         raise
 
 
-def atomic_write_text(path: Path, writer: Callable[[TextIO], None]) -> None:
+def atomic_write_text(
+    path: Path,
+    writer: Callable[[TextIO], None],
+    *,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     """Write a complete UTF-8 text file and atomically install it at ``path``.
 
     The parent directory is created first.  ``writer`` receives a temporary
@@ -63,7 +82,9 @@ def atomic_write_text(path: Path, writer: Callable[[TextIO], None]) -> None:
     The temporary file is closed before :func:`os.replace`, which is important
     on Windows.  Any failure, including a non-``Exception`` interruption,
     triggers best-effort temporary-file cleanup and leaves an existing
-    destination untouched until replacement succeeds.
+    destination untouched until replacement succeeds.  ``before_replace``,
+    when provided, runs after the temporary file is closed and immediately
+    before replacement so callers can perform a last-moment conflict check.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
@@ -79,6 +100,9 @@ def atomic_write_text(path: Path, writer: Callable[[TextIO], None]) -> None:
         ) as handle:
             temporary_path = Path(handle.name)
             writer(cast(TextIO, handle))
+        if before_replace is not None:
+            before_replace()
+        preserve_existing_posix_permissions(path, temporary_path)
         os.replace(temporary_path, path)
         temporary_path = None
     except BaseException:
@@ -113,20 +137,34 @@ def write_csv(
         raise ValueError("CSV delimiter must be exactly one character")
 
     def write_rows(handle: TextIO) -> None:
-        writer = csv.writer(
-            handle,
-            delimiter=delimiter,
-            lineterminator=CSV_LINE_TERMINATOR,
-            quoting=csv.QUOTE_ALL if protect_formulas else csv.QUOTE_MINIMAL,
-        )
+        buffer = StringIO(newline="")
+
+        def write_row(row: Sequence[str]) -> None:
+            writer = csv.writer(
+                buffer,
+                delimiter=delimiter,
+                # Python 3.10 only quotes characters present in a CRLF
+                # terminator; normalize the record ending after each row.
+                lineterminator=CSV_WRITER_LINE_TERMINATOR,
+                quoting=csv.QUOTE_ALL if protect_formulas else csv.QUOTE_MINIMAL,
+                escapechar=_csv_nul_workaround_escapechar(row, delimiter),
+            )
+            writer.writerow(row)
+            encoded = buffer.getvalue()
+            handle.write(encoded[: -len(CSV_WRITER_LINE_TERMINATOR)])
+            handle.write(CSV_LINE_TERMINATOR)
+            buffer.seek(0)
+            buffer.truncate()
+
         if columns:
-            writer.writerow(_protect_csv_formulas(columns) if protect_formulas else columns)
+            write_row(_protect_csv_formulas(columns) if protect_formulas else columns)
         output_rows = (
             (_protect_csv_formulas(row) for row in rows)
             if protect_formulas
             else rows
         )
-        writer.writerows(output_rows)
+        for row in output_rows:
+            write_row(row)
 
     atomic_write_text(path, write_rows)
 
@@ -139,9 +177,33 @@ def _protect_csv_formulas(values: Sequence[str]) -> tuple[str, ...]:
     )
 
 
+def _csv_nul_workaround_escapechar(
+    values: Sequence[str],
+    delimiter: str,
+) -> str | None:
+    """Work around Python 3.10's requirement for an escapechar around NUL."""
+    if all("\0" not in value for value in values):
+        return None
+    used = {delimiter, '"', "\r", "\n", "\0"}
+    for value in values:
+        used.update(value)
+    for codepoint in range(1, 0x110000):
+        if 0xD800 <= codepoint <= 0xDFFF:
+            continue
+        candidate = chr(codepoint)
+        if candidate not in used:
+            return candidate
+    raise ValueError("CSV row contains every available escape character")
+
+
 def csv_cell(value: str) -> str:
     """Return one value using the CSV encoding used by :func:`write_csv`."""
     buffer = StringIO(newline="")
-    writer = csv.writer(buffer, lineterminator=CSV_LINE_TERMINATOR)
-    writer.writerow((value, ""))
-    return buffer.getvalue()[: -len("," + CSV_LINE_TERMINATOR)]
+    row = (value, "")
+    writer = csv.writer(
+        buffer,
+        lineterminator=CSV_WRITER_LINE_TERMINATOR,
+        escapechar=_csv_nul_workaround_escapechar(row, ","),
+    )
+    writer.writerow(row)
+    return buffer.getvalue()[: -len("," + CSV_WRITER_LINE_TERMINATOR)]

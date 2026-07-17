@@ -33,6 +33,7 @@ from .transactions import edit_operation_savepoint
 
 
 ORACLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
+ISO_FRACTION_RE = re.compile(r"\.(?P<digits>\d+)(?:[Zz]|[+-]\d{2}:\d{2})?$")
 TAIL_KEYWORDS = {
     "WHERE",
     "ORDER",
@@ -127,7 +128,8 @@ class EditingMixin:
             raise ReadOnlyModeError("Cell updates are disabled in read-only mode")
         table_name, column_name, metadata = self.validated_edit_target(context, column_index)
         ensure_editable_original(original_value, metadata)
-        value = convert_edit_value(value_text, metadata)
+        use_sysdate = is_sysdate_edit_expression(value_text, metadata)
+        value = None if use_sysdate else convert_edit_value(value_text, metadata)
         if not rowid or rowid == NULL_DISPLAY_TOKEN:
             raise ValueError("Selected row has no ROWID")
         conn = self.ensure_connected()
@@ -146,18 +148,18 @@ class EditingMixin:
                         original_value,
                         metadata,
                     )
-                    params = {
-                        "new_value": value,
-                        "target_rowid": rowid,
-                        **original_params,
-                    }
+                    params = {"target_rowid": rowid, **original_params}
+                    value_sql = "sysdate" if use_sysdate else ":new_value"
+                    if not use_sysdate:
+                        params["new_value"] = value
                     set_edit_input_sizes(
                         cursor,
                         metadata,
+                        include_new=not use_sysdate,
                         include_original="original_value" in original_params,
                     )
                     cursor.execute(
-                        f"update {table_name} set {column_name} = :new_value "
+                        f"update {table_name} set {column_name} = {value_sql} "
                         f"where rowid = chartorowid(:target_rowid) and {predicate}",
                         **params,
                     )
@@ -202,17 +204,20 @@ class EditingMixin:
         if self.read_only:
             raise ReadOnlyModeError("Row inserts are disabled in read-only mode")
         table_name, insert_columns = self.validated_insert_targets(context, result_column_count)
-        values = [
-            convert_edit_value(
-                values_by_column_index.get(column_index, NULL_DISPLAY_TOKEN),
-                metadata,
-            )
-            for column_index, _, metadata in insert_columns
-        ]
         bind_names = [f"value_{idx}" for idx in range(len(insert_columns))]
         columns_sql = ", ".join(column_name for _, column_name, _ in insert_columns)
-        binds_sql = ", ".join(f":{bind_name}" for bind_name in bind_names)
-        params: dict[str, object] = dict(zip(bind_names, values))
+        value_expressions: list[str] = []
+        insert_bindings: list[tuple[str, ResultColumnMetadata | None]] = []
+        params: dict[str, object] = {}
+        for bind_name, (column_index, _, metadata) in zip(bind_names, insert_columns):
+            value_text = values_by_column_index.get(column_index, NULL_DISPLAY_TOKEN)
+            if is_sysdate_edit_expression(value_text, metadata):
+                value_expressions.append("sysdate")
+                continue
+            value_expressions.append(f":{bind_name}")
+            params[bind_name] = convert_edit_value(value_text, metadata)
+            insert_bindings.append((bind_name, metadata))
+        values_sql = ", ".join(value_expressions)
         conn = self.ensure_connected()
         cursor = conn.cursor()
         cursor.outputtypehandler = decimal_output_type_handler
@@ -226,9 +231,9 @@ class EditingMixin:
                 ):
                     new_rowid_var = cursor.var(str)
                     params["new_rowid"] = new_rowid_var
-                    set_insert_input_sizes(cursor, bind_names, insert_columns)
+                    set_insert_input_sizes(cursor, insert_bindings)
                     cursor.execute(
-                        f"insert into {table_name} ({columns_sql}) values ({binds_sql}) returning rowid into :new_rowid",
+                        f"insert into {table_name} ({columns_sql}) values ({values_sql}) returning rowid into :new_rowid",
                         **params,
                     )
                     if cursor.rowcount != 1:
@@ -376,10 +381,19 @@ def convert_edit_value(text: str, metadata: ResultColumnMetadata | None) -> Any:
             raise ValueError(f"{edit_type_name(metadata)} values must be finite")
         return number
     if type_code is oracledb.DB_TYPE_DATE:
-        value_datetime = parse_iso_datetime(stripped, "DATE")
+        fraction_match = ISO_FRACTION_RE.search(stripped)
+        parse_text = stripped
+        if fraction_match is not None:
+            digits = fraction_match.group("digits")
+            parse_text = (
+                stripped[: fraction_match.start("digits")]
+                + digits[:6].ljust(6, "0")
+                + stripped[fraction_match.end("digits") :]
+            )
+        value_datetime = parse_iso_datetime(parse_text, "DATE")
         if value_datetime.tzinfo is not None:
             raise ValueError("DATE values must not include a time zone")
-        if value_datetime.microsecond:
+        if fraction_match is not None:
             raise ValueError("DATE values cannot include fractional seconds")
         return value_datetime
     if type_code is oracledb.DB_TYPE_TIMESTAMP:
@@ -395,6 +409,18 @@ def convert_edit_value(text: str, metadata: ResultColumnMetadata | None) -> Any:
             return False
         raise ValueError("BOOLEAN values must be true or false")
     raise ValueError(edit_metadata_rejection_reason(metadata) or "Column type is not editable")
+
+
+def is_sysdate_edit_expression(
+    text: str,
+    metadata: ResultColumnMetadata | None,
+) -> bool:
+    if metadata is None:
+        return False
+    type_code = metadata.type_code
+    return (
+        type_code is oracledb.DB_TYPE_DATE or type_code is oracledb.DB_TYPE_TIMESTAMP
+    ) and text.strip().casefold() == "sysdate"
 
 
 def parse_iso_datetime(text: str, type_name: str) -> datetime:
@@ -467,6 +493,7 @@ def set_edit_input_sizes(
     cursor: Any,
     metadata: ResultColumnMetadata | None,
     *,
+    include_new: bool,
     include_original: bool,
 ) -> None:
     setter = getattr(cursor, "setinputsizes", None)
@@ -474,7 +501,8 @@ def set_edit_input_sizes(
         return
     sizes: dict[str, Any] = {"target_rowid": oracledb.DB_TYPE_VARCHAR}
     if metadata is not None and metadata.type_code is not None:
-        sizes["new_value"] = metadata.type_code
+        if include_new:
+            sizes["new_value"] = metadata.type_code
         if include_original:
             sizes["original_value"] = metadata.type_code
     setter(**sizes)
@@ -482,15 +510,14 @@ def set_edit_input_sizes(
 
 def set_insert_input_sizes(
     cursor: Any,
-    bind_names: list[str],
-    insert_columns: list[tuple[int, str, ResultColumnMetadata | None]],
+    insert_bindings: list[tuple[str, ResultColumnMetadata | None]],
 ) -> None:
     setter = getattr(cursor, "setinputsizes", None)
     if not callable(setter):
         return
     sizes = {
         bind_name: metadata.type_code
-        for bind_name, (_, _, metadata) in zip(bind_names, insert_columns)
+        for bind_name, metadata in insert_bindings
         if metadata is not None and metadata.type_code is not None
     }
     if sizes:

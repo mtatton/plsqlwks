@@ -7,6 +7,15 @@ import re
 
 import pytest
 
+from tests.oracle_matrix import (
+    OracleMatrixConfigurationError,
+    OracleMatrixSafetyError,
+    VerifiedOracleMatrix,
+    load_oracle_matrix_config,
+    oracle_matrix_requested,
+    run_oracle_matrix_preflight,
+)
+
 
 @dataclass(frozen=True)
 class LongSpecialSqlCase:
@@ -99,14 +108,64 @@ end;""",
     )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def oracle_matrix_preflight():
+    """Fail closed before any live matrix test can mutate its endpoint."""
+
+    if not oracle_matrix_requested():
+        yield None
+        return
+    try:
+        verification = run_oracle_matrix_preflight(load_oracle_matrix_config())
+    except (OracleMatrixConfigurationError, OracleMatrixSafetyError) as exc:
+        raise pytest.UsageError(str(exc)) from None
+    try:
+        yield verification
+    finally:
+        verification.close()
+
+
+@pytest.fixture(scope="session")
+def oracle_matrix_verification(
+    oracle_matrix_preflight: VerifiedOracleMatrix | None,
+) -> VerifiedOracleMatrix:
+    if oracle_matrix_preflight is None:
+        pytest.skip("set PLSQLWKS_TEST_ORACLE_MATRIX=1 to run the Oracle matrix")
+    return oracle_matrix_preflight
+
+
+@pytest.fixture(autouse=True)
+def oracle_matrix_lock_liveness(
+    request: pytest.FixtureRequest,
+    oracle_matrix_preflight: VerifiedOracleMatrix | None,
+):
+    """Prove the cross-platform guard-row lock before and after each live test."""
+
+    if oracle_matrix_preflight is None or "oracle" not in request.node.keywords:
+        yield
+        return
+    oracle_matrix_preflight.assert_lock_alive()
+    try:
+        yield
+    finally:
+        oracle_matrix_preflight.assert_lock_alive()
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     markexpr = config.option.markexpr or ""
     oracle_requested = os.environ.get("PLSQLWKS_TEST_ORACLE") == "1"
+    matrix_requested = oracle_matrix_requested()
     oracle_explicit = oracle_requested or "oracle" in markexpr
     oracle_reason = "set PLSQLWKS_TEST_ORACLE=1 to run Oracle integration tests"
     run_oracle = False
-    if oracle_requested:
+    if matrix_requested:
+        try:
+            load_oracle_matrix_config()
+        except OracleMatrixConfigurationError as exc:
+            raise pytest.UsageError(str(exc)) from None
+        run_oracle = True
+    elif oracle_requested:
         missing = [
             name
             for name in ("ORACLE_USER", "ORACLE_DSN", "ORACLE_PASSWORD_FILE")
@@ -114,11 +173,18 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         ]
         password_file = Path(os.path.expanduser(os.environ.get("ORACLE_PASSWORD_FILE", "")))
         if missing:
-            oracle_reason = f"Oracle integration credentials are missing: {', '.join(missing)}"
-        elif not password_file.is_file():
-            oracle_reason = f"Oracle password file is unavailable: {password_file}"
-        else:
-            run_oracle = True
+            raise pytest.UsageError(
+                f"Oracle integration credentials are missing: {', '.join(missing)}"
+            )
+        try:
+            password_file_is_valid = password_file.is_file() and password_file.stat().st_size > 0
+        except OSError:
+            password_file_is_valid = False
+        if not password_file_is_valid:
+            raise pytest.UsageError(
+                "Oracle password file must be a nonempty regular file"
+            )
+        run_oracle = True
     run_pty = os.environ.get("PLSQLWKS_TEST_PTY") == "1" or "pty" in markexpr
     run_slow = os.environ.get("PLSQLWKS_TEST_SLOW") == "1" or "slow" in markexpr
     run_plugins = os.environ.get("PLSQLWKS_TEST_PLUGINS") == "1" or _marker_is_positively_selected(
@@ -130,6 +196,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if (
             ("oracle" in item.keywords and not oracle_explicit)
+            or ("oracle_matrix" in item.keywords and not matrix_requested)
             or ("plugin" in item.keywords and not run_plugins)
             or ("pty" in item.keywords and not run_pty)
             or ("slow" in item.keywords and not run_slow)

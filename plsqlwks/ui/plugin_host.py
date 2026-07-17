@@ -53,8 +53,8 @@ def snapshot_result(result: QueryResult | None) -> ResultSnapshot | None:
     """Copy a mutable query result into the tuple-based public snapshot shape.
 
     Display columns and rows plus aligned immutable numeric values cross the
-    boundary.  Continuation presence is reduced to ``has_more``; arbitrary
-    original values and editable context are not exposed.
+    boundary.  The durable missing-row fact is reduced to ``has_more``;
+    arbitrary original values and editable context are not exposed.
     """
     if result is None:
         return None
@@ -62,7 +62,7 @@ def snapshot_result(result: QueryResult | None) -> ResultSnapshot | None:
         title=result.title,
         columns=tuple(result.columns),
         rows=tuple(tuple(row) for row in result.rows),
-        has_more=result.continuation is not None,
+        has_more=result.has_more_rows,
         numeric_values=_snapshot_numeric_values(result),
     )
 

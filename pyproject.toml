@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "plsqlwks"
 dynamic = ["version"]
 description = "An ncurses SQL and PL/SQL workspace for Oracle databases."
+authors = [
+    {name = "unu2000"},
+]
 readme = "README.md"
 license = "LicenseRef-plsqlwks-Donationware"
 license-files = ["license.txt"]
@@ -23,6 +26,7 @@ classifiers = [
 Repository = "https://gitlab.com/unununu/plsqlwks"
 Issues = "https://gitlab.com/unununu/plsqlwks/-/issues"
 Changelog = "https://gitlab.com/unununu/plsqlwks/-/blob/main/CHANGELOG.md"
+Ko-fi = "https://ko-fi.com/unu2000"
 
 [project.scripts]
 plsqlwks = "plsqlwks.ui:main"
@@ -41,13 +45,17 @@ dev = [
 
 [tool.setuptools]
 include-package-data = false
+packages = [
+    "plsqlwks",
+    "plsqlwks.config",
+    "plsqlwks.db",
+    "plsqlwks.plugins",
+    "plsqlwks.ui",
+]
+py-modules = []
 
 [tool.setuptools.dynamic]
 version = {attr = "plsqlwks.__version__"}
-
-[tool.setuptools.packages.find]
-include = ["plsqlwks*"]
-exclude = ["tests*", "tools*", "workspace*", "vdb*"]
 
 [tool.ruff]
 target-version = "py310"
@@ -57,10 +65,9 @@ line-length = 120
 select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
-# The compatibility facade and application mixins intentionally re-export imports.
+# The compatibility facades intentionally re-export imports.
 "plsqlwks/config/__init__.py" = ["F401"]
 "plsqlwks/ui/__init__.py" = ["F401", "F403", "F405"]
-"plsqlwks/ui/app_*.py" = ["F401", "F403", "F405"]
 # These helpers retain the original shared-constant and facade export pattern.
 "plsqlwks/ui/browser.py" = ["F403", "F405"]
 "plsqlwks/ui/completion.py" = ["F401"]

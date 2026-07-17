@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from ..db import (
     NULL_DISPLAY_TOKEN,
@@ -16,6 +16,9 @@ from ..db import (
 from .constants import *
 from .display import clip_text, display_width, fit_text, wrap_display_text
 from .sql import INSERT_ROWID_MARKER
+
+if TYPE_CHECKING:
+    from .state import UIState
 
 @dataclass(frozen=True)
 class ResultPosition:
@@ -247,6 +250,11 @@ def is_read_only_enabled(db: object) -> bool:
     return bool(getattr(db, "read_only", False))
 
 
+def is_database_connected(db: object) -> bool:
+    connected = getattr(db, "connected", None)
+    return True if connected is None else bool(connected)
+
+
 def has_uncommitted_changes(db: object) -> bool:
     return bool(getattr(db, "has_uncommitted_changes", False))
 
@@ -304,7 +312,23 @@ def set_db_autocommit(db: object, enabled: bool) -> None:
 
 
 def is_dbms_output_result(result: QueryResult) -> bool:
-    return len(result.columns) == 1 and result.columns[0].upper() == "DBMS_OUTPUT"
+    """Return whether *result* carries explicit output without a table result.
+
+    Kept for compatibility with script-result bookkeeping.  A query can carry
+    DBMS_OUTPUT alongside real columns, so callers that aggregate output should
+    read ``result.dbms_output`` directly instead of using this predicate.
+    """
+    return not result.columns and bool(result.dbms_output or result.dbms_output_error)
+
+
+def more_rows_status(result: QueryResult, connected: bool) -> str:
+    if not result.has_more_rows:
+        return ""
+    if connected and result.continuation is not None:
+        return "More rows available; PageDown fetches more"
+    if connected:
+        return "More rows were not loaded; rerun the query"
+    return "More rows were not loaded; reconnect and rerun the query"
 
 
 def close_query_result_continuation(result: QueryResult | None) -> None:
@@ -325,13 +349,24 @@ def result_label(
     focused: bool,
     has_dbms_output: bool = False,
     read_only: bool = False,
+    connected: bool = True,
 ) -> str:
     marker = ">" if focused else "-"
     mode_name = "row" if mode == RESULT_ROW_DETAIL else "grid"
     other = "grid" if mode == RESULT_ROW_DETAIL else "row"
-    edit = " | Enter edit | INS row" if result.editable_context is not None and not read_only else ""
+    if not connected:
+        edit = " | disconnected: view-only"
+    elif result.editable_context is not None and not read_only:
+        edit = " | Enter edit | INS row"
+    else:
+        edit = ""
     output = " | F6 output" if has_dbms_output else ""
-    return f" Results {marker} {mode_name} | {result.title}: {result.message} | Tab editor{output} | F8 {other} | F10 view{edit} "
+    paging = more_rows_status(result, connected)
+    paging_hint = f" | {paging}" if paging else ""
+    return (
+        f" Results {marker} {mode_name} | {result.title}: {result.message}"
+        f"{paging_hint} | Tab editor{output} | F8 {other} | F10 view{edit} | Ctrl-C copy "
+    )
 
 
 def explain_plan_label(result: ExplainPlanResult, focused: bool, has_lines: bool) -> str:

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..db import SCHEMA_OBJECT_TYPES
 from .constants import *
 from .display import clip_text, display_width
+
+if TYPE_CHECKING:
+    from .state import FileTab
 
 @dataclass(frozen=True)
 class BrowserEntry:

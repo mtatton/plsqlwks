@@ -1,8 +1,91 @@
-include pytest.ini
+# Source distributions are intentionally allowlisted. Keep this list in sync
+# with the exact artifact manifests asserted by tests/test_packaging.py.
+global-exclude *
+
+include MANIFEST.in
 include PLUGINS.md
+include QUICKSTART.md
+include README.md
+include license.txt
+include pyproject.toml
+include pytest.ini
 include rchar.py
 include requirements.txt
-recursive-include plugin-requirements requirements.txt
+
+include plsqlwks/__init__.py
+include plsqlwks/__main__.py
+include plsqlwks/exporting.py
+include plsqlwks/html_exporting.py
+include plsqlwks/sqlbinds.py
+include plsqlwks/sqlsplit.py
+include plsqlwks/workspace.py
+include plsqlwks/xlsx_exporting.py
+
+include plsqlwks/config/__init__.py
+include plsqlwks/config/loader.py
+include plsqlwks/config/models.py
+include plsqlwks/config/paths.py
+include plsqlwks/config/session.py
+include plsqlwks/config/settings.py
+
+include plsqlwks/db/__init__.py
+include plsqlwks/db/editing.py
+include plsqlwks/db/execution.py
+include plsqlwks/db/explain.py
+include plsqlwks/db/health.py
+include plsqlwks/db/metadata.py
+include plsqlwks/db/models.py
+include plsqlwks/db/session.py
+include plsqlwks/db/sql_analysis.py
+include plsqlwks/db/transactions.py
+
+include plsqlwks/plugins/__init__.py
+include plsqlwks/plugins/_result_export.py
+include plsqlwks/plugins/api.py
+include plsqlwks/plugins/csv_export.py
+include plsqlwks/plugins/html_export.py
+include plsqlwks/plugins/loader.py
+include plsqlwks/plugins/xlsx_export.py
+
+include plsqlwks/ui/__init__.py
+include plsqlwks/ui/app.py
+include plsqlwks/ui/application_controller.py
+include plsqlwks/ui/browser.py
+include plsqlwks/ui/buffer.py
+include plsqlwks/ui/catalog.py
+include plsqlwks/ui/clipboard.py
+include plsqlwks/ui/command_dispatcher.py
+include plsqlwks/ui/commands.py
+include plsqlwks/ui/completion.py
+include plsqlwks/ui/constants.py
+include plsqlwks/ui/db_operations.py
+include plsqlwks/ui/db_session.py
+include plsqlwks/ui/db_worker.py
+include plsqlwks/ui/dialogs.py
+include plsqlwks/ui/display.py
+include plsqlwks/ui/documents.py
+include plsqlwks/ui/editor_controller.py
+include plsqlwks/ui/errors.py
+include plsqlwks/ui/help.py
+include plsqlwks/ui/input_controller.py
+include plsqlwks/ui/key_reader.py
+include plsqlwks/ui/keys.py
+include plsqlwks/ui/menu.py
+include plsqlwks/ui/plugin_host.py
+include plsqlwks/ui/ports.py
+include plsqlwks/ui/query_controller.py
+include plsqlwks/ui/renderer.py
+include plsqlwks/ui/result_controller.py
+include plsqlwks/ui/result_presenter.py
+include plsqlwks/ui/results.py
+include plsqlwks/ui/sql.py
+include plsqlwks/ui/state.py
+include plsqlwks/ui/syntax.py
+include plsqlwks/ui/viewport.py
+
+include plugin-requirements/csv-export/requirements.txt
+include plugin-requirements/html-export/requirements.txt
+include plugin-requirements/xlsx-export/requirements.txt
 include tests/conftest.py
 include tests/fixtures/config_exports.txt
 include tests/fixtures/ui_exports.txt

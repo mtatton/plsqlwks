@@ -694,6 +694,7 @@ HELP_SECTIONS = [
             ("Home / End", "First/last result column"),
             ("Ctrl-Home/End", "First/last result row"),
             ("F8", "Toggle grid/row detail"),
+            ("Ctrl-C", "Copy selected cell"),
             ("F10", "View full selected cell"),
             ("Enter", "Edit ROWID-backed cell when available"),
             ("INS", "Prepare draft row for ROWID-backed insert"),

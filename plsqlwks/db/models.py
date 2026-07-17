@@ -50,6 +50,14 @@ class QueryResultPage:
     message: str
     original_rows: list[list[Any]] = field(default_factory=list, repr=False, compare=False)
     continuation: QueryResultContinuation | None = field(default=None, repr=False, compare=False)
+    dbms_output: list[str] = field(default_factory=list)
+    dbms_output_error: str = ""
+    warnings: list[str] = field(default_factory=list)
+    has_more_rows: bool = False
+
+    def __post_init__(self) -> None:
+        if self.continuation is not None and not self.has_more_rows:
+            object.__setattr__(self, "has_more_rows", True)
 
 
 @dataclass
@@ -62,6 +70,17 @@ class QueryResult:
     edit_message: str = ""
     continuation: QueryResultContinuation | None = field(default=None, repr=False, compare=False)
     original_rows: list[list[Any]] = field(default_factory=list, repr=False, compare=False)
+    dbms_output: list[str] = field(default_factory=list)
+    dbms_output_error: str = ""
+    warnings: list[str] = field(default_factory=list)
+    diagnostics: list[PlsqlCompileDiagnostic] = field(default_factory=list)
+    statement_start_line: int | None = field(default=None, repr=False, compare=False)
+    statement_start_col: int | None = field(default=None, repr=False, compare=False)
+    has_more_rows: bool = False
+
+    def __post_init__(self) -> None:
+        if self.continuation is not None:
+            self.has_more_rows = True
 
 
 @dataclass(frozen=True)
@@ -103,6 +122,7 @@ class OracleExecutionError(RuntimeError):
         dbms_output: list[str] | None = None,
         dbms_output_error: str = "",
         statement: str = "",
+        warnings: list[str] | None = None,
     ):
         super().__init__(str(original))
         self.original = original
@@ -110,6 +130,7 @@ class OracleExecutionError(RuntimeError):
         self.dbms_output = list(dbms_output or [])
         self.dbms_output_error = dbms_output_error
         self.statement = statement
+        self.warnings = list(warnings or [])
 
 
 class EditOperationRollbackError(RuntimeError):
@@ -244,6 +265,7 @@ class PlsqlCompileDiagnostic:
     line: int
     position: int
     text: str
+    severity: str = "ERROR"
 
 
 class OracleCompilationError(RuntimeError):
@@ -287,4 +309,7 @@ def format_compilation_error(plsql_object: PlsqlObject, diagnostics: list[PlsqlC
 
 
 def format_compile_diagnostic(diagnostic: PlsqlCompileDiagnostic) -> str:
-    return f"line {diagnostic.line}, column {diagnostic.position}: {diagnostic.text}"
+    return (
+        f"line {diagnostic.line}, column {diagnostic.position} "
+        f"[{diagnostic.severity}]: {diagnostic.text}"
+    )

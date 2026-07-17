@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 import re
+from time import monotonic
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -26,7 +27,9 @@ from .models import (
     QueryResultPage,
     ResultColumnMetadata,
     TruncatedLobValue,
+    format_compile_diagnostic,
 )
+from .transactions import transaction_statement_kind
 
 
 ORACLE_IDENTIFIER_RE = r'(?:"(?:""|[^"])*"|[A-Za-z][A-Za-z0-9_$#]*)'
@@ -52,6 +55,31 @@ class _QueryResultContinuationState:
     elapsed_seconds: float
 
 
+class _DbmsOutputDrainError(RuntimeError):
+    def __init__(
+        self,
+        output: list[str],
+        read_error: Exception | None = None,
+        cleanup_error: Exception | None = None,
+    ) -> None:
+        self.output = list(output)
+        self.read_error = read_error
+        self.cleanup_error = cleanup_error
+        parts: list[str] = []
+        if read_error is not None:
+            parts.append(str(read_error))
+        if cleanup_error is not None:
+            parts.append(f"cursor cleanup failed: {cleanup_error}")
+        super().__init__("; ".join(parts) or "DBMS_OUTPUT drain failed")
+
+
+class _PlsqlDiagnosticReadError(RuntimeError):
+    def __init__(self, original: Exception, warnings: list[str]) -> None:
+        super().__init__(str(original))
+        self.original = original
+        self.warnings = list(warnings)
+
+
 class ExecutionMixin:
     def execute_statement(
         self,
@@ -64,49 +92,115 @@ class ExecutionMixin:
         cursor = conn.cursor()
         cursor.arraysize = self.config.arraysize
         cursor.outputtypehandler = decimal_output_type_handler
-        started = datetime.now()
+        started = monotonic()
         keep_cursor_open = False
+        completed_result: QueryResult | None = None
+        primary_error: BaseException | None = None
         try:
-            def read_error_output() -> tuple[list[str], str]:
-                try:
-                    return self.read_dbms_output(), ""
-                except Exception as output_exc:
-                    return [], str(output_exc)
+            def read_output() -> tuple[list[str], str, list[str]]:
+                return self._read_dbms_output_safely()
 
             try:
                 execute_user_statement(cursor, statement, bind_values)
             except Exception as exc:
                 self.synchronize_pending_transaction(conn)
-                output, output_error = read_error_output()
-                raise OracleExecutionError(exc, title, output, output_error, statement) from exc
+                output, output_error, output_warnings = read_output()
+                raise OracleExecutionError(
+                    exc,
+                    title,
+                    output,
+                    output_error,
+                    statement,
+                    output_warnings,
+                ) from exc
             self.record_statement_transaction_state(statement, cursor.rowcount)
             self.synchronize_pending_transaction(conn)
             try:
-                compilation_error = plsql_compilation_error(conn, statement)
+                (
+                    compilation_error,
+                    compilation_diagnostics,
+                    compilation_cleanup_warnings,
+                ) = _plsql_compilation_result(conn, statement)
+            except _PlsqlDiagnosticReadError as exc:
+                output, output_error, output_warnings = read_output()
+                raise OracleExecutionError(
+                    exc.original,
+                    title,
+                    output,
+                    output_error,
+                    statement,
+                    [*exc.warnings, *output_warnings],
+                ) from exc.original
             except Exception as exc:
-                output, output_error = read_error_output()
-                raise OracleExecutionError(exc, title, output, output_error, statement) from exc
+                output, output_error, output_warnings = read_output()
+                raise OracleExecutionError(
+                    exc,
+                    title,
+                    output,
+                    output_error,
+                    statement,
+                    output_warnings,
+                ) from exc
             if compilation_error is not None:
+                commit_error: Exception | None = None
                 if self.autocommit:
                     try:
-                        conn.commit()
-                    finally:
-                        self.synchronize_pending_transaction(conn)
-                output, output_error = read_error_output()
+                        self._commit_autocommit(conn, statement)
+                    except Exception as exc:
+                        commit_error = exc
+                output, output_error, output_warnings = read_output()
+                commit_warnings = (
+                    [_autocommit_failure_warning(commit_error)]
+                    if commit_error is not None
+                    else []
+                )
                 raise OracleExecutionError(
                     compilation_error,
                     title,
                     output,
                     output_error,
                     statement,
+                    [
+                        *compilation_cleanup_warnings,
+                        *commit_warnings,
+                        *output_warnings,
+                    ],
                 ) from compilation_error
-            elapsed = (datetime.now() - started).total_seconds()
+            compilation_warnings = [
+                f"PL/SQL {format_compile_diagnostic(diagnostic)}"
+                for diagnostic in compilation_diagnostics
+                if diagnostic.severity == "WARNING"
+            ]
+            compilation_warnings.extend(compilation_cleanup_warnings)
             if cursor.description:
                 columns = [description_value(col, "name", 0, "") for col in cursor.description]
                 column_metadata = [column_metadata_from_description(col) for col in cursor.description]
-                fetched = cursor.fetchmany(self.config.max_rows + 1)
+                try:
+                    fetched = cursor.fetchmany(self.config.max_rows + 1)
+                except Exception as exc:
+                    output, output_error, output_warnings = read_output()
+                    raise OracleExecutionError(
+                        exc,
+                        title,
+                        output,
+                        output_error,
+                        statement,
+                        output_warnings,
+                    ) from exc
+                output, output_error, output_warnings = read_output()
                 result_rows = fetched[: self.config.max_rows]
-                rows, original_rows = materialize_result_rows(result_rows)
+                warnings = [*compilation_warnings, *output_warnings]
+                try:
+                    rows, original_rows = materialize_result_rows(result_rows)
+                except Exception as exc:
+                    raise OracleExecutionError(
+                        exc,
+                        title,
+                        output,
+                        output_error,
+                        statement,
+                        warnings,
+                    ) from exc
                 try:
                     editable_context, edit_message = self.editable_context_for_result(
                         statement,
@@ -116,6 +210,7 @@ class ExecutionMixin:
                 except Exception as exc:
                     editable_context = None
                     edit_message = f"Editability check failed: {exc}"
+                elapsed = monotonic() - started
                 more = ""
                 continuation = None
                 if len(fetched) > self.config.max_rows:
@@ -125,40 +220,91 @@ class ExecutionMixin:
                         elapsed,
                     )
                     keep_cursor_open = True
-                    more = f" (limited to {len(rows)} rows)"
-                return QueryResult(
+                    more = (
+                        f" (limited to {len(rows)} rows; more rows available)"
+                    )
+                completed_result = QueryResult(
                     title=title,
                     columns=columns,
                     rows=rows,
-                    message=f"{len(rows)} row(s){more} in {elapsed:.2f}s",
+                    message=(
+                        f"{len(rows)} row(s){more} in {elapsed:.2f}s"
+                        f"{_dbms_output_message_suffix(output, warnings)}"
+                    ),
                     editable_context=editable_context,
                     edit_message=edit_message,
                     continuation=continuation,
                     original_rows=original_rows,
+                    dbms_output=output,
+                    dbms_output_error=output_error,
+                    warnings=warnings,
+                    diagnostics=compilation_diagnostics,
+                    has_more_rows=continuation is not None,
                 )
+                return completed_result
             if self.autocommit:
                 try:
-                    conn.commit()
-                finally:
-                    self.synchronize_pending_transaction(conn)
-            output, output_error = read_error_output()
-            columns = ["DBMS_OUTPUT"] if output else []
-            rows = [[line] for line in output]
-            output_msg = f"; {len(output)} dbms_output line(s)" if output else ""
-            output_warning = f"; warning: DBMS_OUTPUT read failed: {output_error}" if output_error else ""
+                    self._commit_autocommit(conn, statement)
+                except Exception as exc:
+                    output, output_error, output_warnings = read_output()
+                    raise OracleExecutionError(
+                        exc,
+                        title,
+                        output,
+                        output_error,
+                        statement,
+                        [
+                            _autocommit_failure_warning(exc),
+                            *output_warnings,
+                        ],
+                    ) from exc
+            output, output_error, output_warnings = read_output()
+            elapsed = monotonic() - started
+            warnings = [*compilation_warnings, *output_warnings]
             tx_msg = "; pending commit" if not self.autocommit and self.has_uncommitted_changes else ""
-            return QueryResult(
+            completed_result = QueryResult(
                 title=title,
-                columns=columns,
-                rows=rows,
+                columns=[],
+                rows=[],
                 message=(
                     f"{cursor.rowcount if cursor.rowcount >= 0 else 0} row(s) affected "
-                    f"in {elapsed:.2f}s{output_msg}{output_warning}{tx_msg}"
+                    f"in {elapsed:.2f}s"
+                    f"{_dbms_output_message_suffix(output, warnings)}{tx_msg}"
                 ),
+                dbms_output=output,
+                dbms_output_error=output_error,
+                warnings=warnings,
+                diagnostics=compilation_diagnostics,
             )
+            return completed_result
+        except BaseException as exc:
+            primary_error = exc
+            self._mark_transaction_unknown_if_unhealthy(statement, conn)
+            raise
         finally:
             if not keep_cursor_open:
-                cursor.close()
+                try:
+                    cursor.close()
+                except BaseException as exc:
+                    if not isinstance(exc, Exception):
+                        self._mark_transaction_unknown_if_unhealthy(statement, conn)
+                        raise
+                    if completed_result is not None:
+                        _append_result_warning(
+                            completed_result,
+                            f"Statement cursor cleanup failed: {exc}",
+                        )
+                    elif isinstance(primary_error, OracleExecutionError):
+                        primary_error.warnings.append(
+                            f"Statement cursor cleanup failed: {exc}"
+                        )
+                    elif primary_error is not None:
+                        _add_exception_note(
+                            primary_error,
+                            f"Statement cursor cleanup also failed: {exc}",
+                        )
+                    else:
+                        raise
 
     def fetch_more_rows(
         self,
@@ -168,33 +314,75 @@ class ExecutionMixin:
         state = self._result_continuations.get(continuation.token)
         if state is None:
             raise RuntimeError("Query result is stale or no longer available")
-        started = datetime.now()
+        started = monotonic()
         try:
-            fetched = [state.lookahead_row, *state.cursor.fetchmany(self.config.max_rows)]
-            elapsed = state.elapsed_seconds + (datetime.now() - started).total_seconds()
+            try:
+                fetched = [
+                    state.lookahead_row,
+                    *state.cursor.fetchmany(self.config.max_rows),
+                ]
+            except Exception as exc:
+                output, output_error, output_warnings = (
+                    self._read_dbms_output_safely()
+                )
+                raise OracleExecutionError(
+                    exc,
+                    "Fetch rows",
+                    output,
+                    output_error,
+                    warnings=output_warnings,
+                ) from exc
+            output, output_error, warnings = self._read_dbms_output_safely()
             result_rows = fetched[: self.config.max_rows]
-            rows, original_rows = materialize_result_rows(result_rows)
+            try:
+                rows, original_rows = materialize_result_rows(result_rows)
+            except Exception as exc:
+                raise OracleExecutionError(
+                    exc,
+                    "Fetch rows",
+                    output,
+                    output_error,
+                    warnings=warnings,
+                ) from exc
             total_loaded_rows = loaded_rows + len(rows)
             more = ""
             next_continuation: QueryResultContinuation | None = None
             if len(fetched) > self.config.max_rows:
                 state.lookahead_row = fetched[self.config.max_rows]
-                state.elapsed_seconds = elapsed
                 next_continuation = continuation
-                more = f" (limited to {total_loaded_rows} rows)"
+                more = (
+                    f" (limited to {total_loaded_rows} rows; more rows available)"
+                )
             else:
-                self.close_result_continuation(continuation)
-            return QueryResultPage(
+                try:
+                    self.close_result_continuation(continuation)
+                except Exception as exc:
+                    warnings.append(f"Statement cursor cleanup failed: {exc}")
+            elapsed = state.elapsed_seconds + (monotonic() - started)
+            if next_continuation is not None:
+                state.elapsed_seconds = elapsed
+            page = QueryResultPage(
                 rows,
-                f"{total_loaded_rows} row(s){more} in {elapsed:.2f}s",
+                (
+                    f"{total_loaded_rows} row(s){more} in {elapsed:.2f}s"
+                    f"{_dbms_output_message_suffix(output, warnings)}"
+                ),
                 original_rows,
                 next_continuation,
+                output,
+                output_error,
+                warnings,
+                next_continuation is not None,
             )
-        except BaseException:
+            return page
+        except BaseException as exc:
             try:
                 self.close_result_continuation(continuation)
-            except Exception:
-                pass
+            except Exception as close_exc:
+                if isinstance(exc, OracleExecutionError):
+                    exc.warnings.append(
+                        f"Statement cursor cleanup failed: {close_exc}"
+                    )
             raise
 
     def close_result_continuation(self, continuation: QueryResultContinuation) -> None:
@@ -235,6 +423,8 @@ class ExecutionMixin:
         for idx, statement in enumerate(statements, start=1):
             title = f"Statement {idx} lines {statement.start_line}-{statement.end_line}"
             result = self.execute_statement(statement.text, title=title)
+            result.statement_start_line = statement.start_line
+            result.statement_start_col = statement.start_col
             self._append_script_result(results, result)
         if not statements:
             results.append(QueryResult("Script", [], [], "No statements to execute."))
@@ -270,13 +460,65 @@ class ExecutionMixin:
         finally:
             cursor.close()
 
+    def _read_dbms_output_safely(self) -> tuple[list[str], str, list[str]]:
+        try:
+            return self.read_dbms_output(), "", []
+        except _DbmsOutputDrainError as exc:
+            warnings: list[str] = []
+            output_error = ""
+            if exc.read_error is not None:
+                output_error = str(exc.read_error)
+                warnings.append(f"DBMS_OUTPUT read failed: {output_error}")
+            if exc.cleanup_error is not None:
+                warnings.append(
+                    f"DBMS_OUTPUT cursor cleanup failed: {exc.cleanup_error}"
+                )
+            return exc.output, output_error, warnings
+        except Exception as exc:
+            error = str(exc)
+            return [], error, [f"DBMS_OUTPUT read failed: {error}"]
+
+    def _mark_transaction_unknown_if_unhealthy(
+        self,
+        statement: str,
+        connection: Any,
+    ) -> None:
+        if not transaction_statement_kind(statement):
+            return
+        is_healthy = getattr(connection, "is_healthy", None)
+        if not callable(is_healthy):
+            return
+        try:
+            healthy = bool(is_healthy())
+        except BaseException:
+            healthy = False
+        if not healthy:
+            self.mark_pending_transaction_unknown()
+
+    def _commit_autocommit(self, connection: Any, statement: str) -> None:
+        try:
+            connection.commit()
+        except BaseException as exc:
+            try:
+                self.synchronize_pending_transaction(connection)
+            except BaseException as sync_exc:
+                _add_exception_note(
+                    exc,
+                    f"Transaction-state synchronization also failed: {sync_exc}",
+                )
+            if transaction_statement_kind(statement) or self.has_uncommitted_changes:
+                self.mark_pending_transaction_unknown()
+            raise
+        self.synchronize_pending_transaction(connection)
+
     def read_dbms_output(self) -> list[str]:
         conn = self.ensure_connected()
         cursor = conn.cursor()
-        lines_var = cursor.arrayvar(str, DBMS_OUTPUT_FETCH_LINES, DBMS_OUTPUT_LINE_SIZE)
-        count_var = cursor.var(int)
         output: list[str] = []
+        read_error: BaseException | None = None
         try:
+            lines_var = cursor.arrayvar(str, DBMS_OUTPUT_FETCH_LINES, DBMS_OUTPUT_LINE_SIZE)
+            count_var = cursor.var(int)
             while True:
                 count_var.setvalue(0, DBMS_OUTPUT_FETCH_LINES)
                 cursor.callproc("dbms_output.get_lines", [lines_var, count_var])
@@ -286,8 +528,26 @@ class ExecutionMixin:
                 output.extend(lines_var.getvalue()[:count])
                 if count < DBMS_OUTPUT_FETCH_LINES:
                     break
-        finally:
+        except BaseException as exc:
+            read_error = exc
+        cleanup_error: Exception | None = None
+        try:
             cursor.close()
+        except Exception as exc:
+            cleanup_error = exc
+        if read_error is not None:
+            if isinstance(read_error, Exception):
+                raise _DbmsOutputDrainError(
+                    output,
+                    read_error,
+                    cleanup_error,
+                ) from read_error
+            raise read_error
+        if cleanup_error is not None:
+            raise _DbmsOutputDrainError(
+                output,
+                cleanup_error=cleanup_error,
+            ) from cleanup_error
         return output
 
 
@@ -297,7 +557,27 @@ def format_value(value: Any, *, lob_limit: int = LOB_DISPLAY_LIMIT) -> str:
 
 
 def _is_dbms_output_result(result: QueryResult) -> bool:
-    return len(result.columns) == 1 and result.columns[0].upper() == "DBMS_OUTPUT"
+    return not result.columns and bool(result.dbms_output or result.dbms_output_error)
+
+
+def _dbms_output_message_suffix(output: list[str], warnings: list[str]) -> str:
+    suffix = f"; {len(output)} dbms_output line(s)" if output else ""
+    return suffix + "".join(f"; warning: {warning}" for warning in warnings)
+
+
+def _autocommit_failure_warning(exc: Exception) -> str:
+    return f"Autocommit commit failed; transaction outcome is unknown: {exc}"
+
+
+def _add_exception_note(exc: BaseException, note: str) -> None:
+    add_note = getattr(exc, "add_note", None)
+    if callable(add_note):
+        add_note(note)
+
+
+def _append_result_warning(result: QueryResult, warning: str) -> None:
+    result.warnings.append(warning)
+    result.message += f"; warning: {warning}"
 
 
 def materialize_result_value(
@@ -427,29 +707,66 @@ def execute_user_statement(
 
 
 def plsql_compilation_error(conn: Any, statement: str) -> OracleCompilationError | None:
+    compilation_error, _, _ = _plsql_compilation_result(conn, statement)
+    return compilation_error
+
+
+def _plsql_compilation_result(
+    conn: Any,
+    statement: str,
+) -> tuple[
+    OracleCompilationError | None,
+    list[PlsqlCompileDiagnostic],
+    list[str],
+]:
     plsql_object = plsql_object_from_create_statement(statement)
     if plsql_object is None:
-        return None
+        return None, [], []
     cursor = conn.cursor()
+    diagnostics: list[PlsqlCompileDiagnostic] = []
+    read_error: BaseException | None = None
     try:
         diagnostics = fetch_plsql_compile_diagnostics(cursor, plsql_object)
-    finally:
+    except BaseException as exc:
+        read_error = exc
+    cleanup_error: Exception | None = None
+    try:
         cursor.close()
+    except Exception as exc:
+        cleanup_error = exc
+    cleanup_warnings = (
+        [f"PL/SQL diagnostic cursor cleanup failed: {cleanup_error}"]
+        if cleanup_error is not None
+        else []
+    )
+    if read_error is not None:
+        if isinstance(read_error, Exception) and cleanup_warnings:
+            raise _PlsqlDiagnosticReadError(
+                read_error,
+                cleanup_warnings,
+            ) from read_error
+        raise read_error
+    diagnostics = _offset_plsql_compile_diagnostics(statement, diagnostics)
     if not diagnostics:
-        return None
-    return OracleCompilationError(plsql_object, diagnostics)
+        return None, [], cleanup_warnings
+    if any(diagnostic.severity == "ERROR" for diagnostic in diagnostics):
+        return (
+            OracleCompilationError(plsql_object, diagnostics),
+            diagnostics,
+            cleanup_warnings,
+        )
+    return None, diagnostics, cleanup_warnings
 
 
 def fetch_plsql_compile_diagnostics(cursor: Any, plsql_object: PlsqlObject) -> list[PlsqlCompileDiagnostic]:
     if plsql_object.owner:
         cursor.execute(
             """
-            select line, position, text
+            select line, position, text, attribute
             from all_errors
             where owner = :owner
               and name = :object_name
               and type = :object_type
-              and attribute = 'ERROR'
             order by sequence
             """,
             {
@@ -461,11 +778,10 @@ def fetch_plsql_compile_diagnostics(cursor: Any, plsql_object: PlsqlObject) -> l
     else:
         cursor.execute(
             """
-            select line, position, text
+            select line, position, text, attribute
             from user_errors
             where name = :object_name
               and type = :object_type
-              and attribute = 'ERROR'
             order by sequence
             """,
             {
@@ -478,8 +794,38 @@ def fetch_plsql_compile_diagnostics(cursor: Any, plsql_object: PlsqlObject) -> l
             line=int(row[0] or 1),
             position=int(row[1] or 1),
             text=str(row[2]).strip(),
+            severity=(
+                str(row[3] or "ERROR").strip().upper()
+                if len(row) > 3
+                else "ERROR"
+            ),
         )
         for row in cursor.fetchall()
+    ]
+
+
+def _offset_plsql_compile_diagnostics(
+    statement: str,
+    diagnostics: list[PlsqlCompileDiagnostic],
+) -> list[PlsqlCompileDiagnostic]:
+    sql = strip_leading_sql_comments(statement)
+    if not sql:
+        return diagnostics
+    prefix = statement[: len(statement) - len(sql)]
+    line_offset = prefix.count("\n")
+    first_line_column_offset = len(prefix.rsplit("\n", 1)[-1])
+    return [
+        PlsqlCompileDiagnostic(
+            line=diagnostic.line + line_offset,
+            position=(
+                diagnostic.position + first_line_column_offset
+                if diagnostic.line == 1
+                else diagnostic.position
+            ),
+            text=diagnostic.text,
+            severity=diagnostic.severity,
+        )
+        for diagnostic in diagnostics
     ]
 
 

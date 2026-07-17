@@ -24,7 +24,7 @@ class AppConfig:
     max_rows: int = 200
     arraysize: int = 100
     config_file: Path | None = None
-    autocommit: bool = True
+    autocommit: bool = False
     read_only: bool = False
     remember_bind_values: bool = False
     session_tabs: tuple[SessionTab, ...] = ()

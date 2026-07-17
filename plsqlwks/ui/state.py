@@ -25,6 +25,10 @@ class DbOperationFinished:
     statement_start_line: int = 1
     statement_start_col: int = 0
     partial_results: list[QueryResult] | None = None
+    source_text: str | None = None
+    source_unchanged: bool = True
+    statement_count: int = 1
+    failed_statement_index: int | None = None
 
 
 DbOperationEvent = DbOperationProgress | DbOperationFinished
@@ -50,6 +54,15 @@ class DbOperation:
     on_error: Callable[[Exception], None] | None = None
     restore_active_tab: bool = True
     cancel_requested: bool = False
+    source_text: str | None = None
+    statement_count: int = 1
+
+
+@dataclass(frozen=True)
+class ExecutionDiagnostic:
+    line: int
+    column: int
+    message: str
 
 
 class ScriptExecutionFailed(Exception):
@@ -59,12 +72,16 @@ class ScriptExecutionFailed(Exception):
         statement_start_line: int,
         statement_start_col: int,
         partial_results: list[QueryResult],
+        statement_index: int = 1,
+        statement_count: int = 1,
     ):
         super().__init__(str(original))
         self.original = original
         self.statement_start_line = statement_start_line
         self.statement_start_col = statement_start_col
         self.partial_results = partial_results
+        self.statement_index = statement_index
+        self.statement_count = statement_count
 
 
 @dataclass
@@ -76,6 +93,7 @@ class FileTab:
     help_lines: list[HelpLine] = field(default_factory=lambda: list(HELP_LINES))
     results_scroll: int | None = None
     dbms_output: list[str] = field(default_factory=list)
+    dbms_output_grouped: bool = False
     dbms_output_scroll: int | None = None
     show_dbms_output: bool = False
     last_result: QueryResult | None = None
@@ -91,6 +109,9 @@ class FileTab:
     result_page_size: int = 10
     result_insert_draft: ResultInsertDraft | None = None
     search_query: str = ""
+    execution_diagnostics: list[ExecutionDiagnostic] = field(default_factory=list)
+    execution_diagnostic_index: int = -1
+    execution_diagnostic_source: str | None = None
 
 
 @dataclass

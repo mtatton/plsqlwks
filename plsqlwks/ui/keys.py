@@ -4,6 +4,7 @@ import curses
 import locale
 import os
 import sys
+from typing import Any
 
 from .constants import *
 
@@ -20,7 +21,7 @@ def configure_utf8_locale() -> None:
                 continue
 
 
-def write_terminal_sequence(sequence: bytes, stream: object | None = None) -> bool:
+def write_terminal_sequence(sequence: bytes, stream: Any | None = None) -> bool:
     if stream is None:
         try:
             fd = os.open("/dev/tty", os.O_WRONLY | getattr(os, "O_NOCTTY", 0))
@@ -37,6 +38,8 @@ def write_terminal_sequence(sequence: bytes, stream: object | None = None) -> bo
         except Exception:
             stream = getattr(sys, "__stdout__", sys.stdout)
 
+    if stream is None:
+        return False
     target = stream
     try:
         binary_target = getattr(target, "buffer", None)
@@ -54,11 +57,11 @@ def write_terminal_sequence(sequence: bytes, stream: object | None = None) -> bo
         return False
 
 
-def enable_extended_keyboard_reporting(stream: object | None = None) -> bool:
+def enable_extended_keyboard_reporting(stream: Any | None = None) -> bool:
     return write_terminal_sequence(EXTENDED_KEYBOARD_ENABLE, stream)
 
 
-def disable_extended_keyboard_reporting(stream: object | None = None) -> bool:
+def disable_extended_keyboard_reporting(stream: Any | None = None) -> bool:
     return write_terminal_sequence(EXTENDED_KEYBOARD_RESET, stream)
 
 

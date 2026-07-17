@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import re
 import traceback
 
-from ..db import OracleExecutionError
+from ..db import OracleCompilationError, OracleExecutionError
 from .buffer import Buffer
 from .display import wrap_display_text
 
@@ -18,6 +18,8 @@ class ErrorLocation:
 class ParsedErrorLocation:
     location: ErrorLocation
     priority: int
+    unit: str | None = None
+    external: bool = False
 
 
 @dataclass(frozen=True)
@@ -29,13 +31,17 @@ class PlsqlDiagnostic:
 
 LINE_COLUMN_RE = re.compile(r"\bline\s+(\d+)\s*,\s*column\s+(\d+)", re.IGNORECASE)
 ORA_06512_LINE_RE = re.compile(r"\bORA-06512:\s+at\s+line\s+(\d+)\b", re.IGNORECASE)
-ORA_06512_NAMED_LINE_RE = re.compile(r'\bORA-06512:\s+at\s+"[^"]+"\s*,\s*line\s+(\d+)\b', re.IGNORECASE)
+ORA_06512_NAMED_LINE_RE = re.compile(
+    r'\bORA-06512:\s+at\s+"(?P<unit>[^"]+)"\s*,\s*line\s+(?P<line>\d+)\b',
+    re.IGNORECASE,
+)
 SQLERRM_DIAGNOSTIC_RE = re.compile(
     r"\bError raised in:\s*(?P<unit>.*?)\s+at line\s+(?P<line>\d+)\s*-\s*(?P<message>.*)",
     re.IGNORECASE,
 )
 ORACLE_CANCEL_RE = re.compile(r"\bORA-01013\b|user requested cancel", re.IGNORECASE)
 ERROR_LOCATION_PRIORITY_EXACT = 0
+ERROR_LOCATION_PRIORITY_COMPILE_ERROR = -1
 ERROR_LOCATION_PRIORITY_OFFSET = 1
 ERROR_LOCATION_PRIORITY_FALLBACK = 2
 
@@ -48,24 +54,54 @@ def parse_error_location_candidates(text: str) -> list[ParsedErrorLocation]:
     candidates: list[ParsedErrorLocation] = []
     best_priority: dict[tuple[int, int], int] = {}
 
-    def add(location: ErrorLocation, priority: int) -> None:
+    def add(
+        location: ErrorLocation,
+        priority: int,
+        *,
+        unit: str | None = None,
+        external: bool = False,
+    ) -> None:
         key = (location.line, location.column)
         current_priority = best_priority.get(key)
         if current_priority is not None and current_priority <= priority:
             return
         best_priority[key] = priority
         candidates[:] = [candidate for candidate in candidates if candidate.location != location]
-        candidates.append(ParsedErrorLocation(location, priority))
+        candidates.append(
+            ParsedErrorLocation(
+                location,
+                priority,
+                unit=unit,
+                external=external,
+            )
+        )
 
     for match in LINE_COLUMN_RE.finditer(text):
         add(ErrorLocation(line=int(match.group(1)), column=int(match.group(2))), ERROR_LOCATION_PRIORITY_EXACT)
     for diagnostic in parse_plsql_diagnostics(text):
-        add(ErrorLocation(line=diagnostic.line, column=1), ERROR_LOCATION_PRIORITY_FALLBACK)
+        add(
+            ErrorLocation(line=diagnostic.line, column=1),
+            ERROR_LOCATION_PRIORITY_FALLBACK,
+            unit=diagnostic.unit,
+            external=not is_local_plsql_unit(diagnostic.unit),
+        )
     for match in ORA_06512_NAMED_LINE_RE.finditer(text):
-        add(ErrorLocation(line=int(match.group(1)), column=1), ERROR_LOCATION_PRIORITY_FALLBACK)
+        add(
+            ErrorLocation(line=int(match.group("line")), column=1),
+            ERROR_LOCATION_PRIORITY_FALLBACK,
+            unit=match.group("unit"),
+            external=True,
+        )
     for match in ORA_06512_LINE_RE.finditer(text):
         add(ErrorLocation(line=int(match.group(1)), column=1), ERROR_LOCATION_PRIORITY_FALLBACK)
     return candidates
+
+
+def is_local_plsql_unit(unit: str | None) -> bool:
+    if unit is None:
+        return True
+    normalized = unit.strip().casefold().replace(" ", "")
+    return normalized in {"", "<anonymous>", "anonymous", "anonymousblock"}
 
 
 def parse_plsql_diagnostics(text: str) -> list[PlsqlDiagnostic]:
@@ -134,6 +170,10 @@ def execution_error_lines(exc: Exception) -> list[str]:
         if exc.dbms_output_error:
             lines.append("DBMS_OUTPUT read failed:")
             lines.extend(wrap_display_text(exc.dbms_output_error, 120) or [""])
+        if exc.warnings:
+            lines.append("Warnings:")
+            for warning in exc.warnings:
+                lines.extend(wrap_display_text(warning, 120) or [""])
     return lines
 
 
@@ -170,7 +210,12 @@ def _mapped_error_location(
     if max(1, location.line) == 1:
         mapped_column += start_col
     mapped = ErrorLocation(line=mapped_line, column=mapped_column)
-    return ParsedErrorLocation(mapped, candidate.priority)
+    return ParsedErrorLocation(
+        mapped,
+        candidate.priority,
+        unit=candidate.unit,
+        external=candidate.external,
+    )
 
 
 def _execution_error_location_candidates(exc: Exception) -> list[ParsedErrorLocation]:
@@ -186,6 +231,21 @@ def _execution_error_location_candidates(exc: Exception) -> list[ParsedErrorLoca
         best_priority[key] = candidate.priority
         candidates[:] = [existing for existing in candidates if existing.location != location]
         candidates.append(candidate)
+
+    original = exc.original if isinstance(exc, OracleExecutionError) else exc
+    if isinstance(original, OracleCompilationError):
+        for diagnostic in original.diagnostics:
+            priority = (
+                ERROR_LOCATION_PRIORITY_COMPILE_ERROR
+                if diagnostic.severity.upper() == "ERROR"
+                else ERROR_LOCATION_PRIORITY_EXACT
+            )
+            add_candidate(
+                ParsedErrorLocation(
+                    ErrorLocation(diagnostic.line, diagnostic.position),
+                    priority,
+                )
+            )
 
     for text in execution_error_texts(exc):
         for candidate in parse_error_location_candidates(text):
@@ -203,6 +263,7 @@ def first_document_error_location(
     statement_start_col: int = 0,
 ) -> ErrorLocation | None:
     candidates = _execution_error_location_candidates(exc)
+    candidates = [candidate for candidate in candidates if not candidate.external]
     if not candidates:
         return None
     mapped = [
@@ -213,6 +274,116 @@ def first_document_error_location(
         mapped,
         key=lambda candidate: (candidate.priority, candidate.location.line, candidate.location.column),
     ).location
+
+
+def document_error_locations(
+    exc: Exception,
+    statement_start_line: int = 1,
+    statement_start_col: int = 0,
+) -> list[ErrorLocation]:
+    """Return ordered, deduplicated locations belonging to the executed source."""
+    candidates = [
+        _mapped_error_location(
+            candidate,
+            statement_start_line,
+            statement_start_col,
+        )
+        for candidate in _execution_error_location_candidates(exc)
+        if not candidate.external
+    ]
+    candidates.sort(
+        key=lambda candidate: (
+            candidate.priority,
+            candidate.location.line,
+            candidate.location.column,
+        )
+    )
+    locations: list[ErrorLocation] = []
+    seen: set[tuple[int, int]] = set()
+    for candidate in candidates:
+        key = (candidate.location.line, candidate.location.column)
+        if key in seen:
+            continue
+        seen.add(key)
+        locations.append(candidate.location)
+    return locations
+
+
+def document_error_diagnostics(
+    exc: Exception,
+    statement_start_line: int = 1,
+    statement_start_col: int = 0,
+) -> list[tuple[ErrorLocation, str]]:
+    """Return local error locations with the most specific message for each."""
+    locations = document_error_locations(
+        exc,
+        statement_start_line,
+        statement_start_col,
+    )
+    if not locations:
+        return []
+
+    messages: dict[tuple[int, int], str] = {}
+    message_priorities: dict[tuple[int, int], int] = {}
+
+    def mapped_key(location: ErrorLocation) -> tuple[int, int]:
+        mapped = _mapped_error_location(
+            ParsedErrorLocation(location, ERROR_LOCATION_PRIORITY_EXACT),
+            statement_start_line,
+            statement_start_col,
+        ).location
+        return mapped.line, mapped.column
+
+    original = exc.original if isinstance(exc, OracleExecutionError) else exc
+    if isinstance(original, OracleCompilationError):
+        for diagnostic in original.diagnostics:
+            severity = diagnostic.severity.capitalize()
+            text = diagnostic.text.strip()
+            message = f"{severity}: {text}" if text else severity
+            key = mapped_key(ErrorLocation(diagnostic.line, diagnostic.position))
+            priority = (
+                ERROR_LOCATION_PRIORITY_COMPILE_ERROR
+                if diagnostic.severity.upper() == "ERROR"
+                else ERROR_LOCATION_PRIORITY_EXACT
+            )
+            current_priority = message_priorities.get(key)
+            if current_priority is None or priority < current_priority:
+                messages[key] = message
+                message_priorities[key] = priority
+
+    for text in execution_error_texts(exc):
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            for match in LINE_COLUMN_RE.finditer(line):
+                detail = line[match.end() :].lstrip(" :-\t")
+                if not detail:
+                    for following in lines[index + 1 :]:
+                        detail = following.strip()
+                        if detail and LINE_COLUMN_RE.search(detail) is None:
+                            break
+                        detail = ""
+                if not detail:
+                    continue
+                key = mapped_key(
+                    ErrorLocation(int(match.group(1)), int(match.group(2)))
+                )
+                messages.setdefault(key, detail)
+        for parsed_diagnostic in parse_plsql_diagnostics(text):
+            if (
+                not is_local_plsql_unit(parsed_diagnostic.unit)
+                or not parsed_diagnostic.message
+            ):
+                continue
+            messages.setdefault(
+                mapped_key(ErrorLocation(parsed_diagnostic.line, 1)),
+                parsed_diagnostic.message,
+            )
+
+    fallback = short_execution_error_message(exc)
+    return [
+        (location, messages.get((location.line, location.column), fallback))
+        for location in locations
+    ]
 
 
 def execution_error_offset_location(exc: Exception) -> ErrorLocation | None:

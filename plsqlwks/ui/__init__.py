@@ -30,7 +30,7 @@ from .help import *
 from .errors import *
 from .sql import *
 from .completion import *
-from .syntax import *
+from .syntax import *  # type: ignore[assignment]
 from .clipboard import *
 from .browser import *
 from .menu import *

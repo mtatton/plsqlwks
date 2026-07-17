@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 __all__ = (
     "DatabaseWorker",
+    "DatabaseWorkerUnavailableError",
     "DbCommandHandle",
     "DbSessionState",
     "DbWorkerEvent",
@@ -82,6 +83,10 @@ _STOP = object()
 _MISSING = object()
 
 
+class DatabaseWorkerUnavailableError(RuntimeError):
+    """Raised when the database worker can no longer process commands."""
+
+
 class DatabaseWorker:
     """Serialize all access to one database workspace on one persistent thread."""
 
@@ -95,6 +100,7 @@ class DatabaseWorker:
         self._next_command_id = 1
         self._current_command_id: int | None = None
         self._shutdown_error: BaseException | None = None
+        self._terminal_error: Exception | None = None
         self._session_state = DbSessionState(False, False, False, False)
         self._thread = threading.Thread(
             target=self._run,
@@ -114,6 +120,12 @@ class DatabaseWorker:
         """The persistent thread, exposed for waiting and diagnostics only."""
         return self._thread
 
+    @property
+    def terminal(self) -> bool:
+        """Return whether this worker can never accept another command."""
+        with self._state_lock:
+            return self._terminal_error is not None or self._stopped.is_set()
+
     def submit(
         self,
         task: DbWorkerTask,
@@ -125,6 +137,10 @@ class DatabaseWorker:
             raise TypeError("database worker task must be callable")
         with self._state_lock:
             if not self._accepting_commands:
+                if self._terminal_error is not None:
+                    raise DatabaseWorkerUnavailableError(
+                        f"database worker is unavailable: {self._terminal_error}"
+                    ) from self._terminal_error
                 raise RuntimeError("database worker is shut down")
             command_id = self._next_command_id
             self._next_command_id += 1
@@ -163,28 +179,82 @@ class DatabaseWorker:
             raise self._shutdown_error
 
     def _run(self) -> None:
+        fatal_error: Exception | None = None
         try:
-            self._set_session_state(self._snapshot_workspace())
+            initial_state, initial_error, _ = self._safe_snapshot_workspace(
+                self._session_state
+            )
+            self._set_session_state(initial_state)
+            if initial_error is not None:
+                fatal_error = DatabaseWorkerUnavailableError(
+                    f"initial database session snapshot failed: {initial_error}"
+                )
+                raise fatal_error
             self._ready.set()
             while True:
                 command = self._commands.get()
                 if command is _STOP:
                     break
                 assert isinstance(command, _Command)
-                self._run_command(command)
+                command_fatal = self._run_command(command)
+                if command_fatal is not None:
+                    fatal_error = command_fatal
+                    raise command_fatal
+        except BaseException as exc:
+            if fatal_error is None:
+                fatal_error = self._exception_as_unavailable(exc)
+            with self._state_lock:
+                previous_state = self._session_state
+                self._session_state = DbSessionState(
+                    connected=False,
+                    autocommit=previous_state.autocommit,
+                    read_only=previous_state.read_only,
+                    has_uncommitted_changes=previous_state.has_uncommitted_changes,
+                )
+                self._terminal_error = fatal_error
+                self._accepting_commands = False
+            self._fail_queued_commands(fatal_error)
         finally:
             self._ready.set()
+            pre_close_state = self.session_state
             try:
                 close = getattr(self._workspace, "close", None)
                 if callable(close):
                     close()
             except BaseException as exc:
-                self._shutdown_error = exc
+                if fatal_error is None:
+                    self._shutdown_error = exc
             finally:
-                self._set_session_state(self._snapshot_workspace())
+                (
+                    final_state,
+                    final_snapshot_error,
+                    final_snapshot_fatal,
+                ) = self._safe_snapshot_workspace(self.session_state)
+                if (
+                    fatal_error is None
+                    and self._shutdown_error is None
+                    and final_snapshot_fatal
+                    and final_snapshot_error is not None
+                ):
+                    self._shutdown_error = final_snapshot_error
+                if fatal_error is not None:
+                    final_state = DbSessionState(
+                        connected=False,
+                        autocommit=final_state.autocommit,
+                        read_only=final_state.read_only,
+                        has_uncommitted_changes=(
+                            pre_close_state.has_uncommitted_changes
+                            or final_state.has_uncommitted_changes
+                        ),
+                    )
+                self._set_session_state(final_state)
+                with self._state_lock:
+                    self._accepting_commands = False
+                if fatal_error is not None:
+                    self._shutdown_error = fatal_error
                 self._stopped.set()
 
-    def _run_command(self, command: _Command) -> None:
+    def _run_command(self, command: _Command) -> Exception | None:
         handle = command.handle
         with self._state_lock:
             self._current_command_id = handle.command_id
@@ -195,18 +265,59 @@ class DatabaseWorker:
         def report_progress(label: str) -> None:
             handle._emit(DbWorkerProgress(handle.command_id, label))
 
+        fatal_error: Exception | None = None
         try:
             result = command.task(self._workspace, report_progress)
         except Exception as exc:
             error = exc
-
-        with self._state_lock:
-            self._current_command_id = None
-        session_state = self._snapshot_workspace()
-        with self._state_lock:
-            self._session_state = session_state
-        handle._emit(DbWorkerFinished(handle.command_id, result, error, session_state))
-        handle.done.set()
+        except BaseException as exc:
+            fatal_error = self._exception_as_unavailable(exc)
+            error = fatal_error
+            with self._state_lock:
+                self._terminal_error = fatal_error
+                self._accepting_commands = False
+        finally:
+            with self._state_lock:
+                self._current_command_id = None
+                fallback_state = self._session_state
+            (
+                session_state,
+                snapshot_error,
+                snapshot_fatal,
+            ) = self._safe_snapshot_workspace(fallback_state)
+            if (
+                fatal_error is None
+                and snapshot_fatal
+                and snapshot_error is not None
+            ):
+                fatal_error = snapshot_error
+                with self._state_lock:
+                    self._terminal_error = fatal_error
+                    self._accepting_commands = False
+            if fatal_error is not None:
+                session_state = DbSessionState(
+                    connected=False,
+                    autocommit=session_state.autocommit,
+                    read_only=session_state.read_only,
+                    has_uncommitted_changes=session_state.has_uncommitted_changes,
+                )
+            if snapshot_error is not None:
+                if error is None:
+                    error = DatabaseWorkerUnavailableError(
+                        f"database session snapshot failed: {snapshot_error}"
+                    )
+                else:
+                    try:
+                        setattr(error, "worker_snapshot_error", snapshot_error)
+                    except Exception:
+                        pass
+            with self._state_lock:
+                self._session_state = session_state
+            self._finish_handle(
+                handle,
+                DbWorkerFinished(handle.command_id, result, error, session_state),
+            )
+        return fatal_error
 
     def _set_session_state(self, session_state: DbSessionState) -> None:
         with self._state_lock:
@@ -217,7 +328,16 @@ class DatabaseWorker:
         if connection is _MISSING:
             connected = bool(getattr(self._workspace, "connected", False))
         else:
-            connected = connection is not None
+            health = getattr(self._workspace, "connection_is_healthy", None)
+            if callable(health):
+                connected = bool(health())
+            elif connection is None:
+                connected = False
+            else:
+                is_healthy = getattr(connection, "is_healthy", None)
+                connected = (
+                    bool(is_healthy()) if callable(is_healthy) else True
+                )
         return DbSessionState(
             connected=connected,
             autocommit=bool(getattr(self._workspace, "autocommit", False)),
@@ -225,4 +345,53 @@ class DatabaseWorker:
             has_uncommitted_changes=bool(
                 getattr(self._workspace, "has_uncommitted_changes", False)
             ),
+        )
+
+    def _safe_snapshot_workspace(
+        self,
+        fallback: DbSessionState,
+    ) -> tuple[DbSessionState, Exception | None, bool]:
+        try:
+            return self._snapshot_workspace(), None, False
+        except Exception as exc:
+            return fallback, exc, False
+        except BaseException as exc:
+            return fallback, self._exception_as_unavailable(exc), True
+
+    def _fail_queued_commands(self, error: Exception) -> None:
+        while True:
+            try:
+                command = self._commands.get_nowait()
+            except queue.Empty:
+                return
+            if command is _STOP:
+                continue
+            assert isinstance(command, _Command)
+            try:
+                self._finish_handle(
+                    command.handle,
+                    DbWorkerFinished(
+                        command.handle.command_id,
+                        None,
+                        error,
+                        self.session_state,
+                    ),
+                )
+            except BaseException:
+                # A broken event sink must not strand later queued handles.
+                continue
+
+    @staticmethod
+    def _finish_handle(handle: DbCommandHandle, event: DbWorkerFinished) -> None:
+        try:
+            handle._emit(event)
+        finally:
+            handle.done.set()
+
+    @staticmethod
+    def _exception_as_unavailable(exc: BaseException) -> Exception:
+        if isinstance(exc, Exception):
+            return DatabaseWorkerUnavailableError(str(exc) or type(exc).__name__)
+        return DatabaseWorkerUnavailableError(
+            f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         )

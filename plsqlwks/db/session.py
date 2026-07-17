@@ -64,8 +64,25 @@ class OracleWorkspace(
     def ensure_connected(self) -> oracledb.Connection:
         if self.connection is None:
             self.connect()
+        elif not self.connection_is_healthy():
+            raise RuntimeError(
+                "Oracle session is no longer usable; reconnect before retrying"
+            )
         assert self.connection is not None
         return self.connection
+
+    def connection_is_healthy(self) -> bool:
+        """Return local driver health without a database round trip."""
+        conn = self.connection
+        if conn is None:
+            return False
+        is_healthy = getattr(conn, "is_healthy", None)
+        if not callable(is_healthy):
+            return True
+        try:
+            return bool(is_healthy())
+        except Exception:
+            return False
 
     def cancel_current_operation(self) -> bool:
         conn = self.connection

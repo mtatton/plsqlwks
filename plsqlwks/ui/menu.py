@@ -5,10 +5,17 @@ from typing import Protocol, Sequence
 
 
 class TreeMenuItem(Protocol):
-    section: str
-    title: str
-    shortcut: str
-    keywords: str
+    @property
+    def section(self) -> str: ...
+
+    @property
+    def title(self) -> str: ...
+
+    @property
+    def shortcut(self) -> str: ...
+
+    @property
+    def keywords(self) -> str: ...
 
 
 @dataclass(frozen=True)

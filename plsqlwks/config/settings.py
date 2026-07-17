@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import tempfile
 
+from ..exporting import preserve_existing_posix_permissions
 from .models import AppConfig, _CSV_EXPORT_DEFAULT_NULL_VALUE
 
 
@@ -62,21 +63,23 @@ def write_ini_atomic(path: Path, parser: configparser.ConfigParser) -> None:
             parser.write(handle)
             handle.flush()
             os.fsync(handle.fileno())
+        preserve_existing_posix_permissions(path, temporary_path)
         os.replace(temporary_path, path)
-    except Exception:
+        temporary_path = None
+    except BaseException:
         if temporary_path is not None:
             try:
                 temporary_path.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
         raise
 
 
 def read_autocommit(parser: configparser.ConfigParser) -> bool:
     try:
-        return parser.getboolean("database", "autocommit", fallback=True)
+        return parser.getboolean("database", "autocommit", fallback=False)
     except ValueError:
-        return True
+        return False
 
 
 def read_read_only(parser: configparser.ConfigParser) -> bool:
@@ -175,9 +178,7 @@ def ensure_config_file(config: AppConfig) -> None:
     changed = ensure_database_option(parser, "remember_bind_values", config.remember_bind_values) or changed
     if not changed:
         return
-    config.config_file.parent.mkdir(parents=True, exist_ok=True)
-    with config.config_file.open("w", encoding="utf-8") as handle:
-        parser.write(handle)
+    write_ini_atomic(config.config_file, parser)
 
 
 def ensure_database_option(parser: configparser.ConfigParser, option: str, enabled: bool) -> bool:
@@ -195,9 +196,7 @@ def save_autocommit(config: AppConfig, enabled: bool) -> None:
     if not parser.has_section("database"):
         parser.add_section("database")
     parser.set("database", "autocommit", "yes" if enabled else "no")
-    config.config_file.parent.mkdir(parents=True, exist_ok=True)
-    with config.config_file.open("w", encoding="utf-8") as handle:
-        parser.write(handle)
+    write_ini_atomic(config.config_file, parser)
 
 
 def save_read_only(config: AppConfig, enabled: bool) -> None:
@@ -206,6 +205,4 @@ def save_read_only(config: AppConfig, enabled: bool) -> None:
     if not parser.has_section("database"):
         parser.add_section("database")
     parser.set("database", "read_only", "yes" if enabled else "no")
-    config.config_file.parent.mkdir(parents=True, exist_ok=True)
-    with config.config_file.open("w", encoding="utf-8") as handle:
-        parser.write(handle)
+    write_ini_atomic(config.config_file, parser)

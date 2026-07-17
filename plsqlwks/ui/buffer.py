@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal, TextIO
+
+from ..exporting import atomic_write_text
 
 from .constants import UNDO_HISTORY_LIMIT
 
@@ -18,6 +21,46 @@ class UndoSnapshot:
     selection_anchor: tuple[int, int] | None
 
 
+@dataclass(frozen=True)
+class FileVersion:
+    """Content identity captured for a path at one point in time."""
+
+    exists: bool
+    digest: bytes | None = None
+
+
+class FileVersionConflictError(RuntimeError):
+    """Raised when a save target changes after the user chose an action."""
+
+    def __init__(
+        self,
+        path: Path,
+        expected: FileVersion,
+        actual: FileVersion,
+    ) -> None:
+        super().__init__(f"{path} changed before it could be replaced")
+        self.path = path
+        self.expected = expected
+        self.actual = actual
+
+
+def read_file_version(path: Path) -> FileVersion:
+    try:
+        encoded = path.read_bytes()
+    except FileNotFoundError:
+        return FileVersion(False)
+    return FileVersion(True, sha256(encoded).digest())
+
+
+def _split_buffer_lines(text: str) -> list[str]:
+    """Split physical CR/LF lines without treating SQL data as separators."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines or [""]
+
+
 @dataclass
 class Buffer:
     lines: list[str] = field(default_factory=lambda: [""])
@@ -30,33 +73,93 @@ class Buffer:
     selection_anchor: tuple[int, int] | None = None
     undo_stack: list[UndoSnapshot] = field(default_factory=list)
     redo_stack: list[UndoSnapshot] = field(default_factory=list)
+    _clean_text: str | None = field(default=None, init=False, repr=False, compare=False)
+    _clean_path: Path | None = field(default=None, init=False, repr=False, compare=False)
+    _tracked_file_path: Path | None = field(default=None, init=False, repr=False, compare=False)
+    _tracked_file_digest: bytes | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not self.lines:
+            self.lines = [""]
+        if not self.dirty:
+            self._set_clean_checkpoint()
 
     def text(self) -> str:
         return "\n".join(self.lines)
 
     def load(self, path: Path, record_undo: bool = True) -> None:
-        text = path.read_text(encoding="utf-8")
+        encoded = path.read_bytes()
+        text = encoded.decode("utf-8")
         if record_undo:
             self.record_undo()
-        self.lines = text.splitlines() or [""]
+        self.lines = _split_buffer_lines(text)
         self.row = 0
         self.col = 0
         self.scroll = 0
         self.path = path
         self.title = path.name
-        self.dirty = False
         self.selection_anchor = None
+        self._set_clean_checkpoint()
+        self._tracked_file_path = path
+        self._tracked_file_digest = sha256(encoded).digest()
 
-    def save(self, path: Path | None = None) -> Path:
-        if path is not None:
-            self.path = path
-        if self.path is None:
+    def save(
+        self,
+        path: Path | None = None,
+        *,
+        expected_file_version: FileVersion | None = None,
+    ) -> Path:
+        target = path if path is not None else self.path
+        if target is None:
             raise ValueError("No path selected")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(self.text() + "\n", encoding="utf-8")
-        self.title = self.path.name
-        self.dirty = False
-        return self.path
+        content = self.text() + "\n"
+        encoded = content.encode("utf-8")
+
+        def write_content(handle: TextIO) -> None:
+            handle.write(content)
+
+        def verify_target_unchanged() -> None:
+            if expected_file_version is None:
+                return
+            actual = read_file_version(target)
+            if actual != expected_file_version:
+                raise FileVersionConflictError(
+                    target,
+                    expected_file_version,
+                    actual,
+                )
+
+        atomic_write_text(
+            target,
+            write_content,
+            before_replace=verify_target_unchanged,
+        )
+
+        self.path = target
+        self.title = target.name
+        self._set_clean_checkpoint()
+        self._tracked_file_path = target
+        self._tracked_file_digest = sha256(encoded).digest()
+        self._apply_saved_identity_to_history(target)
+        return target
+
+    def external_file_change(
+        self,
+        current_version: FileVersion | None = None,
+    ) -> Literal["modified", "deleted"] | None:
+        """Return how the loaded/saved file changed since its last checkpoint."""
+
+        if (
+            self.path is None
+            or self._tracked_file_path is None
+            or self._tracked_file_digest is None
+            or self.path != self._tracked_file_path
+        ):
+            return None
+        version = current_version or read_file_version(self.path)
+        if not version.exists:
+            return "deleted"
+        return "modified" if version.digest != self._tracked_file_digest else None
 
     def set_text(
         self,
@@ -68,14 +171,19 @@ class Buffer:
     ) -> None:
         if record_undo:
             self.record_undo()
-        self.lines = text.splitlines() or [""]
+        self.lines = _split_buffer_lines(text)
         self.row = 0
         self.col = 0
         self.scroll = 0
         self.path = path
         self.title = title or (path.name if path else None)
-        self.dirty = dirty
         self.selection_anchor = None
+        if dirty:
+            self._refresh_dirty()
+        else:
+            self._set_clean_checkpoint()
+            self._tracked_file_path = None
+            self._tracked_file_digest = None
 
     def insert_char(self, ch: str) -> None:
         self.insert_text(ch)
@@ -93,7 +201,7 @@ class Buffer:
         if len(parts) == 1:
             self.lines[self.row] = line[: self.col] + text + line[self.col :]
             self.col += len(text)
-            self.dirty = True
+            self._refresh_dirty()
             return
         prefix = line[: self.col]
         suffix = line[self.col :]
@@ -103,7 +211,7 @@ class Buffer:
         self.lines[insert_at:insert_at] = new_lines
         self.row += len(parts) - 1
         self.col = len(parts[-1])
-        self.dirty = True
+        self._refresh_dirty()
 
     def insert_text(self, text: str) -> None:
         if not text:
@@ -126,7 +234,7 @@ class Buffer:
         for row in actionable:
             self.lines[row] = comment_sql_line(self.lines[row]) if comment else uncomment_sql_line(self.lines[row])
         self.clear_selection()
-        self.dirty = True
+        self._refresh_dirty()
         self.row = min(max(self.row, 0), len(self.lines) - 1)
         self.col = min(self.col, len(self.lines[self.row]))
         return comment, len(actionable)
@@ -150,14 +258,14 @@ class Buffer:
             line = self.lines[self.row]
             self.lines[self.row] = line[: self.col - 1] + line[self.col :]
             self.col -= 1
-            self.dirty = True
+            self._refresh_dirty()
         elif self.row > 0:
             self.record_undo()
             previous_len = len(self.lines[self.row - 1])
             self.lines[self.row - 1] += self.lines.pop(self.row)
             self.row -= 1
             self.col = previous_len
-            self.dirty = True
+            self._refresh_dirty()
 
     def delete(self) -> None:
         if self.delete_selection():
@@ -166,11 +274,11 @@ class Buffer:
         if self.col < len(line):
             self.record_undo()
             self.lines[self.row] = line[: self.col] + line[self.col + 1 :]
-            self.dirty = True
+            self._refresh_dirty()
         elif self.row < len(self.lines) - 1:
             self.record_undo()
             self.lines[self.row] += self.lines.pop(self.row + 1)
-            self.dirty = True
+            self._refresh_dirty()
 
     def delete_word_right(self) -> None:
         if self.delete_selection():
@@ -189,7 +297,7 @@ class Buffer:
             self.lines[start_row : end_row + 1] = [prefix + suffix]
         self.row, self.col = self.clamp_position(start_row, start_col)
         self.clear_selection()
-        self.dirty = True
+        self._refresh_dirty()
 
     def delete_word_left(self) -> None:
         if self.delete_selection():
@@ -208,7 +316,7 @@ class Buffer:
             self.lines[start_row : end_row + 1] = [prefix + suffix]
         self.row, self.col = self.clamp_position(start_row, start_col)
         self.clear_selection()
-        self.dirty = True
+        self._refresh_dirty()
 
     def move(self, delta_row: int, delta_col: int = 0) -> None:
         self.clear_selection()
@@ -316,7 +424,7 @@ class Buffer:
             new_col = len(parts[-1])
         self.selection_anchor = (start_row, start_col)
         self.row, self.col = self.clamp_position(new_row, new_col)
-        self.dirty = True
+        self._refresh_dirty()
         return True
 
     def delete_selection(self, record_undo: bool = True) -> bool:
@@ -337,7 +445,7 @@ class Buffer:
         self.row = start_row
         self.col = start_col
         self.clear_selection()
-        self.dirty = True
+        self._refresh_dirty()
         if not self.lines:
             self.lines = [""]
         return True
@@ -371,8 +479,38 @@ class Buffer:
         self.scroll = snapshot.scroll
         self.path = snapshot.path
         self.title = snapshot.title
-        self.dirty = snapshot.dirty
         self.selection_anchor = snapshot.selection_anchor
+        self._refresh_dirty()
+
+    def _set_clean_checkpoint(self) -> None:
+        self._clean_text = self.text()
+        self._clean_path = self.path
+        self.dirty = False
+
+    def _refresh_dirty(self) -> None:
+        self.dirty = (
+            self._clean_text is None
+            or self.text() != self._clean_text
+            or self.path != self._clean_path
+        )
+
+    def refresh_dirty(self) -> None:
+        """Recompute whether the buffer differs from its clean checkpoint."""
+        self._refresh_dirty()
+
+    def _apply_saved_identity_to_history(self, path: Path) -> None:
+        title = path.name
+
+        def saved_identity(snapshot: UndoSnapshot) -> UndoSnapshot:
+            return replace(
+                snapshot,
+                path=path,
+                title=title,
+                dirty="\n".join(snapshot.lines) != self._clean_text,
+            )
+
+        self.undo_stack = [saved_identity(snapshot) for snapshot in self.undo_stack]
+        self.redo_stack = [saved_identity(snapshot) for snapshot in self.redo_stack]
 
     def undo(self) -> bool:
         if not self.undo_stack:

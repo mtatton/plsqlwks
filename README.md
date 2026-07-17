@@ -2,7 +2,18 @@
 
 An ncurses SQL and PL/SQL workspace for Oracle databases.
 
+Author and support: [unu2000 on Ko-fi](https://ko-fi.com/unu2000).
+
+The supported and continuously tested database releases are Oracle Database
+19c and Oracle AI Database 26ai. See the
+[Oracle compatibility matrix](https://gitlab.com/unununu/plsqlwks/-/blob/main/COMPATIBILITY.md) for the tested connection and
+privilege profiles, safety gate, and integration-test setup.
+
 ![PLSQLWKS PREVIEW](https://gitlab.com/unununu/plsqlwks/-/raw/main/img/preview.png)
+
+New here? Follow the [installation-to-first-query quick start](QUICKSTART.md)
+for copy-ready connection setup, screenshots, practical SQL workflows,
+troubleshooting, and a complete installed-plugin example.
 
 ## Connection
 
@@ -60,7 +71,7 @@ python3 -m pip install .
 Run the default test and lint checks from a development checkout with:
 
 ```bash
-python3 -m pytest -q
+python3 -m pytest -q --maxfail=1
 python3 -m ruff check .
 ```
 
@@ -68,8 +79,8 @@ Plugin API and built-in plugin tests are optional and are not part of the
 default core test run. Run them with either opt-in form:
 
 ```bash
-PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q
-python3 -m pytest -q -m plugin
+PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q --maxfail=1
+python3 -m pytest -q --maxfail=1 -m plugin
 ```
 
 The CSV and HTML export plugins have no additional dependencies. XLSX export
@@ -86,11 +97,26 @@ retains `plugin-requirements/xlsx-export/requirements.txt` as a compatible
 fallback for existing checkout automation.
 
 Oracle integration tests require the connection environment variables shown
-above and an accessible password file. Enable every test group with:
+above and a nonempty regular password file. Setting `PLSQLWKS_TEST_ORACLE=1`
+is an explicit opt-in, so invalid or missing credentials fail collection rather
+than silently skipping the live suite. Set `PLSQLWKS_TEST_ORACLE_TARGET` to
+`19c` or `26ai` when the test run must verify that it reached the intended
+server release:
+
+```bash
+PLSQLWKS_TEST_ORACLE=1 PLSQLWKS_TEST_ORACLE_TARGET=19c \
+  python3 -m pytest -q -m oracle --maxfail=1
+```
+
+Omit the target for an ad-hoc run against another reachable Oracle database.
+The complete release-gating setup, including the developer, DML-only, and
+read-only profiles, is documented in the
+[Oracle compatibility matrix](https://gitlab.com/unununu/plsqlwks/-/blob/main/COMPATIBILITY.md).
+Enable every optional test group with:
 
 ```bash
 PLSQLWKS_TEST_ORACLE=1 PLSQLWKS_TEST_PLUGINS=1 PLSQLWKS_TEST_PTY=1 PLSQLWKS_TEST_SLOW=1 \
-  python3 -m pytest -q -rs
+  python3 -m pytest -q -rs --maxfail=1
 ```
 
 ## Run
@@ -110,6 +136,11 @@ plsqlwks --workspace /path/to/workspace
 The CLI option takes precedence over `PLSQLWKS_WORKSPACE`. For compatibility, a
 source checkout that already contains a configured `workspace/` continues to
 use it and displays a migration notice; files are never moved automatically.
+
+Fresh workspaces start in manual transaction mode and write
+`[database] autocommit = no` to their generated `config.ini`. Existing explicit
+`yes` or `no` settings are preserved; a missing or malformed setting uses the
+safe manual fallback.
 
 Choose the initial transaction mode for one invocation with `--manual` or
 `--autocommit`. These options override `[database] autocommit` from the active
@@ -151,8 +182,20 @@ explicitly, so Oracle rolls its uncommitted work back.
 If the old connection is already dead and reports an error while closing,
 plsqlwks still attempts the replacement connection and reports the close error
 as a warning after a successful reconnect.
+An unexpected connection loss is shown in the header and status bar. Rows that
+were already loaded remain available for viewing, but paging, editing, and
+inserting are disabled until reconnect because their live cursor/session state
+is no longer valid. If manual work may have been pending, the status explicitly
+warns that the transaction outcome is unknown.
 
 After a successful quit, plsqlwks records the open file-backed tabs, active tab, and cursor positions in the managed `[session.tabs]` section of `config.ini`. Fresh platform-default workspaces use the user-config directory; explicitly selected and legacy workspaces keep `config.ini` inside the workspace for compatibility. On the next start the app tries each saved path independently, silently skips files that are missing or unreadable, and leaves the initial empty tab in place when none can be opened. A saved cursor position that no longer exists in its file starts at the beginning instead. Untitled, template, and generated schema tabs are not persisted because they do not have a file to reopen.
+
+Worksheet and configuration saves replace their destination atomically while
+preserving an existing file's POSIX permission bits. A
+file-backed worksheet also detects when its file was changed or deleted outside
+plsqlwks and asks whether to overwrite it, save under another name, or cancel.
+Undo and redo update the unsaved-change marker by comparing the current content
+with the last successful save.
 
 ## Keys
 
@@ -202,7 +245,7 @@ After a successful quit, plsqlwks records the open file-backed tabs, active tab,
 | `F4` | New template |
 | `F5` / `Ctrl-Enter` / `Alt-X` | Execute selected SQL or current statement |
 | `F11` | Execute selected SQL or whole buffer as a script |
-| `Alt-G` | Generate SELECT, INSERT, or UPDATE with table columns |
+| `Alt-G` | Generate SELECT, INSERT, or UPDATE with table or view columns |
 | `Alt-+` | Refresh autocomplete metadata cache |
 | `Alt-R` | Rename current buffer |
 | `Ctrl-T` | New file tab |
@@ -221,7 +264,18 @@ After a successful quit, plsqlwks records the open file-backed tabs, active tab,
 | `Ctrl+=` | Reconnect |
 
 Use `/` on a line by itself after PL/SQL objects or anonymous blocks when running a script.
-Execution and explain errors report the mapped editor line and column, then move the cursor to that location when Oracle provides one.
+Script execution reports statement progress as `n/total` and stops at the first
+failed statement while preserving earlier results. Scripts are sent directly to
+Oracle, not through SQL*Plus or SQLcl: client commands such as `PROMPT`, `SPOOL`,
+and `SET SERVEROUTPUT`, and `&`/`&&` substitution variables, are rejected before
+bind prompts or execution. Oracle SQL statements such as `SET TRANSACTION`
+remain supported.
+Execution and explain errors report mapped editor line and column diagnostics.
+The cursor moves only when the buffer still matches the source that was sent to
+Oracle; if it changed while the operation ran, the result warns about the stale
+source instead. Use `Alt-O -> Editor -> Next execution diagnostic` or
+`Previous execution diagnostic` to visit additional locations from the most
+recent unchanged source.
 When executed or explained SQL contains bind variables such as `:id`, plsqlwks opens a text box for each value and sends the answers as Oracle bind parameters.
 Unquoted bind names are case-insensitive, so `:id` and `:ID` share one prompt and value. Quoted bind names remain case-sensitive.
 Set `[database] remember_bind_values = yes` in the active `config.ini` to prefill future bind prompts with values entered earlier in the same app session.
@@ -268,6 +322,7 @@ Read-only mode is a client-side guardrail that rejects statements which the SQL 
 | `Home` / `End` | Move to the first/last result-grid column |
 | `Ctrl-Home` / `Ctrl-End` | Move to the first/last result-grid row |
 | `F8` | Toggle result grid / row-detail output |
+| `Ctrl-C` | Copy the selected result cell to the clipboard |
 | `F10` | View the full selected result cell |
 | `Enter` | Edit the selected ROWID-backed result cell when available |
 | `INS` | Prepare a draft insert row for ROWID-backed results |
@@ -282,7 +337,11 @@ unquoted current-schema table that include `ROWID`, press `Enter` on a directly
 selected unquoted table column to update it by rowid. Press `INS` in the grid to
 prepare a draft row at the top of the grid, edit its cells with `Enter`, use
 `Ctrl-Alt-C` to insert it, or use `Esc` to cancel it.
-Database null values are displayed and entered as `<NULL>` in editable results. Plain `NULL` is stored as literal text.
+While entering a cell, use Left/Right or Home/End to move within the existing
+text and Backspace/Delete to edit around the cursor. DATE and TIMESTAMP cells
+offer a choice between an ISO value and database-side `SYSDATE`.
+Database null values are displayed and entered as `<NULL>` in editable results.
+Plain `NULL` is stored as literal text.
 Grid edits compare the selected cell's originally loaded typed value as well as
 the `ROWID`. If another session changes that cell or deletes the row first, the
 edit is rejected and the query must be refreshed. Changes to other cells in the
@@ -295,6 +354,11 @@ precision above six, are read-only in the grid.
 Displayed CLOB and BLOB values are limited to the first 65,536 characters or
 bytes and include a truncation marker with the full size. Truncated LOB cells
 cannot be edited safely. Schema-browser DDL is always read in full.
+DBMS_OUTPUT is collected after each statement and after every fetched result
+page without replacing a real query grid. Output-read or cursor-cleanup failures
+are displayed as warnings while preserving successfully fetched rows. PL/SQL
+compiler warnings are also retained with successful statement results; compiler
+errors remain execution failures with navigable source locations.
 `F7` cycles a grid fullscreen view that starts with the table header on the first terminal line and uses the last line for data, an editor-only fullscreen view, and a split layout with 2/3 editor and 1/3 data grid.
 
 To export the active table, use one of these command paths:
