@@ -11,11 +11,11 @@ import plsqlwks.ui.app as ui_app_module
 import plsqlwks.ui.buffer as buffer_module
 from plsqlwks.config import AppConfig, SessionTab
 from plsqlwks.db import (
+    NULL_DISPLAY_TOKEN,
     CellUpdateResult,
     EditableResultContext,
     ExplainPlanResult,
     ExplainPlanStep,
-    NULL_DISPLAY_TOKEN,
     OracleExecutionError,
     QueryResult,
     QueryResultContinuation,
@@ -32,7 +32,6 @@ from plsqlwks.ui import (
     CTRL_T,
     CTRL_W,
     ESC,
-    FileTab,
     FOCUS_BROWSER,
     FOCUS_EDITOR,
     FOCUS_RESULTS,
@@ -41,6 +40,7 @@ from plsqlwks.ui import (
     KEY_CTRL_PAGEUP,
     RESULT_ROW_DETAIL,
     Buffer,
+    FileTab,
     ResultCell,
     UIState,
     alt_digit_key,
@@ -206,11 +206,33 @@ def test_disconnected_result_remains_viewable_but_live_actions_require_reconnect
     app.state.result_row = 0
     app.state.result_col = 1
     app.handle_results_key(10)
-    assert "Cell updates are unavailable while disconnected; reconnect first" == app.state.status
+    assert app.state.status == "Cell updates are unavailable while disconnected; reconnect first"
 
     app.handle_results_key(curses.KEY_IC)
-    assert "Row inserts are unavailable while disconnected; reconnect first" == app.state.status
+    assert app.state.status == "Row inserts are unavailable while disconnected; reconnect first"
     assert app.state.active_result is editable
+
+
+def test_detached_result_label_and_status_explain_read_only_cursor_loss():
+    app = make_app()
+    result = continuing_result([["1"], ["2"]])
+    result.continuation = None
+    result.editable_context = None
+    result.detached_reason = "Database operation interrupted; materialized rows are read-only"
+    app.state.active_result = result
+    app.state.db = ui.DbSessionState(True, False, False, False)
+
+    app.enter_results_focus()
+
+    label = ui.result_label(
+        result,
+        ui.RESULT_GRID,
+        focused=True,
+        connected=True,
+    )
+    assert "view-only: Database operation interrupted" in label
+    assert "More rows were not loaded" in label
+    assert result.detached_reason in app.state.status
 
 
 def test_disconnected_fully_loaded_result_does_not_claim_rows_are_missing():
@@ -352,18 +374,13 @@ def test_explain_plan_draws_configured_colored_segments(monkeypatch):
 
     assert (ui.COLOR_PLAN_CONNECTOR, 160, -1) in calls
     assert any(
-        "+- " in call.text and call.attr == ((ui.COLOR_PLAN_CONNECTOR << 8) | curses.A_DIM)
-        for call in app.screen.calls
+        "+- " in call.text and call.attr == ((ui.COLOR_PLAN_CONNECTOR << 8) | curses.A_DIM) for call in app.screen.calls
     )
     assert any(
-        "TABLE ACCESS FULL" in call.text
-        and call.attr == ((ui.COLOR_PLAN_OPERATION << 8) | curses.A_BOLD)
+        "TABLE ACCESS FULL" in call.text and call.attr == ((ui.COLOR_PLAN_OPERATION << 8) | curses.A_BOLD)
         for call in app.screen.calls
     )
-    assert any(
-        "HR.DECISIONS" in call.text and call.attr == (ui.COLOR_PLAN_OBJECT << 8)
-        for call in app.screen.calls
-    )
+    assert any("HR.DECISIONS" in call.text and call.attr == (ui.COLOR_PLAN_OBJECT << 8) for call in app.screen.calls)
     assert any(
         "[cost=2" in call.text and call.attr == ((ui.COLOR_PLAN_METRICS << 8) | curses.A_DIM)
         for call in app.screen.calls
@@ -375,10 +392,7 @@ def test_explain_plan_draws_configured_colored_segments(monkeypatch):
     )
     app.draw_results(0, 3, 90)
 
-    assert any(
-        "Plan hash value" in call.text and call.attr == (ui.COLOR_PLAN_TEXT << 8)
-        for call in app.screen.calls
-    )
+    assert any("Plan hash value" in call.text and call.attr == (ui.COLOR_PLAN_TEXT << 8) for call in app.screen.calls)
 
 
 def test_browser_toggle_refreshes_and_loads_object_definition():
@@ -1054,12 +1068,8 @@ def test_save_buffer_final_guard_preserves_racing_external_edit_on_cancel(
 
     assert app.save_buffer() is False
     assert raced_paths == [path]
-    assert prompts == [
-        ("File changed before save. overwrite/save-as/cancel? o/s/c", "")
-    ]
-    assert path.read_text(encoding="utf-8") == (
-        "select 9 from dual; -- racing writer\n"
-    )
+    assert prompts == [("File changed before save. overwrite/save-as/cancel? o/s/c", "")]
+    assert path.read_text(encoding="utf-8") == ("select 9 from dual; -- racing writer\n")
     assert buffer.path == path
     assert buffer.dirty is True
     assert not list(path.parent.glob(f".{path.name}.*.tmp"))
@@ -1094,12 +1104,8 @@ def test_save_buffer_final_guard_retries_only_after_approved_overwrite(
     app.prompt = approve_raced_save
 
     assert app.save_buffer() is True
-    assert prompts == [
-        ("File changed before save. overwrite/save-as/cancel? o/s/c", "")
-    ]
-    assert path.read_text(encoding="utf-8") == (
-        "select 1 from dual; -- local\n"
-    )
+    assert prompts == [("File changed before save. overwrite/save-as/cancel? o/s/c", "")]
+    assert path.read_text(encoding="utf-8") == ("select 1 from dual; -- local\n")
     assert buffer.dirty is False
 
 
@@ -1128,12 +1134,8 @@ def test_save_buffer_final_guard_can_save_as_after_racing_external_edit(
     app.prompt = lambda label, default="", strip=True: next(answers)
 
     assert app.save_buffer() is True
-    assert path.read_text(encoding="utf-8") == (
-        "select 9 from dual; -- racing writer\n"
-    )
-    assert copy.read_text(encoding="utf-8") == (
-        "select 1 from dual; -- local\n"
-    )
+    assert path.read_text(encoding="utf-8") == ("select 9 from dual; -- racing writer\n")
+    assert copy.read_text(encoding="utf-8") == ("select 1 from dual; -- local\n")
     assert buffer.path == copy
     assert buffer.dirty is False
 
@@ -1160,9 +1162,7 @@ def test_save_buffer_reports_file_list_refresh_failure_as_post_save_warning(
     app.documents.list_files = fail_refresh
 
     assert app.save_buffer() is True
-    assert path.read_text(encoding="utf-8") == (
-        "select 1 from dual; -- local\n"
-    )
+    assert path.read_text(encoding="utf-8") == ("select 1 from dual; -- local\n")
     assert buffer.dirty is False
     assert app.state.active_tab.source_key == file_source_key(path)
     assert app.state.status.startswith(f"Saved {path} (warning:")
@@ -1362,7 +1362,10 @@ def test_rename_current_buffer_rejects_path_open_in_another_tab(tmp_path):
     second.write_text("select 2 from dual;\n", encoding="utf-8")
     app = make_app(config=config)
     app.state.tabs = [
-        FileTab(buffer=Buffer(lines=["select 1"], path=first, title="first.sql", dirty=True), source_key=file_source_key(first)),
+        FileTab(
+            buffer=Buffer(lines=["select 1"], path=first, title="first.sql", dirty=True),
+            source_key=file_source_key(first),
+        ),
         FileTab(buffer=Buffer(lines=["select 2"], path=second, title="second.sql"), source_key=file_source_key(second)),
     ]
     app.state.active_tab_idx = 0
@@ -1412,7 +1415,10 @@ def test_save_buffer_failure_keeps_active_tab_and_dirty_buffer(monkeypatch, tmp_
     app = make_app(config=config)
     source_key = file_source_key(path)
     app.state.tabs = [
-        FileTab(buffer=Buffer(lines=["select 2 from dual;"], path=path, title="saved.sql", dirty=True), source_key=source_key),
+        FileTab(
+            buffer=Buffer(lines=["select 2 from dual;"], path=path, title="saved.sql", dirty=True),
+            source_key=source_key,
+        ),
         FileTab(buffer=Buffer(title="other.sql"), source_key="other"),
     ]
     app.state.active_tab_idx = 0
@@ -1675,9 +1681,7 @@ def test_successful_rollback_with_cursor_cleanup_failure_still_invalidates_resul
 def test_quit_rejects_active_database_operation_without_prompting():
     app = make_app(db=PendingTransactionDb())
     app.state.db_operation = pending_db_operation(app)
-    app.prompt = lambda label, default="", strip=True: (_ for _ in ()).throw(
-        AssertionError("unexpected prompt")
-    )
+    app.prompt = lambda label, default="", strip=True: (_ for _ in ()).throw(AssertionError("unexpected prompt"))
 
     app.request_quit()
 
@@ -1723,6 +1727,54 @@ def test_draw_result_grid_highlights_selected_cell(monkeypatch):
     app.draw_result_grid(0, 6, 40)
 
     assert any(call.text.startswith("two") and call.attr & curses.A_REVERSE for call in app.screen.calls)
+
+
+def test_selected_rightmost_grid_column_scrolls_until_fully_visible(monkeypatch):
+    monkeypatch.setattr(curses, "color_pair", lambda pair: pair << 8)
+    app = make_app(screen=FakeScreen(height=8, width=12))
+    app.state.active_result = QueryResult(
+        "data",
+        ["A", "B", "LAST"],
+        [["aaa", "bbb", "complete"]],
+        "1 row",
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.result_grid_fullscreen = True
+    app.state.result_col = 1
+
+    app.handle_results_key(curses.KEY_RIGHT)
+    layout = app.viewport.prepare_frame()
+    app.renderer.draw(layout)
+
+    assert app.state.result_col == 2
+    assert app.state.result_col_scroll == 2
+    assert any(
+        call.x == 0 and call.text == "complete" and call.attr & curses.A_REVERSE
+        for call in app.screen.calls
+    )
+
+
+def test_selected_grid_column_wider_than_pane_uses_full_pane(monkeypatch):
+    monkeypatch.setattr(curses, "color_pair", lambda pair: pair << 8)
+    app = make_app(screen=FakeScreen(height=8, width=8))
+    app.state.active_result = QueryResult(
+        "data",
+        ["A", "LAST"],
+        [["aaa", "abcdefghijkl"]],
+        "1 row",
+    )
+    app.state.focus = FOCUS_RESULTS
+    app.state.result_grid_fullscreen = True
+
+    app.handle_results_key(curses.KEY_RIGHT)
+    layout = app.viewport.prepare_frame()
+    app.renderer.draw(layout)
+
+    assert app.state.result_col_scroll == 1
+    assert any(
+        call.x == 0 and call.text == "abcdefgh" and call.attr & curses.A_REVERSE
+        for call in app.screen.calls
+    )
 
 
 def test_draw_result_grid_escapes_embedded_null(monkeypatch):
@@ -2179,6 +2231,28 @@ def test_draw_header_shows_active_tab_count_title_and_dirty_marker(monkeypatch):
     assert any("tab 2/2" in call.text and "two.sql*" in call.text for call in app.screen.calls)
 
 
+def test_renderer_reads_prepared_state_without_mutating_it(monkeypatch):
+    monkeypatch.setattr(curses, "color_pair", lambda pair: pair)
+    app = make_app(screen=FakeScreen(height=12, width=70))
+    app.state.browser_visible = True
+    app.state.browser_objects["TABLE"] = ["DECISIONS"]
+    app.state.browser_expanded.add("TABLE")
+    app.state.active_result = QueryResult(
+        "data",
+        ["ID", "NAME"],
+        [["1", "first"], ["2", "second"]],
+        "2 rows",
+    )
+    app.state.result_row = 99
+    app.state.result_col = 99
+
+    layout = app.viewport.prepare_frame()
+    before = repr(app.state)
+    app.renderer.draw(layout)
+
+    assert repr(app.state) == before
+
+
 def test_draw_header_and_result_label_show_disconnected_view_only_state(monkeypatch):
     monkeypatch.setattr(curses, "color_pair", lambda pair: pair << 8)
     app = make_app(screen=FakeScreen(height=8, width=100))
@@ -2513,9 +2587,7 @@ def test_later_page_summary_keeps_cumulative_output_and_prior_warnings():
     app.apply_fetch_more_result(ui.ResultFetchMore(result, page, 1))
 
     assert result.dbms_output == ["initial", "later"]
-    assert result.message == (
-        f"2 row(s) in 0.02s; 2 dbms_output line(s); warning: {warning}"
-    )
+    assert result.message == (f"2 row(s) in 0.02s; 2 dbms_output line(s); warning: {warning}")
     assert any(warning in line for line in app.state.results)
     assert warning in app.state.status
 
@@ -2688,9 +2760,7 @@ def test_dbms_output_only_result_is_visible_in_small_result_pane(monkeypatch):
     monkeypatch.setattr(curses, "color_pair", lambda pair: pair)
     app = make_app(screen=FakeScreen(height=4, width=50))
 
-    app.render_results(
-        [QueryResult("Block", [], [], "summary", dbms_output=["visible output"])]
-    )
+    app.render_results([QueryResult("Block", [], [], "summary", dbms_output=["visible output"])])
     app.draw_results(0, 2, 50)
 
     assert app.state.active_result is None
@@ -2772,9 +2842,7 @@ def test_rendered_dbms_output_wraps_as_text_instead_of_grid():
     app = make_app(screen=FakeScreen(height=12, width=32))
     message = "Příliš žluťoučký kůň " + "x" * 80 + " END"
 
-    app.render_results(
-        [QueryResult("Block", [], [], "1 dbms_output line(s)", dbms_output=[message])]
-    )
+    app.render_results([QueryResult("Block", [], [], "1 dbms_output line(s)", dbms_output=[message])])
 
     assert app.state.active_result is None
     assert app.state.focus == FOCUS_EDITOR
@@ -2819,6 +2887,38 @@ def test_status_bar_shows_active_db_operation_timer(monkeypatch):
     app.draw_status(4, 60)
 
     assert app.screen.calls[-1].text.startswith("[ ] Running current statement 01:01:01")
+
+
+def test_status_bar_shows_determinate_export_progress(monkeypatch):
+    monkeypatch.setattr(curses, "color_pair", lambda pair: pair)
+    monkeypatch.setattr(ui.time, "monotonic", lambda: 15.0)
+    app = make_app(screen=FakeScreen(height=5, width=120))
+    operation = pending_db_operation(app, started_at=5.0)
+    operation.label = "Writing CSV export"
+    operation.progress_current = 5_000
+    operation.progress_total = 10_000
+    app.state.db_operation = operation
+
+    app.draw_status(4, 120)
+
+    assert app.screen.calls[-1].text.startswith(
+        "[ ] Writing CSV export [##########----------] 50% (5,000/10,000) 00:00:10"
+    )
+
+
+def test_status_bar_calls_writer_stop_a_cancellation_request(monkeypatch):
+    monkeypatch.setattr(curses, "color_pair", lambda pair: pair)
+    monkeypatch.setattr(ui.time, "monotonic", lambda: 15.0)
+    app = make_app(screen=FakeScreen(height=5, width=90))
+    operation = pending_db_operation(app, started_at=5.0)
+    operation.label = "Writing CSV export"
+    operation.interrupt_database = False
+    operation.cancel_requested = True
+    app.state.db_operation = operation
+
+    app.draw_status(4, 90)
+
+    assert app.screen.calls[-1].text.startswith("[ ] Writing CSV export (cancellation requested) 00:00:10")
 
 
 def test_ctrl_c_interrupts_active_db_operation(monkeypatch):
@@ -2878,6 +2978,81 @@ def test_cancelled_oracle_operation_reports_interrupted_status():
     app.handle_execution_error(exc)
 
     assert app.state.status.startswith("Execution interrupted: ORA-01013")
+
+
+def test_ctrl_c_generic_completion_preserves_grid_and_revokes_live_state():
+    class PendingInterruptibleDb:
+        def __init__(self):
+            self.connected = True
+            self.connection = object()
+            self.autocommit = False
+            self.read_only = False
+            self.has_uncommitted_changes = True
+            self.cancel_calls = 0
+            self.release = ui.threading.Event()
+
+        def cancel_current_operation(self):
+            self.cancel_calls += 1
+            self.release.set()
+            return True
+
+        def close_all_result_continuations(self):
+            return None
+
+        def close(self):
+            self.connected = False
+            self.connection = None
+
+    db = PendingInterruptibleDb()
+    app = make_app(db=db)
+    draft_row = [None, "draft"]
+    loaded_row = ["AAABBB", "loaded"]
+    result = QueryResult(
+        "data",
+        ["ROWID", "VALUE"],
+        [draft_row, loaded_row],
+        "1 row (more available)",
+        editable_context=EditableResultContext("DECISIONS", 0, {1: "VALUE"}),
+        continuation=QueryResultContinuation("live-cursor"),
+        original_rows=[[None, None], list(loaded_row)],
+    )
+    app.state.active_result = result
+    app.state.last_result = result
+    app.state.active_tab.result_insert_draft = ui.ResultInsertDraft(
+        result,
+        0,
+        draft_row,
+    )
+    started = ui.threading.Event()
+
+    def fail_after_cancel(workspace, progress):
+        started.set()
+        assert workspace.release.wait(1)
+        raise RuntimeError("post-cancel transport error")
+
+    try:
+        assert app.start_db_operation(
+            "execute",
+            "Running current statement",
+            fail_after_cancel,
+        )
+        assert started.wait(1)
+
+        app.handle_key(ui.CTRL_C)
+        app.wait_for_db_operation(timeout=2)
+
+        assert db.cancel_calls == 1
+        assert app.state.active_result is result
+        assert result.rows == [loaded_row]
+        assert result.original_rows == [loaded_row]
+        assert result.continuation is None
+        assert result.editable_context is None
+        assert result.detached_reason == ("Database operation interrupted; materialized rows are read-only")
+        assert app.state.active_tab.result_insert_draft is None
+        assert app.state.status.startswith("Execution interrupted: RuntimeError: post-cancel transport error")
+        assert "Pending transaction remains unresolved" in app.state.status
+    finally:
+        app.shutdown_database_worker(timeout=2)
 
 
 def test_active_db_operation_rejects_second_run():
@@ -3005,9 +3180,7 @@ def test_edit_selected_date_cell_iso_choice_opens_text_prompt():
     app.wait_for_db_operation(timeout=1)
 
     assert prompts == [("Set HAPPENED_AT", "2026-07-15 10:30:00", False)]
-    assert db.updates == [
-        ("AAABBBCCC", 1, original, "2026-07-16 11:45:00")
-    ]
+    assert db.updates == [("AAABBBCCC", 1, original, "2026-07-16 11:45:00")]
 
 
 def test_edit_selected_result_cell_uses_empty_prompt_default_for_database_null():
@@ -3542,7 +3715,9 @@ class FailingEditingDb(FakeEditingDb):
 
 
 class FailingInsertDb(FakeEditingDb):
-    def insert_row_for_result(self, context, values_by_column_index: dict[int, str], result_column_count: int) -> list[str]:
+    def insert_row_for_result(
+        self, context, values_by_column_index: dict[int, str], result_column_count: int
+    ) -> list[str]:
         raise RuntimeError("insert failed")
 
 

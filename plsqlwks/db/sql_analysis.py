@@ -23,10 +23,15 @@ def oracle_q_quote_start(text: str, start: int) -> tuple[int, str] | None:
     return delimiter_idx + 1, Q_QUOTE_DELIMITERS.get(delimiter, delimiter)
 
 
-def sql_code_mask(text: str) -> str:
+def sql_code_mask(
+    text: str,
+    *,
+    preserve_quoted_identifiers: bool = False,
+) -> str:
     mask = [" "] * len(text)
     idx = 0
     in_single = False
+    in_double = False
     in_q_quote: str | None = None
     in_line_comment = False
     in_block_comment = False
@@ -60,6 +65,19 @@ def sql_code_mask(text: str) -> str:
                 in_single = False
             idx += 1
             continue
+        if in_double:
+            if ch == '"' and nxt == '"':
+                if preserve_quoted_identifiers:
+                    mask[idx] = ch
+                    mask[idx + 1] = nxt
+                idx += 2
+                continue
+            if ch == '"':
+                in_double = False
+            if preserve_quoted_identifiers:
+                mask[idx] = ch
+            idx += 1
+            continue
         if ch == "-" and nxt == "-":
             in_line_comment = True
             idx += 2
@@ -74,6 +92,12 @@ def sql_code_mask(text: str) -> str:
             continue
         if ch == "'":
             in_single = True
+            idx += 1
+            continue
+        if ch == '"':
+            in_double = True
+            if preserve_quoted_identifiers:
+                mask[idx] = ch
             idx += 1
             continue
         mask[idx] = ch
@@ -106,13 +130,14 @@ def find_top_level_sql_keyword(text: str, keyword: str, start: int = 0) -> int |
 
 
 def is_oracle_identifier_char(ch: str) -> bool:
-    return ch.isalnum() or ch in "_$#"
+    return bool(ch) and (ch.isalnum() or ch in "_$#")
 
 
 def strip_sql_comments(text: str) -> str:
     chars: list[str] = []
     idx = 0
     in_single = False
+    in_double = False
     in_q_quote: str | None = None
     in_line_comment = False
     in_block_comment = False
@@ -151,6 +176,16 @@ def strip_sql_comments(text: str) -> str:
                 in_single = False
             idx += 1
             continue
+        if in_double:
+            chars.append(ch)
+            if ch == '"' and nxt == '"':
+                chars.append(nxt)
+                idx += 2
+                continue
+            if ch == '"':
+                in_double = False
+            idx += 1
+            continue
         if ch == "-" and nxt == "-":
             chars.append(" ")
             in_line_comment = True
@@ -169,6 +204,8 @@ def strip_sql_comments(text: str) -> str:
             continue
         if ch == "'":
             in_single = True
+        elif ch == '"':
+            in_double = True
         chars.append(ch)
         idx += 1
     return "".join(chars)

@@ -128,9 +128,7 @@ class DocumentController:
         buffer = self.state.buffer
         try:
             if buffer.path is None:
-                target = self._prompt_save_as_target(
-                    str(self.default_buffer_path())
-                )
+                target = self._prompt_save_as_target(str(self.default_buffer_path()))
             else:
                 target = self._external_change_save_target(buffer)
             if target is None:
@@ -203,9 +201,7 @@ class DocumentController:
 
     def default_buffer_path(self) -> Path:
         default_dir = (
-            self.state.config.plsql_dir
-            if looks_like_plsql(self.state.buffer.text())
-            else self.state.config.sql_dir
+            self.state.config.plsql_dir if looks_like_plsql(self.state.buffer.text()) else self.state.config.sql_dir
         )
         return default_dir / "scratch.sql"
 
@@ -254,9 +250,7 @@ class DocumentController:
             if saved_target is None:
                 return False
             self.state.active_tab.source_key = saved_target.source_key
-            self._refresh_files_after_write(
-                f"Renamed buffer to {saved_target.path}"
-            )
+            self._refresh_files_after_write(f"Renamed buffer to {saved_target.path}")
             return True
         except Exception as exc:
             buffer.path = old_path
@@ -274,10 +268,7 @@ class DocumentController:
         source_key: str,
     ) -> _SaveTarget | None:
         version = read_file_version(path)
-        same_as_current = (
-            current_path is not None
-            and source_key == file_source_key(current_path)
-        )
+        same_as_current = current_path is not None and source_key == file_source_key(current_path)
         if not same_as_current and version.exists:
             answer = self.dialogs.prompt("Overwrite existing file? y/n", "")
             if not answer or not answer.lower().startswith("y"):
@@ -332,10 +323,7 @@ class DocumentController:
         try:
             self.state.files = self.list_files(self.state.config)
         except Exception as exc:
-            self.state.status = (
-                f"{success_status} (warning: file list refresh failed: "
-                f"{short_error(exc)})"
-            )
+            self.state.status = f"{success_status} (warning: file list refresh failed: {short_error(exc)})"
             return
         self.state.status = success_status
 
@@ -396,16 +384,10 @@ class DocumentController:
     def switch_to_tab(self, index: int, status: str | None = None) -> None:
         self.state.ensure_tab()
         self.state.active_tab_idx = clamp_tab_index(index, self.state.tabs)
-        if (
-            self.state.focus == FOCUS_RESULTS
-            and self.state.active_result is None
-            and self.state.explain_result is None
-        ):
+        if self.state.focus == FOCUS_RESULTS and self.state.active_result is None and self.state.explain_result is None:
             self.state.focus = FOCUS_EDITOR
         title = tab_display_title(self.state.active_tab)
-        self.state.status = status or (
-            f"Tab {self.state.active_tab_idx + 1}/{len(self.state.tabs)}: {title}"
-        )
+        self.state.status = status or (f"Tab {self.state.active_tab_idx + 1}/{len(self.state.tabs)}: {title}")
 
     def switch_to_visible_tab_number(self, number: int) -> None:
         if not 1 <= number <= 9:
@@ -442,11 +424,7 @@ class DocumentController:
             return
         self.state.active_tab_idx = min(idx, len(self.state.tabs) - 1)
         self.state.tab_scroll = min(self.state.tab_scroll, self.state.active_tab_idx)
-        if (
-            self.state.focus == FOCUS_RESULTS
-            and self.state.active_result is None
-            and self.state.explain_result is None
-        ):
+        if self.state.focus == FOCUS_RESULTS and self.state.active_result is None and self.state.explain_result is None:
             self.state.focus = FOCUS_EDITOR
         self.state.status = f"Closed {title}"
 

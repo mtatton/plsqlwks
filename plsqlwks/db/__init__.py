@@ -5,7 +5,6 @@ import oracledb as oracledb
 from ..config import AppConfig, read_password
 from ..sqlsplit import split_script, strip_leading_sql_comments
 from .editing import (
-    ORACLE_IDENTIFIER_RE,
     ORACLE_TABLE_CLAUSE_REJECTIONS,
     TAIL_KEYWORDS,
     TAIL_PHRASE_REJECTIONS,
@@ -15,7 +14,6 @@ from .editing import (
     convert_edit_value,
     edit_metadata_rejection_reason,
     normalize_edit_value,
-    normalize_identifier,
     parse_select_item,
     parse_select_items,
     parse_simple_select,
@@ -25,10 +23,10 @@ from .editing import (
 )
 from .execution import (
     CREATE_PLSQL_OBJECT_RE,
+    LOB_DISPLAY_LIMIT,
     ORACLE_IDENTIFIER_TOKEN_RE,
     ORACLE_QUALIFIED_IDENTIFIER_RE,
     ExecutionMixin,
-    LOB_DISPLAY_LIMIT,
     column_metadata_from_description,
     csv_cell,
     execute_user_statement,
@@ -50,6 +48,14 @@ from .explain import (
     nullable_int,
 )
 from .health import workspace_health
+from .identifiers import (
+    ORACLE_IDENTIFIER_RE,
+    OracleIdentifierToken,
+    normalize_identifier,
+    quote_identifier,
+    render_identifier,
+    scan_oracle_identifier,
+)
 from .metadata import (
     SCHEMA_OBJECT_TYPES,
     MetadataMixin,
@@ -70,8 +76,8 @@ from .models import (
     NULL_DISPLAY_TOKEN,
     CellUpdateResult,
     ConcurrentEditError,
-    EditOperationRollbackError,
     EditableResultContext,
+    EditOperationRollbackError,
     ExplainPlanCleanupError,
     ExplainPlanResult,
     ExplainPlanStep,
@@ -117,7 +123,6 @@ from .transactions import (
     transaction_statement_kind,
 )
 
-
 __all__ = [
     "AppConfig",
     "CREATE_PLSQL_OBJECT_RE",
@@ -146,6 +151,7 @@ __all__ = [
     "ORACLE_TABLE_CLAUSE_REJECTIONS",
     "OracleCompilationError",
     "OracleExecutionError",
+    "OracleIdentifierToken",
     "OracleWorkspace",
     "PLSQL_TRANSACTION_KEYWORDS",
     "PlsqlCompileDiagnostic",
@@ -210,8 +216,11 @@ __all__ = [
     "read_only_rejection_reason",
     "read_lob_value",
     "read_password",
+    "quote_identifier",
+    "render_identifier",
     "rollback_explain_plan_savepoint",
     "scalar_var_value",
+    "scan_oracle_identifier",
     "split_script",
     "split_top_level_select_items",
     "sql_code_mask",

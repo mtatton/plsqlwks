@@ -17,30 +17,50 @@ from plsqlwks.db import (
     ExplainPlanCleanupError,
     ExplainPlanStep,
     OracleCompilationError,
-    OracleWorkspace,
     OracleExecutionError,
+    OracleWorkspace,
     PlsqlCompileDiagnostic,
     PlsqlObject,
     QueryResult,
-    ResultColumnMetadata,
+    QueryResultContinuation,
     ReadOnlyModeError,
+    ResultColumnMetadata,
     TransactionReport,
     TruncatedLobValue,
     assemble_package_definition,
+    csv_cell,
     empty_schema_object_groups,
     ensure_sql_terminator,
     fetch_ddl,
     format_value,
     materialize_result_value,
     metadata_object_type,
+    normalize_identifier,
     package_body_exists,
     plsql_object_from_create_statement,
+    quote_identifier,
     read_only_rejection_reason,
+    render_identifier,
+    scan_oracle_identifier,
     terminate_plsql_ddl,
     transaction_statement_kind,
     workspace_health,
-    csv_cell,
 )
+from plsqlwks.db.metadata import MetadataMixin, MetadataService
+
+
+def test_oracle_identifier_helpers_preserve_exact_quoted_names():
+    assert normalize_identifier("decisions") == "DECISIONS"
+    assert normalize_identifier('"Mixed ""Case"') == 'Mixed "Case'
+    assert normalize_identifier('"unterminated') is None
+    assert normalize_identifier('""') is None
+    assert quote_identifier('Mixed "Case') == '"Mixed ""Case"'
+    assert render_identifier("DECISIONS") == "DECISIONS"
+    assert render_identifier("Mixed Case") == '"Mixed Case"'
+    assert render_identifier("SELECT", {"SELECT"}) == '"SELECT"'
+    token = scan_oracle_identifier('"Příliš žluťoučký" tail')
+    assert token is not None
+    assert (token.name, token.quoted) == ("Příliš žluťoučký", True)
 
 
 def test_format_value_handles_oracle_friendly_types():
@@ -51,6 +71,25 @@ def test_format_value_handles_oracle_friendly_types():
     assert format_value(datetime(2026, 5, 28, 19, 30, 5, 123456)) == "2026-05-28 19:30:05.123456"
     assert format_value("Příliš") == "Příliš"
     assert format_value("NULL") == "NULL"
+
+
+@pytest.mark.parametrize(
+    ("type_code", "type_name"),
+    [
+        (db_module.oracledb.DB_TYPE_TIMESTAMP_TZ, "TIMESTAMP WITH TIME ZONE"),
+        (db_module.oracledb.DB_TYPE_TIMESTAMP_LTZ, "TIMESTAMP WITH LOCAL TIME ZONE"),
+    ],
+)
+def test_materialize_result_hides_lossy_thin_mode_time_zone_values(type_code, type_name):
+    metadata = ResultColumnMetadata(type_code=type_code, scale=9)
+    value = datetime(2026, 1, 17, 10, 11, 12, 123456)
+
+    display, original = materialize_result_value(value, metadata=metadata)
+
+    marker = f"<{type_name}: lossless Thin-mode fetch unavailable; use TO_CHAR>"
+    assert display == marker
+    assert original == marker
+    assert materialize_result_value(None, metadata=metadata) == (NULL_DISPLAY_TOKEN, None)
 
 
 def test_format_value_reads_clob_and_blob_explicitly(monkeypatch):
@@ -142,14 +181,20 @@ def test_number_output_handler_requests_exact_decimal_values():
 
     cursor = Cursor()
 
-    assert execution_module.decimal_output_type_handler(
-        cursor,
-        ResultColumnMetadata(db_module.oracledb.DB_TYPE_NUMBER),
-    ) == "number variable"
-    assert execution_module.decimal_output_type_handler(
-        cursor,
-        ResultColumnMetadata(db_module.oracledb.DB_TYPE_VARCHAR),
-    ) is None
+    assert (
+        execution_module.decimal_output_type_handler(
+            cursor,
+            ResultColumnMetadata(db_module.oracledb.DB_TYPE_NUMBER),
+        )
+        == "number variable"
+    )
+    assert (
+        execution_module.decimal_output_type_handler(
+            cursor,
+            ResultColumnMetadata(db_module.oracledb.DB_TYPE_VARCHAR),
+        )
+        is None
+    )
     assert calls == [(Decimal, 17)]
 
 
@@ -242,7 +287,7 @@ def test_execute_script_uses_long_special_statement_line_titles(tmp_path, long_s
 
     results = workspace.execute_script(long_special_sql_case.script)
 
-    assert workspace.calls == list(zip(long_special_sql_case.expected_statements, expected_titles))
+    assert workspace.calls == list(zip(long_special_sql_case.expected_statements, expected_titles, strict=True))
     assert [result.title for result in results] == expected_titles
 
 
@@ -786,6 +831,90 @@ def test_fetch_more_rows_uses_lookahead_and_closes_after_final_page(tmp_path):
     assert connection.cursor_instance.closed is True
 
 
+def test_zoned_timestamp_markers_and_warning_survive_result_paging(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        user=base.user,
+        dsn=base.dsn,
+        password_file=base.password_file,
+        workspace_dir=base.workspace_dir,
+        max_rows=1,
+    )
+    workspace = OracleWorkspace(config)
+    metadata = (
+        "ZONED_AT",
+        db_module.oracledb.DB_TYPE_TIMESTAMP_TZ,
+        None,
+        None,
+        None,
+        9,
+        True,
+    )
+    workspace.connection = FakeExecuteConnection(
+        description=[metadata],
+        rows=[
+            (datetime(2026, 1, 17, 10, 11, 12, 123456),),
+            (datetime(2026, 1, 18, 10, 11, 12, 123456),),
+        ],
+    )
+    workspace.read_dbms_output = lambda: []
+
+    result = workspace.execute_statement("select zoned_at from events", "Select")
+    page = workspace.fetch_more_rows(result.continuation, len(result.rows))
+
+    marker = "<TIMESTAMP WITH TIME ZONE: lossless Thin-mode fetch unavailable; use TO_CHAR>"
+    assert result.rows == [[marker]]
+    assert result.original_rows == [[marker]]
+    assert len(result.warnings) == 1
+    assert "explicit TO_CHAR" in result.warnings[0]
+    assert "warning: python-oracledb Thin mode" in result.message
+    assert page.rows == [[marker]]
+    assert page.original_rows == [[marker]]
+    assert page.warnings == []
+
+
+def test_fetch_more_rows_honors_short_page_limit_without_skipping_lookahead(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        user=base.user,
+        dsn=base.dsn,
+        password_file=base.password_file,
+        workspace_dir=base.workspace_dir,
+        max_rows=2,
+    )
+    workspace = OracleWorkspace(config)
+    connection = FakeExecuteConnection(
+        description=[("NAME",)],
+        rows=[("one",), ("two",), ("three",), ("four",), ("five",)],
+    )
+    workspace.connection = connection
+
+    result = workspace.execute_statement("select name from decisions", "Select")
+    short_page = workspace.fetch_more_rows(
+        result.continuation,
+        len(result.rows),
+        page_rows=1,
+    )
+    next_page = workspace.fetch_more_rows(
+        short_page.continuation,
+        len(result.rows) + len(short_page.rows),
+        page_rows=1,
+    )
+
+    assert short_page.rows == [["three"]]
+    assert next_page.rows == [["four"]]
+    assert short_page.continuation is result.continuation
+    assert next_page.continuation is result.continuation
+    assert connection.cursor_instance.fetchmany_sizes == [3, 1, 1]
+
+
+def test_fetch_more_rows_rejects_nonpositive_page_limit(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+
+    with pytest.raises(ValueError, match="positive"):
+        workspace.fetch_more_rows(QueryResultContinuation("missing"), 0, page_rows=0)
+
+
 def test_fetch_more_rows_captures_dbms_output_on_every_page(tmp_path):
     base = make_config(tmp_path)
     config = AppConfig(
@@ -840,12 +969,8 @@ def test_fetch_more_rows_elapsed_time_is_cumulative_and_monotonic(monkeypatch, t
     result = workspace.execute_statement("select name from decisions", "Select")
     page = workspace.fetch_more_rows(result.continuation, len(result.rows))
 
-    assert result.message.startswith(
-        "1 row(s) (limited to 1 rows; more rows available) in 1.25s"
-    )
-    assert page.message.startswith(
-        "2 row(s) (limited to 2 rows; more rows available) in 1.75s"
-    )
+    assert result.message.startswith("1 row(s) (limited to 1 rows; more rows available) in 1.25s")
+    assert page.message.startswith("2 row(s) (limited to 2 rows; more rows available) in 1.75s")
 
 
 def test_fetch_more_rows_preserves_rows_when_output_read_fails(tmp_path):
@@ -887,9 +1012,7 @@ def test_fetch_more_rows_preserves_final_rows_when_cursor_cleanup_fails(tmp_path
         def cursor(self):
             cursor = super().cursor()
             if len(self.cursors) == 1:
-                cursor.close = lambda: (_ for _ in ()).throw(
-                    RuntimeError("final cursor close failed")
-                )
+                cursor.close = lambda: (_ for _ in ()).throw(RuntimeError("final cursor close failed"))
             return cursor
 
     base = make_config(tmp_path)
@@ -914,9 +1037,7 @@ def test_fetch_more_rows_preserves_final_rows_when_cursor_cleanup_fails(tmp_path
     assert page.rows == [["two"]]
     assert page.continuation is None
     assert page.has_more_rows is False
-    assert page.warnings == [
-        "Statement cursor cleanup failed: final cursor close failed"
-    ]
+    assert page.warnings == ["Statement cursor cleanup failed: final cursor close failed"]
     assert "warning: Statement cursor cleanup failed" in page.message
     assert workspace._result_continuations == {}
 
@@ -992,9 +1113,7 @@ def test_execute_script_closes_paged_results_as_later_queries_supersede_them(tmp
     workspace.connection = connection
 
     results = workspace.execute_script(
-        "select name from first_table;"
-        "select name from second_table;"
-        "select name from third_table;"
+        "select name from first_table;select name from second_table;select name from third_table;"
     )
 
     assert [result.continuation is not None for result in results] == [False, False, True]
@@ -1112,9 +1231,7 @@ def test_autocommit_commit_failure_captures_output_and_marks_outcome_unknown(tmp
 
     assert isinstance(excinfo.value.original, RuntimeError)
     assert excinfo.value.dbms_output == ["output from failed statement"]
-    assert excinfo.value.warnings == [
-        "Autocommit commit failed; transaction outcome is unknown: commit failed"
-    ]
+    assert excinfo.value.warnings == ["Autocommit commit failed; transaction outcome is unknown: commit failed"]
     assert workspace.pending_unknown_changes is True
 
     result = workspace.execute_statement("begin null; end;", "Retry")
@@ -1207,9 +1324,7 @@ def test_execute_statement_query_preserves_rows_when_dbms_output_read_fails(tmp_
     workspace = OracleWorkspace(make_config(tmp_path))
     connection = FakeExecuteConnection(description=[("VALUE",)], rows=[("one",)])
     workspace.connection = connection
-    workspace.read_dbms_output = lambda: (_ for _ in ()).throw(
-        RuntimeError("get_lines failed")
-    )
+    workspace.read_dbms_output = lambda: (_ for _ in ()).throw(RuntimeError("get_lines failed"))
 
     result = workspace.execute_statement("select value from decisions", "Select")
 
@@ -1278,9 +1393,7 @@ def test_execute_statement_preserves_result_when_cursor_cleanup_fails(tmp_path):
         def cursor(self):
             cursor = super().cursor()
             if len(self.cursors) == 1:
-                cursor.close = lambda: (_ for _ in ()).throw(
-                    RuntimeError("cursor close failed")
-                )
+                cursor.close = lambda: (_ for _ in ()).throw(RuntimeError("cursor close failed"))
             return cursor
 
     workspace = OracleWorkspace(make_config(tmp_path))
@@ -1302,9 +1415,7 @@ def test_execute_statement_attaches_cursor_cleanup_warning_to_primary_error(tmp_
         def cursor(self):
             cursor = super().cursor()
             if len(self.cursors) == 1:
-                cursor.close = lambda: (_ for _ in ()).throw(
-                    RuntimeError("cursor close failed")
-                )
+                cursor.close = lambda: (_ for _ in ()).throw(RuntimeError("cursor close failed"))
             return cursor
 
     original = RuntimeError("ORA-20000: primary failure")
@@ -1316,9 +1427,7 @@ def test_execute_statement_attaches_cursor_cleanup_warning_to_primary_error(tmp_
         workspace.execute_statement("begin fail; end;", "Block")
 
     assert excinfo.value.original is original
-    assert excinfo.value.warnings == [
-        "Statement cursor cleanup failed: cursor close failed"
-    ]
+    assert excinfo.value.warnings == ["Statement cursor cleanup failed: cursor close failed"]
 
 
 def test_execute_statement_returns_success_warning_when_dbms_output_read_fails(tmp_path):
@@ -1444,8 +1553,7 @@ def test_commit_failure_does_not_mask_compilation_error_or_output(tmp_path):
     assert "Invalid declaration" in str(excinfo.value.original)
     assert excinfo.value.dbms_output == ["compile output"]
     assert excinfo.value.warnings == [
-        "Autocommit commit failed; transaction outcome is unknown: "
-        "commit after compile failed"
+        "Autocommit commit failed; transaction outcome is unknown: commit after compile failed"
     ]
     assert excinfo.value.__cause__ is excinfo.value.original
     assert workspace.pending_unknown_changes is True
@@ -1456,9 +1564,7 @@ def test_compile_error_survives_diagnostic_cursor_cleanup_failure(tmp_path):
         def cursor(self):
             cursor = super().cursor()
             if len(self.cursors) == 2:
-                cursor.close = lambda: (_ for _ in ()).throw(
-                    RuntimeError("diagnostic cursor close failed")
-                )
+                cursor.close = lambda: (_ for _ in ()).throw(RuntimeError("diagnostic cursor close failed"))
             return cursor
 
     workspace = OracleWorkspace(make_config(tmp_path))
@@ -1477,9 +1583,7 @@ def test_compile_error_survives_diagnostic_cursor_cleanup_failure(tmp_path):
 
     assert isinstance(excinfo.value.original, OracleCompilationError)
     assert "Invalid declaration" in str(excinfo.value.original)
-    assert excinfo.value.warnings == [
-        "PL/SQL diagnostic cursor cleanup failed: diagnostic cursor close failed"
-    ]
+    assert excinfo.value.warnings == ["PL/SQL diagnostic cursor cleanup failed: diagnostic cursor close failed"]
 
 
 def test_execute_statement_returns_plsql_compile_warnings_on_success(tmp_path):
@@ -1493,18 +1597,13 @@ def test_execute_statement_returns_plsql_compile_warnings_on_success(tmp_path):
     workspace.read_dbms_output = lambda: []
 
     result = workspace.execute_statement(
-        "create or replace procedure warn_me as\n"
-        "begin null; return; null; end;",
+        "create or replace procedure warn_me as\nbegin null; return; null; end;",
         "Compile warning",
     )
 
     assert result.columns == []
-    assert result.diagnostics == [
-        PlsqlCompileDiagnostic(2, 5, "PLW-06002: Unreachable code", "WARNING")
-    ]
-    assert result.warnings == [
-        "PL/SQL line 2, column 5 [WARNING]: PLW-06002: Unreachable code"
-    ]
+    assert result.diagnostics == [PlsqlCompileDiagnostic(2, 5, "PLW-06002: Unreachable code", "WARNING")]
+    assert result.warnings == ["PL/SQL line 2, column 5 [WARNING]: PLW-06002: Unreachable code"]
     assert "warning: PL/SQL line 2, column 5 [WARNING]" in result.message
     assert connection.commits == 1
     compile_query = " ".join(connection.cursors[1].calls[0][0].lower().split())
@@ -1517,9 +1616,7 @@ def test_compile_warning_survives_diagnostic_cursor_cleanup_failure(tmp_path):
         def cursor(self):
             cursor = super().cursor()
             if len(self.cursors) == 2:
-                cursor.close = lambda: (_ for _ in ()).throw(
-                    RuntimeError("diagnostic cursor close failed")
-                )
+                cursor.close = lambda: (_ for _ in ()).throw(RuntimeError("diagnostic cursor close failed"))
             return cursor
 
     workspace = OracleWorkspace(make_config(tmp_path))
@@ -1535,9 +1632,7 @@ def test_compile_warning_survives_diagnostic_cursor_cleanup_failure(tmp_path):
         "Compile warning",
     )
 
-    assert result.diagnostics == [
-        PlsqlCompileDiagnostic(2, 5, "PLW-06002: Unreachable code", "WARNING")
-    ]
+    assert result.diagnostics == [PlsqlCompileDiagnostic(2, 5, "PLW-06002: Unreachable code", "WARNING")]
     assert result.warnings == [
         "PL/SQL line 2, column 5 [WARNING]: PLW-06002: Unreachable code",
         "PL/SQL diagnostic cursor cleanup failed: diagnostic cursor close failed",
@@ -1557,9 +1652,7 @@ def test_plsql_compile_errors_include_warning_diagnostics_and_severity(tmp_path)
 
     with pytest.raises(OracleExecutionError) as excinfo:
         workspace.execute_statement(
-            "create or replace procedure broken as\n"
-            "begin null;\n"
-            "broken syntax; end;",
+            "create or replace procedure broken as\nbegin null;\nbroken syntax; end;",
             "Compile failure",
         )
 
@@ -1586,10 +1679,7 @@ def test_plsql_compile_diagnostics_are_anchored_after_leading_comments(tmp_path)
 
     with pytest.raises(OracleExecutionError) as excinfo:
         workspace.execute_statement(
-            "-- generated file\n"
-            "/* package header */\n"
-            "  create or replace procedure broken as\n"
-            "  invalid body;",
+            "-- generated file\n/* package header */\n  create or replace procedure broken as\n  invalid body;",
             "Commented compile failure",
         )
 
@@ -1643,7 +1733,9 @@ def test_manual_dml_accumulates_pending_rows_until_commit(tmp_path):
 
     workspace.execute_statement("update decisions set name = 'one'", "Update")
     connection.rowcount = 3
-    workspace.execute_statement("merge into decisions d using dual on (1=1) when matched then update set name = 'two'", "Merge")
+    workspace.execute_statement(
+        "merge into decisions d using dual on (1=1) when matched then update set name = 'two'", "Merge"
+    )
 
     assert workspace.pending_rows_changed == 5
     assert workspace.pending_unknown_changes is False
@@ -1866,9 +1958,7 @@ def test_unhealthy_connection_marks_only_transaction_capable_failure_unknown(
             return cursor
 
     workspace = OracleWorkspace(make_config(tmp_path, autocommit=False))
-    workspace.connection = UnhealthyConnection(
-        execute_error=RuntimeError("connection lost during statement")
-    )
+    workspace.connection = UnhealthyConnection(execute_error=RuntimeError("connection lost during statement"))
     workspace.record_pending_rows(3)
     workspace.read_dbms_output = lambda: []
 
@@ -1919,6 +2009,7 @@ def test_sql_lexers_preserve_and_mask_national_q_literals():
     assert ("FOR", "UPDATE") not in zip(
         db_module.tail_sql_words(statement),
         db_module.tail_sql_words(statement)[1:],
+        strict=False,
     )
 
 
@@ -1927,6 +2018,10 @@ def test_read_only_for_update_detection_still_rejects_clause_after_quoted_identi
         read_only_rejection_reason('select "FOR UPDATE" from decisions for update')
         == "SELECT FOR UPDATE is disabled in read-only mode"
     )
+
+
+def test_read_only_for_update_detection_keeps_adjacent_bind_names_allowed():
+    assert read_only_rejection_reason("select :for,:update from dual") == ""
 
 
 def test_oracle_workspace_uses_configured_autocommit_default(tmp_path):
@@ -1953,9 +2048,7 @@ def test_connect_closes_and_forgets_partially_initialized_connection(monkeypatch
     workspace = OracleWorkspace(make_config(tmp_path))
     monkeypatch.setattr(db_module, "read_password", lambda path: "secret")
     monkeypatch.setattr(db_module.oracledb, "connect", lambda **params: connection)
-    workspace.enable_dbms_output = lambda: (_ for _ in ()).throw(
-        RuntimeError("DBMS_OUTPUT initialization failed")
-    )
+    workspace.enable_dbms_output = lambda: (_ for _ in ()).throw(RuntimeError("DBMS_OUTPUT initialization failed"))
 
     with pytest.raises(RuntimeError, match="DBMS_OUTPUT initialization failed"):
         workspace.connect()
@@ -2006,18 +2099,14 @@ def test_read_dbms_output_drains_multiple_full_batches(tmp_path):
 def test_dbms_output_cursor_cleanup_failure_preserves_drained_lines(tmp_path):
     workspace = OracleWorkspace(make_config(tmp_path))
     connection = FakeOutputConnection([["one", "two"]])
-    connection.cursor_instance.close = lambda: (_ for _ in ()).throw(
-        RuntimeError("output cursor close failed")
-    )
+    connection.cursor_instance.close = lambda: (_ for _ in ()).throw(RuntimeError("output cursor close failed"))
     workspace.connection = connection
 
     output, output_error, warnings = workspace._read_dbms_output_safely()
 
     assert output == ["one", "two"]
     assert output_error == ""
-    assert warnings == [
-        "DBMS_OUTPUT cursor cleanup failed: output cursor close failed"
-    ]
+    assert warnings == ["DBMS_OUTPUT cursor cleanup failed: output cursor close failed"]
 
 
 def test_get_object_definition_fetches_package_spec_and_body(tmp_path):
@@ -2033,11 +2122,72 @@ def test_get_object_definition_fetches_package_spec_and_body(tmp_path):
     text = workspace.get_object_definition("PACKAGE", "pkg_test")
 
     assert text == (
-        "create or replace package pkg_test as end;\n"
-        "/\n\n"
-        "create or replace package body pkg_test as end;\n"
-        "/"
+        "create or replace package pkg_test as end;\n/\n\ncreate or replace package body pkg_test as end;\n/"
     )
+
+
+def test_metadata_service_reads_through_injected_connection_provider():
+    connection = FakeColumnConnection([("TABLE", "T_TEST")])
+    provider_calls = 0
+
+    def ensure_connected():
+        nonlocal provider_calls
+        provider_calls += 1
+        return connection
+
+    service = MetadataService(ensure_connected)
+
+    assert service.list_schema_objects()["TABLE"] == ["T_TEST"]
+    assert provider_calls == 1
+
+
+def test_oracle_workspace_composes_metadata_without_mixin(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+
+    assert MetadataMixin not in type(workspace).__mro__
+    assert isinstance(workspace._metadata, MetadataService)
+
+
+def test_oracle_workspace_metadata_methods_delegate_to_composed_port(tmp_path):
+    class MetadataSpy:
+        def __init__(self):
+            self.calls: list[tuple[object, ...]] = []
+
+        def list_schema_objects(self):
+            self.calls.append(("objects",))
+            return {"TABLE": ["T_TEST"]}
+
+        def get_object_definition(self, object_type, object_name):
+            self.calls.append(("definition", object_type, object_name))
+            return "create table t_test (id number);"
+
+        def list_object_columns(self, object_name):
+            self.calls.append(("columns", object_name))
+            return ["ID"]
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    metadata = MetadataSpy()
+    workspace._metadata = metadata
+
+    assert workspace.list_schema_objects() == {"TABLE": ["T_TEST"]}
+    assert workspace.get_object_definition("TABLE", "T_TEST").startswith("create table")
+    assert workspace.list_object_columns("T_TEST") == ["ID"]
+    assert metadata.calls == [
+        ("objects",),
+        ("definition", "TABLE", "T_TEST"),
+        ("columns", "T_TEST"),
+    ]
+
+
+def test_metadata_mixin_remains_a_compatible_adapter():
+    class MetadataHost(MetadataMixin):
+        def __init__(self):
+            self.connection = FakeColumnConnection([("ID",), ("NAME",)])
+
+        def ensure_connected(self):
+            return self.connection
+
+    assert MetadataHost().list_object_columns("decisions") == ["ID", "NAME"]
 
 
 def test_get_object_definition_terminates_procedure_ddl(tmp_path):
@@ -2047,6 +2197,17 @@ def test_get_object_definition_terminates_procedure_ddl(tmp_path):
     )
 
     assert workspace.get_object_definition("PROCEDURE", "p_test").endswith(";\n/")
+
+
+def test_get_object_definition_preserves_quoted_mixed_case_name(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = FakeMetadataConnection(
+        {("TABLE", "Mixed Table"): 'create table "Mixed Table" ("Name" varchar2(10))'}
+    )
+
+    ddl = workspace.get_object_definition("TABLE", '"Mixed Table"')
+
+    assert ddl == 'create table "Mixed Table" ("Name" varchar2(10));'
 
 
 @pytest.mark.parametrize(
@@ -2125,9 +2286,9 @@ def test_list_schema_objects_includes_extended_types_in_display_order(tmp_path):
 
 def test_list_object_columns_returns_current_schema_columns(tmp_path):
     workspace = OracleWorkspace(make_config(tmp_path))
-    workspace.connection = FakeColumnConnection([("id",), ("Name",)])
+    workspace.connection = FakeColumnConnection([("ID",), ("Name",)])
 
-    assert workspace.list_object_columns("decisions") == ["ID", "NAME"]
+    assert workspace.list_object_columns("decisions") == ["ID", "Name"]
     assert workspace.connection.cursor_instance.calls == [
         (
             "select column_name from user_tab_columns where table_name = :object_name order by column_id",
@@ -2135,6 +2296,19 @@ def test_list_object_columns_returns_current_schema_columns(tmp_path):
         )
     ]
     assert workspace.list_object_columns("not valid") == []
+
+
+def test_list_object_columns_binds_exact_quoted_name(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = FakeColumnConnection([("FOO",), ("Foo",)])
+
+    assert workspace.list_object_columns('"Mixed Table"') == ["FOO", "Foo"]
+    assert workspace.connection.cursor_instance.calls == [
+        (
+            "select column_name from user_tab_columns where table_name = :object_name order by column_id",
+            {"object_name": "Mixed Table"},
+        )
+    ]
 
 
 def test_metadata_termination_helpers_are_idempotent_and_package_aware():
@@ -2313,7 +2487,7 @@ class FakeMetadataCursor:
     def execute(self, sql: str, **params):
         normalized = " ".join(sql.lower().split())
         if "dbms_metadata.get_ddl" in normalized:
-            key = (str(params["object_type"]).upper(), str(params["object_name"]).upper())
+            key = (str(params["object_type"]).upper(), str(params["object_name"]))
             self.rows = [(self.connection.ddl.get(key),)]
         elif "object_type = 'package body'" in normalized:
             self.rows = [(self.connection.package_body_count,)]

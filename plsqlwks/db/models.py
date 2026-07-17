@@ -77,6 +77,7 @@ class QueryResult:
     statement_start_line: int | None = field(default=None, repr=False, compare=False)
     statement_start_col: int | None = field(default=None, repr=False, compare=False)
     has_more_rows: bool = False
+    detached_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.continuation is not None:
@@ -179,9 +180,7 @@ class ExplainPlanCleanupError(RuntimeError):
         self.autocommit_restore_error = autocommit_restore_error
         self.cursor_close_error = cursor_close_error
         self.transaction_may_have_changes = (
-            not full_rollback_succeeded
-            or autocommit_restore_error is not None
-            or cursor_close_error is not None
+            not full_rollback_succeeded or autocommit_restore_error is not None or cursor_close_error is not None
         )
         super().__init__(self._message())
 
@@ -295,6 +294,7 @@ class SimpleSelect:
     alias: str | None
     items: list[SelectItem]
 
+
 DBMS_OUTPUT_BUFFER_SIZE = 1_000_000
 DBMS_OUTPUT_FETCH_LINES = 100
 DBMS_OUTPUT_LINE_SIZE = 32767
@@ -309,7 +309,4 @@ def format_compilation_error(plsql_object: PlsqlObject, diagnostics: list[PlsqlC
 
 
 def format_compile_diagnostic(diagnostic: PlsqlCompileDiagnostic) -> str:
-    return (
-        f"line {diagnostic.line}, column {diagnostic.position} "
-        f"[{diagnostic.severity}]: {diagnostic.text}"
-    )
+    return f"line {diagnostic.line}, column {diagnostic.position} [{diagnostic.severity}]: {diagnostic.text}"

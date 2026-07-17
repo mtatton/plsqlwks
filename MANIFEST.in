@@ -3,7 +3,10 @@
 global-exclude *
 
 include MANIFEST.in
+include ARCHITECTURE.md
+include COMPATIBILITY.md
 include PLUGINS.md
+include QUICKSTART.html
 include QUICKSTART.md
 include README.md
 include license.txt
@@ -33,6 +36,7 @@ include plsqlwks/db/editing.py
 include plsqlwks/db/execution.py
 include plsqlwks/db/explain.py
 include plsqlwks/db/health.py
+include plsqlwks/db/identifiers.py
 include plsqlwks/db/metadata.py
 include plsqlwks/db/models.py
 include plsqlwks/db/session.py
@@ -76,6 +80,7 @@ include plsqlwks/ui/ports.py
 include plsqlwks/ui/query_controller.py
 include plsqlwks/ui/renderer.py
 include plsqlwks/ui/result_controller.py
+include plsqlwks/ui/result_export.py
 include plsqlwks/ui/result_presenter.py
 include plsqlwks/ui/results.py
 include plsqlwks/ui/sql.py

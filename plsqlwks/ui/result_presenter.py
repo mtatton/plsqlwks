@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import re
+from collections.abc import Callable
 from typing import Any
 
 from ..db import ExplainPlanResult, OracleExecutionError, QueryResult
@@ -42,11 +42,9 @@ from .state import (
     UIState,
 )
 
-
 RESULT_LINE_ORIGIN_RE = re.compile(r"\blines\s+(\d+)-\d+\b", re.IGNORECASE)
 SOURCE_CHANGED_NOTICE = (
-    "Source changed since execution started; results and diagnostics refer to "
-    "an earlier buffer revision."
+    "Source changed since execution started; results and diagnostics refer to an earlier buffer revision."
 )
 PAGING_TRANSCRIPT_PREFIXES = (
     "More rows available;",
@@ -81,10 +79,14 @@ class ResultPresenter:
                     event.statement_start_col,
                     source_text=event.source_text,
                     source_unchanged=event.source_unchanged,
+                    interrupted=event.interrupted,
                 )
                 return
             if event.kind == "fetch-more":
-                self.handle_fetch_more_error(event.error)
+                self.handle_fetch_more_error(
+                    event.error,
+                    interrupted=event.interrupted,
+                )
                 return
             self.handle_execution_error(
                 event.error,
@@ -95,6 +97,7 @@ class ResultPresenter:
                 source_unchanged=event.source_unchanged,
                 statement_count=event.statement_count,
                 failed_statement_index=event.failed_statement_index,
+                interrupted=event.interrupted,
             )
             return
         if event.kind == "explain":
@@ -174,22 +177,26 @@ class ResultPresenter:
         self.state.show_dbms_output = False
         self.state.focus = FOCUS_RESULTS
         if result.rows:
-            self._move_result_selection(
-                to_row=min(fetched.target_row, len(result.rows) - 1)
-            )
+            self._move_result_selection(to_row=min(fetched.target_row, len(result.rows) - 1))
         self._update_result_status()
         self.state.status = f"{result.message} | {self.state.status}"
 
-    def handle_fetch_more_error(self, exc: Exception) -> None:
+    def handle_fetch_more_error(
+        self,
+        exc: Exception,
+        *,
+        interrupted: bool = False,
+    ) -> None:
         self._merge_error_dbms_output(exc)
         error_lines = execution_error_lines(exc)
         self.set_results([*self.state.results, *error_lines], clear_table=False)
         message = short_execution_error_message(exc)
-        status = (
-            "Fetch rows interrupted"
-            if is_execution_interrupted(exc)
-            else "Fetch rows failed"
+        interrupted = (
+            interrupted
+            or bool(getattr(self.db_operations, "completion_interrupted", False))
+            or is_execution_interrupted(exc)
         )
+        status = "Fetch rows interrupted" if interrupted else "Fetch rows failed"
         self.state.status = f"{status}: {message}" if message else status
         if self.state.active_result is not None:
             self.state.active_result.continuation = None
@@ -201,11 +208,8 @@ class ResultPresenter:
             if line.startswith(prefix):
                 self.state.results[idx] = f"{prefix}{result.message}"
                 next_idx = idx + 1
-                if (
-                    next_idx < len(self.state.results)
-                    and self.state.results[next_idx].startswith(
-                        PAGING_TRANSCRIPT_PREFIXES
-                    )
+                if next_idx < len(self.state.results) and self.state.results[next_idx].startswith(
+                    PAGING_TRANSCRIPT_PREFIXES
                 ):
                     self.state.results.pop(next_idx)
                 paging = more_rows_status(
@@ -276,7 +280,13 @@ class ResultPresenter:
         source_unchanged: bool = True,
         statement_count: int = 1,
         failed_statement_index: int | None = None,
+        interrupted: bool = False,
     ) -> None:
+        interrupted = (
+            interrupted
+            or bool(getattr(self.db_operations, "completion_interrupted", False))
+            or is_execution_interrupted(exc)
+        )
         diagnostic_details = document_error_diagnostics(
             exc,
             statement_start_line,
@@ -307,25 +317,17 @@ class ResultPresenter:
             self.set_results(
                 error_lines,
                 clear_table=(
-                    is_database_connected(self.state.db)
-                    or self.state.active_result is None
+                    (is_database_connected(self.state.db) and not interrupted) or self.state.active_result is None
                 ),
             )
         if statement_count > 1:
             self._merge_error_dbms_output(exc, force_grouped=True)
         self.state.show_dbms_output = False
         self.state.focus = FOCUS_EDITOR
-        status = (
-            "Execution interrupted"
-            if is_execution_interrupted(exc)
-            else "Execution failed"
-        )
+        status = "Execution interrupted" if interrupted else "Execution failed"
         shown_location = moved_location or diagnostic_location
         if shown_location is not None:
-            status = (
-                f"{status} at line {shown_location.line}, "
-                f"column {shown_location.column}"
-            )
+            status = f"{status} at line {shown_location.line}, column {shown_location.column}"
         suffix = f": {message}" if message else ""
         status = f"{status}{suffix}"
         if failed_statement_index is not None:
@@ -345,17 +347,11 @@ class ResultPresenter:
         dbms_output: list[str] = []
         active_result: QueryResult | None = None
         previous_result = self.state.active_result
-        if previous_result is not None and not any(
-            result is previous_result for result in results
-        ):
+        if previous_result is not None and not any(result is previous_result for result in results):
             self.release_result_continuation(previous_result)
         self.state.explain_result = None
         self.state.explain_scroll = 0
-        grouped_output = (
-            len(results) > 1
-            if group_dbms_output is None
-            else group_dbms_output
-        )
+        grouped_output = len(results) > 1 if group_dbms_output is None else group_dbms_output
         for result in results:
             self.state.last_result = result
             output.append(f"[{result.title}] {result.message}")
@@ -385,10 +381,7 @@ class ResultPresenter:
                 )
             if result.columns:
                 active_result = result
-                if (
-                    result.editable_context is not None
-                    and not is_read_only_enabled(self.state.db)
-                ):
+                if result.editable_context is not None and not is_read_only_enabled(self.state.db):
                     output.append(
                         "Tab opens the result grid. F10 views the full selected cell. "
                         "Ctrl-C copies the selected cell. "
@@ -455,7 +448,13 @@ class ResultPresenter:
         *,
         source_text: str | None = None,
         source_unchanged: bool = True,
+        interrupted: bool = False,
     ) -> None:
+        interrupted = (
+            interrupted
+            or bool(getattr(self.db_operations, "completion_interrupted", False))
+            or is_execution_interrupted(exc)
+        )
         diagnostic_details = document_error_diagnostics(
             exc,
             statement_start_line,
@@ -477,18 +476,14 @@ class ResultPresenter:
         self.set_results(
             lines,
             clear_table=(
-                is_database_connected(self.state.db)
-                or self.state.active_result is None
+                (is_database_connected(self.state.db) and not interrupted) or self.state.active_result is None
             ),
         )
         self.state.focus = FOCUS_EDITOR
         shown_location = moved_location or diagnostic_location
-        status = "Explain failed"
+        status = "Explain interrupted" if interrupted else "Explain failed"
         if shown_location is not None:
-            status = (
-                f"{status} at line {shown_location.line}, "
-                f"column {shown_location.column}"
-            )
+            status = f"{status} at line {shown_location.line}, column {shown_location.column}"
         suffix = f": {message}" if message else ""
         status = f"{status}{suffix}"
         if not source_unchanged:
@@ -502,13 +497,10 @@ class ResultPresenter:
     ) -> None:
         tab = self.state.active_tab
         tab.execution_diagnostics = [
-            ExecutionDiagnostic(location.line, location.column, message)
-            for location, message in diagnostics
+            ExecutionDiagnostic(location.line, location.column, message) for location, message in diagnostics
         ]
         tab.execution_diagnostic_index = -1
-        tab.execution_diagnostic_source = (
-            self.state.buffer.text() if source_text is None else source_text
-        )
+        tab.execution_diagnostic_source = self.state.buffer.text() if source_text is None else source_text
 
     def _record_success_diagnostics(
         self,
@@ -549,9 +541,7 @@ class ResultPresenter:
         tab = self.state.active_tab
         tab.execution_diagnostics = diagnostics
         tab.execution_diagnostic_index = -1
-        tab.execution_diagnostic_source = (
-            self.state.buffer.text() if source_text is None else source_text
-        )
+        tab.execution_diagnostic_source = self.state.buffer.text() if source_text is None else source_text
 
     def _clear_execution_diagnostics(self) -> None:
         tab = self.state.active_tab
@@ -584,9 +574,7 @@ class ResultPresenter:
         *,
         focus_results: bool = True,
     ) -> None:
-        self._clear_table_result_state(
-            FOCUS_RESULTS if focus_results else FOCUS_EDITOR
-        )
+        self._clear_table_result_state(FOCUS_RESULTS if focus_results else FOCUS_EDITOR)
         help_lines = build_help_lines(workspace_messages)
         self.state.active_tab.help_lines = help_lines
         self.state.results = [line.text for line in help_lines]
@@ -622,25 +610,13 @@ class ResultPresenter:
 
     @staticmethod
     def _cumulative_page_message(result: QueryResult, page: Any) -> str:
-        page_suffix = (
-            f"; {len(page.dbms_output)} dbms_output line(s)"
-            if page.dbms_output
-            else ""
-        )
-        page_suffix += "".join(
-            f"; warning: {warning}" for warning in page.warnings
-        )
+        page_suffix = f"; {len(page.dbms_output)} dbms_output line(s)" if page.dbms_output else ""
+        page_suffix += "".join(f"; warning: {warning}" for warning in page.warnings)
         base_message = page.message
         if page_suffix and base_message.endswith(page_suffix):
             base_message = base_message[: -len(page_suffix)]
-        cumulative_suffix = (
-            f"; {len(result.dbms_output)} dbms_output line(s)"
-            if result.dbms_output
-            else ""
-        )
-        cumulative_suffix += "".join(
-            f"; warning: {warning}" for warning in result.warnings
-        )
+        cumulative_suffix = f"; {len(result.dbms_output)} dbms_output line(s)" if result.dbms_output else ""
+        cumulative_suffix += "".join(f"; warning: {warning}" for warning in result.warnings)
         return f"{base_message}{cumulative_suffix}"
 
     def _merge_error_dbms_output(
@@ -664,9 +640,7 @@ class ResultPresenter:
             self.state.active_tab.dbms_output_grouped = True
         grouped = self.state.active_tab.dbms_output_grouped
         if exc.dbms_output:
-            self.state.dbms_output.extend(
-                self._output_view_lines(exc.title, exc.dbms_output, grouped)
-            )
+            self.state.dbms_output.extend(self._output_view_lines(exc.title, exc.dbms_output, grouped))
 
     def _active_insert_draft(self) -> ResultInsertDraft | None:
         draft = self.state.active_tab.result_insert_draft
@@ -685,14 +659,12 @@ class ResultPresenter:
 
     def _discard_insert_draft(self) -> None:
         draft = self._active_insert_draft()
-        if draft is not None:
-            if (
-                0 <= draft.row_index < len(draft.result.rows)
-                and draft.result.rows[draft.row_index] is draft.row
-            ):
-                draft.result.rows.pop(draft.row_index)
-                if draft.row_index < len(draft.result.original_rows):
-                    draft.result.original_rows.pop(draft.row_index)
+        if draft is not None and (
+            0 <= draft.row_index < len(draft.result.rows) and draft.result.rows[draft.row_index] is draft.row
+        ):
+            draft.result.rows.pop(draft.row_index)
+            if draft.row_index < len(draft.result.original_rows):
+                draft.result.original_rows.pop(draft.row_index)
         self.state.active_tab.result_insert_draft = None
 
     def _move_result_selection(
@@ -739,28 +711,19 @@ class ResultPresenter:
         col_total = len(result.columns)
         row = min(self.state.result_row + 1, row_total) if row_total else 0
         col = min(self.state.result_col + 1, col_total) if col_total else 0
-        mode = (
-            "row detail"
-            if self.state.result_mode == RESULT_ROW_DETAIL
-            else "grid"
-        )
+        mode = "row detail" if self.state.result_mode == RESULT_ROW_DETAIL else "grid"
         if self._active_insert_draft() is not None:
             self.state.status = (
-                f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | "
-                f"{insert_draft_active_status()}"
+                f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | {insert_draft_active_status()}"
             )
             return
         edit = ""
         if not is_database_connected(self.state.db):
             edit = " | disconnected; loaded rows are view-only; reconnect to continue"
-        elif (
-            result.editable_context is not None
-            and not is_read_only_enabled(self.state.db)
-        ):
+        elif result.editable_context is not None and not is_read_only_enabled(self.state.db):
             edit = " | Enter edits cell | INS inserts row"
         status = (
-            f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | "
-            f"F10 views cell{edit} | Ctrl-C copies cell"
+            f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | F10 views cell{edit} | Ctrl-C copies cell"
         )
         paging = more_rows_status(result, is_database_connected(self.state.db))
         self.state.status = f"{status} | {paging}" if paging else status

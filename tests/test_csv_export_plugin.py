@@ -5,9 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from plsqlwks.plugins import ResultSnapshot
-from plsqlwks.plugins import csv_export
-
+from plsqlwks.exporting import ExportCancelled
+from plsqlwks.plugins import ResultSnapshot, csv_export
 
 pytestmark = pytest.mark.plugin
 
@@ -79,7 +78,7 @@ def test_plugin_metadata_and_deterministic_default_filename(monkeypatch, tmp_pat
     assert (command.id, command.section, command.title) == (
         "export-loaded-rows",
         "Results",
-        "Export loaded rows to CSV",
+        "Export result to CSV",
     )
     assert command.shortcut == ""
     assert "csv" in command.keywords
@@ -89,9 +88,7 @@ def test_plugin_metadata_and_deterministic_default_filename(monkeypatch, tmp_pat
         date_format="",
         protect_formulas=False,
     )
-    assert context.prompts == [
-        ("Export loaded rows to CSV", str(tmp_path / "result_20260712_090807.csv"), True)
-    ]
+    assert context.prompts == [("Export loaded rows to CSV", str(tmp_path / "result_20260712_090807.csv"), True)]
 
 
 @pytest.mark.parametrize("response", [None, ""])
@@ -120,9 +117,7 @@ def test_insert_draft_is_checked_before_result_and_does_not_prompt(tmp_path):
     csv_export.export_loaded_rows(context)
 
     assert context.calls == ["draft"]
-    assert context.statuses == [
-        "Export unavailable while an insert draft is active; commit or cancel the draft first"
-    ]
+    assert context.statuses == ["Export unavailable while an insert draft is active; commit or cancel the draft first"]
     assert context.prompts == []
 
 
@@ -187,8 +182,7 @@ def test_configured_custom_null_value_replaces_only_exact_display_token(
 
     path = (tmp_path / "nulls.csv").resolve()
     assert path.read_text(encoding="utf-8") == (
-        "NULL_VALUE,TEXT_VALUE,SPACED_VALUE\n"
-        f"{exported_null},literal NULL, <NULL> \n"
+        f"NULL_VALUE,TEXT_VALUE,SPACED_VALUE\n{exported_null},literal NULL, <NULL> \n"
     )
 
 
@@ -211,8 +205,7 @@ def test_configured_date_format_handles_strict_iso_date_and_timestamp_shapes(tmp
 
     path = (tmp_path / "dates.csv").resolve()
     assert path.read_text(encoding="utf-8") == (
-        "DATE_VALUE,TIMESTAMP_VALUE,OFFSET_VALUE\n"
-        "12.07.2026 00:00:00 ,12.07.2026 09:08:07 ,12.07.2026 09:08:07 +0200\n"
+        "DATE_VALUE,TIMESTAMP_VALUE,OFFSET_VALUE\n12.07.2026 00:00:00 ,12.07.2026 09:08:07 ,12.07.2026 09:08:07 +0200\n"
     )
 
 
@@ -237,9 +230,7 @@ def test_date_format_preserves_nonmatching_and_invalid_display_strings(tmp_path)
 
     path = (tmp_path / "unchanged.csv").resolve()
     assert path.read_text(encoding="utf-8") == (
-        "A,B,C,D,E\n"
-        "prefix 2026-07-12,2026-02-30,2026-07-12T09:08:07,"
-        "2026-07-12 25:08:07,ordinary\n"
+        "A,B,C,D,E\nprefix 2026-07-12,2026-02-30,2026-07-12T09:08:07,2026-07-12 25:08:07,ordinary\n"
     )
 
 
@@ -259,8 +250,7 @@ def test_default_options_write_null_as_empty_and_preserve_iso_display_values(tmp
 
     path = (tmp_path / "defaults.csv").resolve()
     assert path.read_text(encoding="utf-8") == (
-        "NULL_VALUE,DATE_VALUE,TIMESTAMP_VALUE\n"
-        ",2026-07-12,2026-07-12 09:08:07\n"
+        "NULL_VALUE,DATE_VALUE,TIMESTAMP_VALUE\n,2026-07-12,2026-07-12 09:08:07\n"
     )
 
 
@@ -283,17 +273,12 @@ def test_formula_protection_runs_after_null_and_date_formatting(tmp_path):
     )
 
     path = (tmp_path / "protected.csv").resolve()
-    assert path.read_text(encoding="utf-8") == (
-        '"NULL_VALUE","DATE_VALUE"\n'
-        '"\t=NULL","\t=2026"\n'
-    )
+    assert path.read_text(encoding="utf-8") == ('"NULL_VALUE","DATE_VALUE"\n"\t=NULL","\t=2026"\n')
     assert active.rows == (("<NULL>", "2026-07-12"),)
 
 
 def test_create_plugin_captures_options_without_changing_zero_argument_factory(tmp_path):
-    configured = csv_export.create_plugin(
-        csv_export.CsvExportOptions(separator=";", null_value="NULL")
-    )
+    configured = csv_export.create_plugin(csv_export.CsvExportOptions(separator=";", null_value="NULL"))
     context = RecordingContext(
         tmp_path,
         ResultSnapshot("Data", ("VALUE",), (("<NULL>",),), False),
@@ -322,9 +307,7 @@ def test_continuation_adds_success_suffix_without_fetching_more(tmp_path):
     csv_export.export_loaded_rows(context)
 
     path = (tmp_path / "out.csv").resolve()
-    assert context.statuses[-1] == (
-        f"Exported 1 loaded row(s) to {path}; additional rows are available"
-    )
+    assert context.statuses[-1] == (f"Exported 1 loaded row(s) to {path}; additional rows are available")
     assert context.calls == ["draft", "result", "prompt"]
 
 
@@ -356,7 +339,16 @@ def test_write_failure_reports_error_and_preserves_snapshot(monkeypatch, tmp_pat
     context = RecordingContext(tmp_path, active, response="out.csv")
     failure = OSError("disk full\ninternal detail")
 
-    def fail_write(path, columns, rows, *, delimiter=",", protect_formulas=False):
+    def fail_write(
+        path,
+        columns,
+        rows,
+        *,
+        delimiter=",",
+        protect_formulas=False,
+        on_progress=None,
+        cancelled=None,
+    ):
         raise failure
 
     monkeypatch.setattr(csv_export, "write_csv", fail_write)
@@ -375,7 +367,16 @@ def test_write_failure_bounds_status_but_reports_complete_error(monkeypatch, tmp
     context = RecordingContext(tmp_path, snapshot(), response="out.csv")
     failure = OSError("x" * 500)
 
-    def fail_write(path, columns, rows, *, delimiter=",", protect_formulas=False):
+    def fail_write(
+        path,
+        columns,
+        rows,
+        *,
+        delimiter=",",
+        protect_formulas=False,
+        on_progress=None,
+        cancelled=None,
+    ):
         raise failure
 
     monkeypatch.setattr(csv_export, "write_csv", fail_write)
@@ -394,3 +395,26 @@ def test_path_normalization_expands_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
     assert csv_export.resolve_export_path("~/result.csv", tmp_path) == (home / "result.csv").resolve()
+
+
+def test_cancellable_csv_writer_preserves_existing_destination(tmp_path):
+    destination = tmp_path / "cancelled.csv"
+    destination.write_text("old", encoding="utf-8")
+    cancelled = False
+
+    def progress(current: int, total: int) -> None:
+        nonlocal cancelled
+        if current == 1:
+            cancelled = True
+
+    with pytest.raises(ExportCancelled):
+        csv_export.write_csv_snapshot(
+            destination,
+            snapshot(rows=(("one",), ("two",))),
+            csv_export.CsvExportOptions(),
+            on_progress=progress,
+            cancelled=lambda: cancelled,
+        )
+
+    assert destination.read_text(encoding="utf-8") == "old"
+    assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []

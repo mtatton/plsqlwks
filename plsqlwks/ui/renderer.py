@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import curses
-from typing import Protocol
 
 from .browser import (
-    BrowserEntry,
     browser_entry_text,
-    browser_panel_width,
-    clamp_browser_row,
+    flatten_browser_entries,
     tab_display_title,
     visible_tab_labels,
 )
 from .constants import (
+    _SYNTAX_COLOR_ATTRS,
+    _SYNTAX_FALLBACK_ATTRS,
     COLOR_SYNTAX_OPERATOR,
     FOCUS_BROWSER,
     FOCUS_RESULTS,
@@ -30,8 +30,6 @@ from .constants import (
     RESULT_ROW_DETAIL,
     RESULT_STYLE_HELP,
     SYNTAX_DEFAULT,
-    _SYNTAX_COLOR_ATTRS,
-    _SYNTAX_FALLBACK_ATTRS,
     configured_plan_color_pairs,
     syntax_color_palette,
 )
@@ -42,15 +40,11 @@ from .results import (
     VisibleColumn,
     access_mode_name,
     active_operation_status,
-    clamp_cell_view_scroll,
-    editor_result_pane_heights,
     explain_plan_label,
     explain_plan_lines,
     is_database_connected,
     is_read_only_enabled,
     result_label,
-    result_pane_is_editor_fullscreen,
-    result_pane_tab_height,
     row_detail_lines,
     scroll_start,
     table_column_widths,
@@ -67,41 +61,17 @@ from .syntax import (
     syntax_line_segments,
     tokenize_sql_lines,
 )
+from .viewport import LayoutSnapshot, build_layout_snapshot
 
-
-class DocumentRenderPort(Protocol):
-    def ensure_active_tab_visible(self, width: int) -> None: ...
-
-
-class BrowserRenderPort(Protocol):
-    def browser_entries(self) -> list[BrowserEntry]: ...
-
-    def ensure_browser_selection_visible(self, visible_rows: int) -> None: ...
-
-
-class ResultRenderPort(Protocol):
-    def clamp_result_selection(self) -> None: ...
-
-    def ensure_selected_row_visible(self, visible_rows: int) -> None: ...
-
-    def ensure_selected_column_visible(self, widths: list[int], width: int) -> None: ...
-
-    def ensure_selected_detail_field_visible(self, visible_lines: int) -> None: ...
 
 class Renderer:
     def __init__(
         self,
         screen: curses.window,
         state: UIState,
-        documents: DocumentRenderPort,
-        browser: BrowserRenderPort,
-        results: ResultRenderPort,
     ):
         self.screen = screen
         self.state = state
-        self.documents = documents
-        self.browser = browser
-        self.results = results
         self.draw_offset_x = 0
         self.syntax_colors_enabled = False
         self.explain_color_kinds_enabled: set[str] = set()
@@ -130,41 +100,41 @@ class Renderer:
             self.syntax_colors_enabled = True
         except curses.error:
             self.syntax_colors_enabled = False
-        for kind, (pair_number, foreground) in configured_plan_color_pairs(
-            self.state.config.explain_colors
-        ).items():
+        for kind, (pair_number, foreground) in configured_plan_color_pairs(self.state.config.explain_colors).items():
             try:
                 curses.init_pair(pair_number, foreground, default_bg)
             except curses.error:
                 continue
             self.explain_color_kinds_enabled.add(kind)
 
-    def draw(self) -> None:
+    def draw(self, layout: LayoutSnapshot | None = None) -> None:
         self.screen.erase()
-        height, width = self.screen.getmaxyx()
-        if self.state.result_grid_fullscreen and self.state.active_result is not None:
+        if layout is None:
+            height, width = self.screen.getmaxyx()
+            layout = build_layout_snapshot(self.state, height, width)
+        height = layout.height
+        width = layout.width
+        if layout.grid_fullscreen:
             self.draw_offset_x = 0
             result_cursor = self.draw_result_grid(0, height, width, show_label=False)
             self.show_cursor()
             self.move_cursor(result_cursor)
             self.screen.refresh()
             return
-        if result_pane_is_editor_fullscreen(self.state.result_ratio):
+        if layout.editor_fullscreen:
             self.draw_offset_x = 0
             editor_cursor = self.draw_editor(0, height, width)
             self.show_cursor()
             self.move_cursor(editor_cursor)
             self.screen.refresh()
             return
-        status_h = 1
-        header_h = 1
-        tab_h = result_pane_tab_height(self.state.result_ratio)
-        usable_h = max(3, height - status_h - header_h)
-        content_usable_h = max(3, usable_h - tab_h)
-        browser_w = browser_panel_width(width) if self.state.browser_visible else 0
-        content_x = browser_w + 1 if self.state.browser_visible else 0
-        content_w = max(1, width - content_x)
-        editor_h, result_h = editor_result_pane_heights(content_usable_h, self.state.result_ratio)
+        tab_h = layout.tab_height
+        usable_h = layout.usable_height
+        browser_w = layout.browser_width
+        content_x = layout.content_x
+        content_w = layout.content_width
+        editor_h = layout.editor_height
+        result_h = layout.result_height
 
         self.draw_offset_x = 0
         self.draw_header(width)
@@ -186,9 +156,7 @@ class Renderer:
         self.show_cursor()
         if self.state.focus == FOCUS_BROWSER:
             cursor_position = browser_cursor
-        elif self.state.focus == FOCUS_RESULTS:
-            cursor_position = result_cursor
-        elif editor_h <= 0:
+        elif self.state.focus == FOCUS_RESULTS or editor_h <= 0:
             cursor_position = result_cursor
         else:
             cursor_position = editor_cursor
@@ -202,11 +170,7 @@ class Renderer:
         tab_count = len(self.state.tabs)
         tx_mode = transaction_mode_name(self.state.db)
         access = access_mode_name(self.state.db)
-        connection = (
-            "db connected"
-            if is_database_connected(self.state.db)
-            else "db disconnected"
-        )
+        connection = "db connected" if is_database_connected(self.state.db) else "db disconnected"
         left = (
             f"[O] | {focus} | {connection} | tx {tx_mode} | {access} | "
             f"tab {self.state.active_tab_idx + 1}/{tab_count} | {title}{dirty} "
@@ -214,7 +178,6 @@ class Renderer:
         self.addstr(0, 0, fit_text(left, width), curses.color_pair(1) | curses.A_DIM)
 
     def draw_tab_bar(self, y: int, width: int) -> None:
-        self.documents.ensure_active_tab_visible(width)
         self.addstr(y, 0, fit_text("", width), curses.color_pair(2))
         x = 0
         visible = visible_tab_labels(self.state.tabs, self.state.tab_scroll, width)
@@ -234,11 +197,12 @@ class Renderer:
                 x += 1
 
     def draw_browser(self, y: int, height: int, width: int) -> tuple[int, int]:
-        entries = self.browser.browser_entries()
-        self.state.browser_row = clamp_browser_row(self.state.browser_row, entries)
+        entries = flatten_browser_entries(
+            self.state.browser_objects,
+            self.state.browser_expanded,
+            self.state.browser_filter,
+        )
         body_h = max(0, height - 1)
-        self.state.browser_page_size = max(1, body_h)
-        self.browser.ensure_browser_selection_visible(body_h)
         label = f" Schema | Filter: {self.state.browser_filter}"
         self.addstr(y, 0, fit_text(label, width), curses.color_pair(3) | curses.A_BOLD)
         cursor = (y + 1, 1)
@@ -269,15 +233,16 @@ class Renderer:
 
     def draw_editor(self, y: int, height: int, width: int) -> tuple[int, int]:
         buf = self.state.buffer
-        if buf.row < buf.scroll:
-            buf.scroll = buf.row
-        if buf.row >= buf.scroll + height:
-            buf.scroll = buf.row - height + 1
+        scroll = buf.scroll
+        if buf.row < scroll:
+            scroll = buf.row
+        if buf.row >= scroll + height:
+            scroll = buf.row - height + 1
         line_no_width = len(str(len(buf.lines))) + 2
         token_lines = tokenize_sql_lines(buf.lines)
         matching_brackets = find_matching_bracket_positions(buf.lines, token_lines, buf.row, buf.col)
         for idx in range(height):
-            line_idx = buf.scroll + idx
+            line_idx = scroll + idx
             screen_y = y + idx
             if line_idx >= len(buf.lines):
                 self.addstr(screen_y, 0, "~".ljust(width), curses.color_pair(2))
@@ -302,7 +267,7 @@ class Renderer:
                 token_lines,
                 matching_brackets,
             )
-        cursor_y = y + buf.row - buf.scroll
+        cursor_y = y + buf.row - scroll
         cursor_x = min(width - 1, line_no_width + display_width(buf.lines[buf.row][: buf.col]))
         if y <= cursor_y < y + height:
             return cursor_y, self.draw_offset_x + cursor_x
@@ -388,8 +353,6 @@ class Renderer:
         body_h = max(0, height - 1)
         wrapped = wrapped_dbms_output_lines(self.state.dbms_output, width)
         scroll = scroll_start(self.state.active_tab.dbms_output_scroll, len(wrapped), body_h)
-        if self.state.active_tab.dbms_output_scroll is not None:
-            self.state.active_tab.dbms_output_scroll = scroll
         lines = wrapped[scroll : scroll + body_h] if body_h else []
         for idx in range(body_h):
             text = lines[idx] if idx < len(lines) else ""
@@ -401,8 +364,6 @@ class Renderer:
         self.addstr(y, 0, fit_text(label, width), curses.color_pair(3) | curses.A_BOLD)
         body_h = max(0, height - 1)
         scroll = scroll_start(self.state.active_tab.results_scroll, len(self.state.results), body_h)
-        if self.state.active_tab.results_scroll is not None:
-            self.state.active_tab.results_scroll = scroll
         lines = self.state.results[scroll : scroll + body_h] if body_h else []
         for idx in range(body_h):
             text = lines[idx] if idx < len(lines) else ""
@@ -416,8 +377,6 @@ class Renderer:
         body_h = max(0, height - 1)
         lines = self.state.active_tab.help_lines
         scroll = scroll_start(self.state.active_tab.results_scroll, len(lines), body_h)
-        if self.state.active_tab.results_scroll is not None:
-            self.state.active_tab.results_scroll = scroll
         for idx in range(body_h):
             line_idx = scroll + idx
             screen_y = y + 1 + idx
@@ -459,9 +418,7 @@ class Renderer:
         if result is None:
             return self.draw_text_results(y, height, width)
         body_h = max(0, height - 1)
-        self.state.explain_page_size = max(1, body_h)
         lines = explain_plan_lines(result)
-        self.state.explain_scroll = clamp_cell_view_scroll(self.state.explain_scroll, len(lines), body_h)
         label = explain_plan_label(result, self.state.focus == FOCUS_RESULTS, bool(lines))
         self.addstr(y, 0, fit_text(label, width), curses.color_pair(2) | curses.A_DIM)
         cursor = (y + 1, self.draw_offset_x)
@@ -521,12 +478,7 @@ class Renderer:
         label_h = 1 if show_label else 0
         body_h = max(0, height - label_h)
         visible_rows = max(0, body_h - 2)
-        self.state.result_page_size = max(1, visible_rows)
-        self.results.clamp_result_selection()
-        if visible_rows:
-            self.results.ensure_selected_row_visible(visible_rows)
         widths = table_column_widths(result)
-        self.results.ensure_selected_column_visible(widths, width)
         visible = visible_table_columns(widths, self.state.result_col_scroll, width)
         if show_label:
             label = result_label(
@@ -578,9 +530,6 @@ class Renderer:
         if result is None:
             return self.draw_text_results(y, height, width)
         body_h = max(0, height - 1)
-        self.state.result_page_size = max(1, body_h)
-        self.results.clamp_result_selection()
-        self.results.ensure_selected_detail_field_visible(body_h)
         label = result_label(
             result,
             RESULT_ROW_DETAIL,
@@ -590,14 +539,15 @@ class Renderer:
             is_database_connected(self.state.db),
         )
         self.addstr(y, 0, fit_text(label, width), curses.color_pair(3) | curses.A_BOLD)
-        lines = row_detail_lines(result, self.state.result_row, width, self.state.result_col_scroll)
+        col_scroll = self.state.result_col_scroll
+        lines = row_detail_lines(result, self.state.result_row, width, col_scroll)
         while (
             body_h > 0
-            and self.state.result_col_scroll < self.state.result_col
+            and col_scroll < self.state.result_col
             and not any(field_idx == self.state.result_col for field_idx, _ in lines[:body_h])
         ):
-            self.state.result_col_scroll += 1
-            lines = row_detail_lines(result, self.state.result_row, width, self.state.result_col_scroll)
+            col_scroll += 1
+            lines = row_detail_lines(result, self.state.result_row, width, col_scroll)
         cursor = (y + 1, self.draw_offset_x)
         for idx in range(body_h):
             if idx >= len(lines):
@@ -648,24 +598,18 @@ class Renderer:
         screen_x = self.draw_offset_x + x
         if y < 0 or y >= height or screen_x >= width:
             return
-        try:
+        with contextlib.suppress(curses.error):
             self.screen.addstr(y, screen_x, clip_text(text, max(0, width - screen_x)), attr)
-        except curses.error:
-            pass
 
     def move_cursor(self, position: tuple[int, int]) -> None:
         y, x = position
         height, width = self.screen.getmaxyx()
-        try:
+        with contextlib.suppress(curses.error):
             self.screen.move(min(max(y, 0), height - 1), min(max(x, 0), width - 1))
-        except curses.error:
-            pass
 
     def show_cursor(self) -> None:
         try:
             curses.curs_set(2)
         except curses.error:
-            try:
+            with contextlib.suppress(curses.error):
                 curses.curs_set(1)
-            except curses.error:
-                pass

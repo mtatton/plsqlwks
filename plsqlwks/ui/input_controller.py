@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import curses
 from typing import Protocol
 
-from .command_dispatcher import CommandDispatcher
 from .commands import CommandMenuItem
 from .constants import (
     CTRL_B,
@@ -55,6 +53,10 @@ class ApplicationInputPort(Protocol):
     quit_pending: bool
 
 
+class CommandDispatchPort(Protocol):
+    def execute(self, command_id: str) -> bool: ...
+
+
 class CommandDialogPort(Protocol):
     def pick_command_menu(
         self,
@@ -96,7 +98,7 @@ class InputController:
         state: UIState,
         operations: DbOperationsPort,
         application: ApplicationInputPort,
-        dispatcher: CommandDispatcher,
+        dispatcher: CommandDispatchPort,
         dialogs: CommandDialogPort,
         documents: DocumentInputPort,
         viewport: ViewportInputPort,
@@ -138,19 +140,19 @@ class InputController:
         if key == KEY_ALT_O:
             self.open_commands_menu()
             return True
-        if key == curses.KEY_F1:
+        if key == curses_function_key(1):
             self._execute("show_help")
             return True
-        if key == curses.KEY_F7:
+        if key == curses_function_key(7):
             self.viewport.toggle_result_pane_size()
             return True
-        if key == curses.KEY_F6:
+        if key == curses_function_key(6):
             self._execute("toggle_dbms_output_view")
             return True
-        if key == curses.KEY_F8:
+        if key == curses_function_key(8):
             self._execute("toggle_result_mode")
             return True
-        if key == curses.KEY_F9:
+        if key == curses_function_key(9):
             self._execute("toggle_browser")
             return True
         if key == curses_function_key(12):
@@ -200,11 +202,7 @@ class InputController:
             return False
         if self.state.show_dbms_output and self.state.dbms_output:
             return True
-        return bool(
-            self.state.explain_result is not None
-            or self.state.active_result is not None
-            or self.state.results
-        )
+        return bool(self.state.explain_result is not None or self.state.active_result is not None or self.state.results)
 
     def _redirect_fullscreen_editor_focus(self) -> None:
         if result_pane_is_fullscreen(self.state.result_ratio) and self.state.focus == FOCUS_EDITOR:
@@ -228,12 +226,12 @@ class InputController:
             CTRL_V: "paste_clipboard",
             TAB: "enter_results_focus",
             CTRL_S: "save_buffer",
-            curses.KEY_F2: "save_buffer",
+            curses_function_key(2): "save_buffer",
             KEY_ALT_R: "rename_current_buffer",
             CTRL_O: "open_file",
-            curses.KEY_F3: "open_file",
-            curses.KEY_F4: "new_template",
-            curses.KEY_F5: "run_current_statement",
+            curses_function_key(3): "open_file",
+            curses_function_key(4): "new_template",
+            curses_function_key(5): "run_current_statement",
             KEY_CTRL_ENTER: "run_current_statement",
             KEY_ALT_X: "run_current_statement",
             10: "run_current_statement",

@@ -7,10 +7,9 @@ from pathlib import Path
 import pytest
 
 import plsqlwks.exporting as exporting_module
+from plsqlwks.exporting import ExportCancelled
 from plsqlwks.html_exporting import DEFAULT_HTML_TITLE, render_html_result
-from plsqlwks.plugins import PLUGIN_API_VERSION, ResultSnapshot
-from plsqlwks.plugins import html_export
-
+from plsqlwks.plugins import PLUGIN_API_VERSION, ResultSnapshot, html_export
 
 pytestmark = pytest.mark.plugin
 
@@ -114,7 +113,7 @@ def test_plugin_metadata_uses_api_v1_without_shortcut():
     assert (command.id, command.section, command.title) == (
         "export-loaded-rows",
         "Results",
-        "Export loaded rows to HTML",
+        "Export result to HTML",
     )
     assert callable(command.handler)
     assert command.shortcut == ""
@@ -144,9 +143,7 @@ def test_renderer_writes_complete_standalone_document_and_loaded_rows():
     assert "Current data" not in document.partition("<body>\n")[2]
     assert "<h1" not in document
     assert "2 row(s)" in document
-    assert document.index("  </div>\n") < document.index(
-        '  <p class="summary">2 row(s)</p>\n'
-    )
+    assert document.index("  </div>\n") < document.index('  <p class="summary">2 row(s)</p>\n')
     assert document.count('<th scope="col">') == 2
     assert document.count("<tbody>") == 1
     assert document.count("<td>") == 4
@@ -219,9 +216,7 @@ def test_renderer_reports_unexported_continuation_rows():
 
     assert "1 row(s)" in document
     assert "Additional rows are available in PLSQLWKS and were not exported." in document
-    assert document.index("  </div>\n") < document.index("1 row(s)") < document.index(
-        "Additional rows are available"
-    )
+    assert document.index("  </div>\n") < document.index("1 row(s)") < document.index("Additional rows are available")
 
 
 @pytest.mark.parametrize(
@@ -260,7 +255,7 @@ def test_renderer_preserves_values_as_escaped_text(value):
 
 def test_renderer_escapes_hostile_title_header_and_cell_without_active_content():
     hostile_title = '<script>alert(1)</script> & "title"'
-    hostile_header = '</th><img src=x onerror=alert(1)><th>'
+    hostile_header = "</th><img src=x onerror=alert(1)><th>"
     hostile_cell = '</td><script>alert("x")</script><td>'
     already_escaped = '&lt;already escaped&gt; " onmouseover="alert(1)'
     document = render_html_result(
@@ -303,9 +298,7 @@ def test_deterministic_default_filename_and_existing_context_contract(monkeypatc
 
     html_export.export_loaded_rows_to_html(context)
 
-    assert context.prompts == [
-        ("Export loaded rows to HTML", str(tmp_path / "result_20260712_090807.html"), True)
-    ]
+    assert context.prompts == [("Export loaded rows to HTML", str(tmp_path / "result_20260712_090807.html"), True)]
     assert context.statuses[-1] == "Export cancelled"
     assert context.calls[:3] == ["draft", "result", "results_dir"]
 
@@ -464,9 +457,7 @@ def test_insert_draft_is_checked_before_snapshot_and_prompt(tmp_path):
     html_export.export_loaded_rows_to_html(context)
 
     assert context.calls == ["draft", "status"]
-    assert context.statuses == [
-        "Export unavailable while an insert draft is active; commit or cancel the draft first"
-    ]
+    assert context.statuses == ["Export unavailable while an insert draft is active; commit or cancel the draft first"]
     assert context.prompts == []
 
 
@@ -485,9 +476,7 @@ def test_relative_path_creates_parent_and_exports_exact_snapshot(tmp_path):
     document = path.read_text(encoding="utf-8")
     assert "kůň" in document and "東京" in document
     assert document.count("<td>") == 4
-    assert context.statuses[-1] == (
-        f"Exported 2 loaded row(s) to {path}; additional rows are available"
-    )
+    assert context.statuses[-1] == (f"Exported 2 loaded row(s) to {path}; additional rows are available")
     assert context.snapshot is active
     assert active.rows == (("kůň", "first"), ("東京", "second"))
     assert active.has_more is True
@@ -558,9 +547,7 @@ def test_invalid_environment_theme_is_command_failure_and_preserves_destination(
 
     assert path.read_bytes() == old_bytes
     assert context.confirmed_paths == [path.resolve()]
-    assert context.statuses[-1] == (
-        "HTML export failed: HTML export theme must be 'bright' or 'dark'"
-    )
+    assert context.statuses[-1] == ("HTML export failed: HTML export theme must be 'bright' or 'dark'")
     assert len(context.errors) == 1
     assert context.errors[0][0] == "HTML export failed"
     assert isinstance(context.errors[0][1], ValueError)
@@ -737,3 +724,26 @@ def test_export_is_available_in_read_only_mode_and_uses_no_database_operations(t
 
     assert (tmp_path / "read-only.html").is_file()
     assert context.statuses[-1].startswith("Exported 1 loaded row(s)")
+
+
+def test_cancellable_html_writer_preserves_existing_destination(tmp_path):
+    destination = tmp_path / "cancelled.html"
+    destination.write_text("old", encoding="utf-8")
+    cancelled = False
+
+    def progress(current: int, total: int) -> None:
+        nonlocal cancelled
+        if current == 1:
+            cancelled = True
+
+    with pytest.raises(ExportCancelled):
+        html_export.write_html_snapshot(
+            destination,
+            snapshot(rows=(("one",), ("two",))),
+            html_export.HtmlExportOptions(),
+            on_progress=progress,
+            cancelled=lambda: cancelled,
+        )
+
+    assert destination.read_text(encoding="utf-8") == "old"
+    assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []

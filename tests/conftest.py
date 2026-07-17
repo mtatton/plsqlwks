@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import re
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -166,30 +166,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             raise pytest.UsageError(str(exc)) from None
         run_oracle = True
     elif oracle_requested:
-        missing = [
-            name
-            for name in ("ORACLE_USER", "ORACLE_DSN", "ORACLE_PASSWORD_FILE")
-            if not os.environ.get(name)
-        ]
+        missing = [name for name in ("ORACLE_USER", "ORACLE_DSN", "ORACLE_PASSWORD_FILE") if not os.environ.get(name)]
         password_file = Path(os.path.expanduser(os.environ.get("ORACLE_PASSWORD_FILE", "")))
         if missing:
-            raise pytest.UsageError(
-                f"Oracle integration credentials are missing: {', '.join(missing)}"
-            )
+            raise pytest.UsageError(f"Oracle integration credentials are missing: {', '.join(missing)}")
         try:
             password_file_is_valid = password_file.is_file() and password_file.stat().st_size > 0
         except OSError:
             password_file_is_valid = False
         if not password_file_is_valid:
-            raise pytest.UsageError(
-                "Oracle password file must be a nonempty regular file"
-            )
+            raise pytest.UsageError("Oracle password file must be a nonempty regular file")
         run_oracle = True
     run_pty = os.environ.get("PLSQLWKS_TEST_PTY") == "1" or "pty" in markexpr
     run_slow = os.environ.get("PLSQLWKS_TEST_SLOW") == "1" or "slow" in markexpr
-    run_plugins = os.environ.get("PLSQLWKS_TEST_PLUGINS") == "1" or _marker_is_positively_selected(
-        markexpr, "plugin"
-    )
+    run_plugins = os.environ.get("PLSQLWKS_TEST_PLUGINS") == "1" or _marker_is_positively_selected(markexpr, "plugin")
 
     selected: list[pytest.Item] = []
     deselected: list[pytest.Item] = []

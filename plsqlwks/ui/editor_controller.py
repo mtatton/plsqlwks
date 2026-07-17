@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import curses
 from collections.abc import Callable
-from typing import Any
+from typing import Protocol
 
-from ..db import empty_schema_object_groups
+from ..db import empty_schema_object_groups, normalize_identifier
 from ..sqlsplit import statement_at_cursor
-from .catalog import BrowserController, CatalogService
+from .browser import BrowserEntry
+from .catalog import CatalogPort
 from .clipboard import copy_to_system_clipboard, paste_from_clipboard
 from .completion import (
     CompletionCandidate,
@@ -27,6 +27,7 @@ from .completion import (
 from .constants import (
     FOCUS_BROWSER,
     FOCUS_EDITOR,
+    KEY_BACKSPACE,
     KEY_CTRL_BACKSPACE,
     KEY_CTRL_DELETE,
     KEY_CTRL_END,
@@ -37,6 +38,14 @@ from .constants import (
     KEY_CTRL_SHIFT_HOME,
     KEY_CTRL_SHIFT_LEFT,
     KEY_CTRL_SHIFT_RIGHT,
+    KEY_DELETE,
+    KEY_DOWN,
+    KEY_END,
+    KEY_HOME,
+    KEY_LEFT,
+    KEY_PAGE_DOWN,
+    KEY_PAGE_UP,
+    KEY_RIGHT,
     KEY_SHIFT_DOWN,
     KEY_SHIFT_END,
     KEY_SHIFT_HOME,
@@ -45,6 +54,7 @@ from .constants import (
     KEY_SHIFT_PAGEUP,
     KEY_SHIFT_RIGHT,
     KEY_SHIFT_UP,
+    KEY_UP,
 )
 from .display import is_printable_text
 from .errors import short_error
@@ -59,10 +69,13 @@ from .sql import (
 from .state import FileTab, UIState
 from .syntax import transform_sql_code_in_selection
 
-
 CopyToClipboard = Callable[[str], str | None]
 PasteFromClipboard = Callable[[str], tuple[str, str]]
 EditorFingerprint = tuple[FileTab, str, int, int, tuple[int, int] | None, str]
+
+
+class BrowserSelectionPort(Protocol):
+    def active_browser_entry(self) -> BrowserEntry | None: ...
 
 
 class EditorController:
@@ -176,25 +189,25 @@ class EditorController:
             buffer.move_file_start()
         elif key == KEY_CTRL_END:
             buffer.move_file_end()
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
+        elif key in (KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN):
             self.move_editor_cursor(key, extend=False)
-        elif key == curses.KEY_HOME:
+        elif key == KEY_HOME:
             buffer.clear_selection()
             buffer.col = 0
-        elif key == curses.KEY_END:
+        elif key == KEY_END:
             buffer.clear_selection()
             buffer.col = len(buffer.lines[buffer.row])
-        elif key == curses.KEY_PPAGE:
+        elif key == KEY_PAGE_UP:
             buffer.page(-10)
-        elif key == curses.KEY_NPAGE:
+        elif key == KEY_PAGE_DOWN:
             buffer.page(10)
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
+        elif key in (KEY_BACKSPACE, 127, 8):
             buffer.backspace()
         elif key == KEY_CTRL_BACKSPACE:
             buffer.delete_word_left()
         elif key == KEY_CTRL_DELETE:
             buffer.delete_word_right()
-        elif key == curses.KEY_DC:
+        elif key == KEY_DELETE:
             buffer.delete()
         elif key == 13:
             buffer.newline()
@@ -205,22 +218,22 @@ class EditorController:
             buffer.start_selection()
         else:
             buffer.clear_selection()
-        if key in (curses.KEY_LEFT, KEY_SHIFT_LEFT):
+        if key in (KEY_LEFT, KEY_SHIFT_LEFT):
             if buffer.col > 0:
                 buffer.col -= 1
             elif buffer.row > 0:
                 buffer.row -= 1
                 buffer.col = len(buffer.lines[buffer.row])
-        elif key in (curses.KEY_RIGHT, KEY_SHIFT_RIGHT):
+        elif key in (KEY_RIGHT, KEY_SHIFT_RIGHT):
             if buffer.col < len(buffer.lines[buffer.row]):
                 buffer.col += 1
             elif buffer.row < len(buffer.lines) - 1:
                 buffer.row += 1
                 buffer.col = 0
-        elif key in (curses.KEY_UP, KEY_SHIFT_UP):
+        elif key in (KEY_UP, KEY_SHIFT_UP):
             buffer.row = max(0, buffer.row - 1)
             buffer.col = min(buffer.col, len(buffer.lines[buffer.row]))
-        elif key in (curses.KEY_DOWN, KEY_SHIFT_DOWN):
+        elif key in (KEY_DOWN, KEY_SHIFT_DOWN):
             buffer.row = min(len(buffer.lines) - 1, buffer.row + 1)
             buffer.col = min(buffer.col, len(buffer.lines[buffer.row]))
 
@@ -318,8 +331,8 @@ class CompletionController:
         state: UIState,
         dialogs: DialogPort,
         db_operations: DbOperationsPort,
-        catalog: CatalogService,
-        browser: BrowserController,
+        catalog: CatalogPort,
+        browser: BrowserSelectionPort,
     ) -> None:
         self.state = state
         self.dialogs = dialogs
@@ -333,9 +346,9 @@ class CompletionController:
         if table_name is None:
             self.state.status = "SQL generation cancelled"
             return
-        table_name = table_name.upper()
-        if not table_name:
-            self.state.status = "No table or view selected"
+        table_name = normalize_identifier(table_name)
+        if table_name is None:
+            self.state.status = "Enter a valid table or view identifier"
             return
         columns = self.catalog.columns(table_name)
         if columns is None:
@@ -432,11 +445,7 @@ class CompletionController:
             if metadata_error:
                 self.state.status = f"Completion metadata failed: {metadata_error}"
                 return
-            target = (
-                f"{context.qualifier}.{context.prefix}"
-                if context.qualifier
-                else context.prefix
-            )
+            target = f"{context.qualifier}.{context.prefix}" if context.qualifier else context.prefix
             self.state.status = f'No completions for "{target}"'
             return
         if len(candidates) == 1:
@@ -453,14 +462,12 @@ class CompletionController:
 
     def load_completion_metadata_if_needed(self, context: CompletionContext) -> bool:
         references = statement_table_references(context.statement)
-        cached_objects = {
-            object_type: list(names)
-            for object_type, names in self.catalog.schema_objects.items()
-        }
+        cached_objects = {object_type: list(names) for object_type, names in self.catalog.schema_objects.items()}
         need_objects = not self.state.browser_loaded
         if (
             context.qualifier is None
             and not references
+            and not context.prefix_quoted
             and keyword_completion_candidates(context.prefix)
         ):
             return False
@@ -470,46 +477,32 @@ class CompletionController:
                 context.qualifier,
                 references,
                 cached_objects if self.state.browser_loaded else empty_schema_object_groups(),
+                quoted=context.qualifier_quoted,
             )
             table_names = [resolved] if resolved is not None else []
         else:
             table_names = ordered_reference_tables(references)
-        missing_columns = [
-            name for name in table_names if self.catalog.columns(name) is None
-        ]
+        missing_columns = [name for name in table_names if self.catalog.columns(name) is None]
         if not need_objects and not missing_columns:
             return False
 
         fingerprint = self.capture_editor_context()
 
-        def load_metadata(
-            db: Any,
-            progress: Callable[[str], None],
-        ) -> tuple[dict[str, list[str]] | None, dict[str, list[str]]]:
-            objects = db.list_schema_objects() if need_objects else None
-            available_objects = objects if objects is not None else cached_objects
+        def resolve_names(available_objects: dict[str, list[str]]) -> list[str]:
             names = table_names
             if context.qualifier is not None and not names:
                 resolved_name = resolve_completion_qualifier(
                     context.qualifier,
                     references,
                     available_objects,
+                    quoted=context.qualifier_quoted,
                 )
                 names = [resolved_name] if resolved_name is not None else []
-            columns = {
-                name.upper(): db.list_object_columns(name.upper())
-                for name in names
-                if name.upper() not in cached_column_names
-            }
-            return objects, columns
+            return names
 
         def metadata_loaded(
-            loaded: tuple[dict[str, list[str]] | None, dict[str, list[str]]],
+            _loaded: tuple[dict[str, list[str]] | None, dict[str, list[str]]],
         ) -> None:
-            objects, columns = loaded
-            if objects is not None:
-                self.catalog.replace_schema_objects(objects)
-            self.catalog.update_columns(columns)
             if not self.editor_context_is_current(fingerprint):
                 self.state.status = "Completion metadata loaded; retry completion"
                 return
@@ -518,10 +511,11 @@ class CompletionController:
         def metadata_failed(exc: Exception) -> None:
             self.state.status = f"Completion metadata failed: {short_error(exc)}"
 
-        self.db_operations.start(
-            "completion-metadata",
-            "Loading completion metadata",
-            load_metadata,
+        self.catalog.load_completion_metadata(
+            need_objects=need_objects,
+            cached_objects=cached_objects,
+            resolve_names=resolve_names,
+            cached_column_names=cached_column_names,
             on_success=metadata_loaded,
             on_error=metadata_failed,
         )
@@ -534,31 +528,45 @@ class CompletionController:
         references = statement_table_references(context.statement)
         candidates: list[CompletionCandidate] = []
         if context.qualifier is not None:
-            schema_objects = (
-                self.catalog.schema_objects
-                if self.state.browser_loaded
-                else empty_schema_object_groups()
-            )
+            schema_objects = self.catalog.schema_objects if self.state.browser_loaded else empty_schema_object_groups()
             table_name = resolve_completion_qualifier(
                 context.qualifier,
                 references,
                 schema_objects,
+                quoted=context.qualifier_quoted,
             )
             if table_name is None:
                 return [], ""
             columns, _column_error = self.completion_columns(table_name)
             candidates.extend(
-                column_completion_candidates(columns, context.prefix, table_name)
+                column_completion_candidates(
+                    columns,
+                    context.prefix,
+                    table_name,
+                    context.prefix_quoted,
+                )
             )
             return dedupe_completion_candidates(candidates), ""
 
-        candidates.extend(keyword_completion_candidates(context.prefix))
+        if not context.prefix_quoted:
+            candidates.extend(keyword_completion_candidates(context.prefix))
         schema_objects, _object_error = self.completion_schema_objects()
-        candidates.extend(object_completion_candidates(schema_objects, context.prefix))
+        candidates.extend(
+            object_completion_candidates(
+                schema_objects,
+                context.prefix,
+                context.prefix_quoted,
+            )
+        )
         for table_name in ordered_reference_tables(references):
             columns, _column_error = self.completion_columns(table_name)
             candidates.extend(
-                column_completion_candidates(columns, context.prefix, table_name)
+                column_completion_candidates(
+                    columns,
+                    context.prefix,
+                    table_name,
+                    context.prefix_quoted,
+                )
             )
         return dedupe_completion_candidates(candidates), ""
 
@@ -578,11 +586,7 @@ class CompletionController:
     ) -> None:
         buffer = self.state.buffer
         line = buffer.lines[context.row]
-        new_line = (
-            line[: context.start_col]
-            + candidate.insert_text
-            + line[context.end_col :]
-        )
+        new_line = line[: context.start_col] + candidate.insert_text + line[context.end_col :]
         new_col = context.start_col + len(candidate.insert_text)
         if new_line != line or buffer.row != context.row or buffer.col != new_col:
             buffer.record_undo()
@@ -592,6 +596,4 @@ class CompletionController:
             buffer.clear_selection()
             buffer.refresh_dirty()
         source = f" {candidate.source}" if candidate.source else ""
-        self.state.status = (
-            f"Completed {candidate.kind}{source}: {candidate.insert_text}"
-        )
+        self.state.status = f"Completed {candidate.kind}{source}: {candidate.insert_text}"

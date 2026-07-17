@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from tests.oracle_matrix import (
-    DEVELOPER_PRIVILEGES,
     DEVELOPER_OBJECT_PRIVILEGES,
+    DEVELOPER_PRIVILEGES,
     RESTRICTED_PRIVILEGES,
     OracleMatrixConfigurationError,
     OracleMatrixSafetyError,
@@ -206,14 +206,12 @@ def test_easy_connect_dsn_classification(value: str, expected: bool) -> None:
     ("value", "expected"),
     [
         (
-            "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))"
-            "(CONNECT_DATA=(SERVICE_NAME=service)))",
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=service)))",
             True,
         ),
         ("db:1521/service", False),
         (
-            "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=db)(PORT=1522))"
-            "(CONNECT_DATA=(SERVICE_NAME=service)))",
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCPS)(HOST=db)(PORT=1522))(CONNECT_DATA=(SERVICE_NAME=service)))",
             False,
         ),
         ("(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)))", False),
@@ -449,7 +447,17 @@ def test_outgoing_and_effective_fixture_grants_are_exact(tmp_path: Path) -> None
             (config.dml.sql_identifier, "PLSQLWKS_COMPAT_FIXTURE", owner, "INSERT", "NO", "NO", "NO", "TABLE", "NO"),
             (config.dml.sql_identifier, "PLSQLWKS_COMPAT_FIXTURE", owner, "UPDATE", "NO", "NO", "NO", "TABLE", "NO"),
             (config.dml.sql_identifier, "PLSQLWKS_COMPAT_FIXTURE", owner, "DELETE", "NO", "NO", "NO", "TABLE", "NO"),
-            (config.read_only.sql_identifier, "PLSQLWKS_COMPAT_FIXTURE", owner, "SELECT", "NO", "NO", "NO", "TABLE", "NO"),
+            (
+                config.read_only.sql_identifier,
+                "PLSQLWKS_COMPAT_FIXTURE",
+                owner,
+                "SELECT",
+                "NO",
+                "NO",
+                "NO",
+                "TABLE",
+                "NO",
+            ),
         }
     )
     effective_dml = frozenset(

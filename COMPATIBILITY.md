@@ -1,8 +1,10 @@
 # Oracle compatibility
 
 This document is the canonical compatibility and integration-test contract for
-plsqlwks. A database is listed as continuously tested only when every required
-cell below passes on the protected GitHub and GitLab release gates.
+plsqlwks. Oracle Database 19c and Oracle AI Database 26ai are mandatory
+release-gate targets. A target is described as continuously tested only after
+both protected CI systems record ten consecutive qualifying green runs spanning
+at least 30 days; until then, the narrower release-gate-target wording applies.
 
 ## Compatibility matrix
 
@@ -16,7 +18,7 @@ complete `(DESCRIPTION=...)` connect descriptor for the same service.
 | DML-only | Qualified SELECT/INSERT/UPDATE/DELETE against the developer-owned fixture, followed by cleanup and rollback; DDL must be denied | Connection, identity, version, endpoint-fingerprint, and driver-mode smoke test |
 | Read-only | Qualified SELECT succeeds; DML and DDL must be denied by Oracle | Connection, identity, version, endpoint-fingerprint, and driver-mode smoke test |
 
-The complete six-cell matrix runs for each supported target:
+The complete six-cell matrix runs for each release-gate target:
 
 | Target | Accepted server version |
 | --- | --- |
@@ -26,19 +28,76 @@ The complete six-cell matrix runs for each supported target:
 The developer suite creates, discovers, loads, and removes representative
 tables, views, procedures, functions, packages, triggers, sequences, indexes,
 and private synonyms, covering every object type advertised by the schema
-browser.
+browser. It also covers two contrasting session NLS profiles, quoted Unicode
+identifiers, DATE and timestamp types, exact-boundary and approximately 1 MiB
+CLOB/BLOB values, compiler warnings, cancellation of an active long-running
+query, and bounded connection-failure recovery. These mutation-heavy scenarios
+run in the developer/Easy Connect cell; the other five cells retain their
+connection, identity, fingerprint, and privilege-boundary purposes.
+
+A qualifying protected pipeline must select both Oracle target jobs after all
+required hygiene, quality, Python 3.10/3.14 test, and build jobs; every selected
+Oracle test must pass without a skip, allowed failure, cancellation, or pending
+gate. A failed or incomplete qualifying pipeline restarts the consecutive-run
+count. Ad-hoc local runs and experimental connection jobs never count toward
+the public claim.
 
 Other Oracle releases may be used for ad-hoc development, but are not part of
 the compatibility claim. Thick mode, TNS aliases, wallets, TCPS-specific
 configuration, external authentication, proxy authentication, and driver or
 database failover configurations are not release-gating combinations.
 
+### Time-zone timestamp behavior
+
+Oracle `DATE` has no time-zone component. Plain `DATE` and `TIMESTAMP(6)` values
+are materialized as NLS-independent Python datetimes and ISO display strings.
+The current pinned python-oracledb Thin driver does not preserve the offset or
+zone of `TIMESTAMP WITH TIME ZONE` and `TIMESTAMP WITH LOCAL TIME ZONE` values,
+and it truncates precision beyond Python microseconds. Returning the resulting
+naive datetime would falsely imply a lossless value.
+
+For that reason, non-null zoned timestamp cells are read-only and use these
+fail-safe display and export values:
+
+- `<TIMESTAMP WITH TIME ZONE: lossless Thin-mode fetch unavailable; use TO_CHAR>`
+- `<TIMESTAMP WITH LOCAL TIME ZONE: lossless Thin-mode fetch unavailable; use TO_CHAR>`
+
+The result also carries a warning. Select a lossless companion string explicitly
+when exact data is required, for example:
+
+```sql
+to_char(zoned_timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.FF9 TZH:TZM')
+```
+
+For a local-time-zone column, first cast it at the required precision to
+`TIMESTAMP(9) WITH TIME ZONE`; its rendered value follows `SESSIONTIMEZONE`.
+Named-zone timestamp fetches remain an explicit Thin-mode limitation.
+
+### Experimental connection matrices
+
+No executable experimental connection job or runtime switch is part of the
+current release gate. The following names reserve separate future contracts so
+their results cannot be mistaken for coverage of the mandatory Thin matrix:
+
+| Reserved matrix | Required isolated infrastructure |
+| --- | --- |
+| `oracle-experimental-thick` | A separate process and protected runner image with reviewed Oracle Instant Client libraries |
+| `oracle-experimental-wallet-tcps` | A dedicated TCPS endpoint and disposable protected wallet/configuration files |
+| `oracle-experimental-tns-alias` | A disposable `tnsnames.ora`/`TNS_ADMIN` configuration and a dedicated alias |
+
+Each future experiment must retain the identity, version, endpoint-fingerprint,
+privilege, guard-token, and database-lock checks used by the base matrix. It
+starts as a separate non-gating job with separate secrets and no artifacts or
+caches. It can be added to the compatibility claim only after becoming
+compulsory on protected pipelines and independently meeting the same ten-run,
+30-day evidence rule.
+
 The schema browser and metadata completion deliberately enumerate the current
 login schema. Qualified cross-schema SQL is covered by the DML-only and
 read-only profiles, but it does not add cross-schema objects to the browser.
-ROWID-backed grid editing and insertion also remain limited to a conventional
-unquoted table in the current schema; qualified cross-schema results are
-viewable but not grid-editable.
+ROWID-backed grid editing and insertion also remain limited to one base table
+in the current schema. Exact quoted and Unicode table/column names are covered;
+qualified cross-schema results are viewable but not grid-editable.
 
 ## Fail-closed safety gate
 
@@ -250,10 +309,10 @@ from dual;
 
 ## Running the matrix locally
 
-The existing developer-only live suite remains available with
-`PLSQLWKS_TEST_ORACLE=1`. A complete matrix run additionally sets
-`PLSQLWKS_TEST_ORACLE_MATRIX=1`, chooses `19c` or `26ai`, and supplies all of
-the following generic variables:
+The existing developer-only live suite remains available through
+`python3 tools/dev.py test oracle`. A complete matrix run uses the
+`oracle-matrix` profile, chooses `19c` or `26ai`, and supplies all of the
+following generic variables:
 
 ```bash
 export ORACLE_USER='<developer user>'
@@ -269,10 +328,8 @@ export PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME='<container name>'
 export PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME='<service name>'
 export PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE='/protected/guard-token'
 
-PLSQLWKS_TEST_ORACLE=1 \
-PLSQLWKS_TEST_ORACLE_MATRIX=1 \
 PLSQLWKS_TEST_ORACLE_TARGET=19c \
-python3 -m pytest --strict-markers -m oracle --maxfail=1
+python3 tools/dev.py test oracle-matrix
 ```
 
 Password and token files must be nonempty regular files; protect them with
@@ -289,9 +346,32 @@ Both CI systems define the same required 19c and 26ai matrix, use only private
 self-hosted runners, and have no schedule or nightly trigger. GitLab explicitly
 rejects scheduled pipelines and fork merge-request pipelines. Missing
 configuration fails the selected job. Test output stays in the job log; the CI
-definitions do not upload JUnit, distribution, or other artifacts and do not
-use vendor-hosted remote caches. Build and installed-wheel smoke verification
-stay in one job so no artifact transfer is needed.
+definitions do not upload artifacts or use vendor-hosted remote caches from the
+live Oracle jobs. Separate non-Oracle Python 3.10 and 3.14 gates retain JUnit,
+Cobertura XML, and coverage JSON for seven days. Build and installed-wheel smoke
+verification stay in one job so no distribution artifact transfer is needed.
+The shared GitLab Oracle template explicitly sets both live-test opt-in flags,
+declares blocking `needs` edges to repository hygiene, quality, both parallel
+Python test instances, and build smoke, disables dependency artifact downloads,
+and is non-interruptible. The GitHub jobs use the equivalent explicit flags,
+blocking dependencies, and non-cancelling concurrency groups.
+
+The authoritative CI definitions are `.github/workflows/ci.yml` and
+`.gitlab-ci.yml`; a duplicate root `ci.yml` is intentionally not maintained.
+Both definitions call the versioned `tools/dev.py` commands for installation,
+linting, test profiles, hygiene, and build smoke checks, keeping shared behavior
+in one locally runnable source. Installs and nested wheel smoke environments use
+the exact Linux/Python 3.10/3.14 dependency set in `constraints/ci.txt`; dependency
+updates are deliberate reviewed changes rather than upgrades performed by each job.
+
+Every GitLab job runs a standard-library preflight before installation or test
+work. It verifies the requested Python version, `curses`, usable PTYs, the selected
+Python image, a disposable Docker environment, both required runner tags, and
+required checkout inputs. Oracle jobs additionally validate every mapped matrix
+variable, the job-specific workspace prerequisites, and all four private secret
+files. Failures name only the unmet condition or variable label: the preflight
+never prints a username, DSN, secret-file path or contents, raw operating-system
+error, or configuration representation.
 
 Every live Oracle job creates a new mode-`0700` workspace with a job-unique,
 validated path and exports it as `PLSQLWKS_WORKSPACE`. The always-run cleanup
@@ -322,10 +402,11 @@ groups so two GitLab pipelines cannot mutate one endpoint at the same time.
 They are release-gating jobs, not scheduled or nightly jobs. The guard-row
 mutex also prevents overlap with GitHub or local runs.
 
-All GitLab jobs require the private runner tag `plsqlwks`. Project maintainers
-must disable GitLab shared runners, and the project runner must have **Run
-untagged jobs** disabled. Without a matching private runner, jobs intentionally
-remain pending, so hosted-runner minutes are never consumed.
+All GitLab jobs require both private runner tags, `plsqlwks` and `docker`. Project
+maintainers must disable GitLab instance runners and every non-compliant group or
+project runner, protect the selected project runner, and disable **Run untagged
+jobs**. Without a runner carrying both tags, jobs intentionally remain pending,
+so hosted-runner minutes are never consumed.
 
 ### GitHub secrets and jobs
 
@@ -365,20 +446,20 @@ or data and can reach only the required disposable Oracle endpoints and package
 sources. Do not reuse a credentialed runner for untrusted fork code.
 
 1. Install Python 3.10 and 3.14, Python build tooling, a compiler/toolchain, and
-   the platform prerequisites needed by this repository. For GitLab, use a
-   Docker executor (or another executor that honors the job `image:` setting),
-   because the Python 3.10/3.14 matrix selects `python:<version>-slim` images.
+   the platform prerequisites needed by this repository. For GitLab, use the
+   Docker executor because the Python 3.10/3.14 matrix selects
+   `python:<version>-slim` images and rejects other executor environments.
 2. In the GitHub repository or organization runner UI, follow the official
    [self-hosted runner setup](https://docs.github.com/en/actions/reference/runners/self-hosted-runners),
    create a runner, and run the displayed registration command and short-lived
    token on the host. Keep the default `self-hosted`, `linux`, and `x64` labels
    and add `plsqlwks`; never store the registration token in the repository.
 3. In the GitLab project or group runner UI, follow the official
-   [runner setup](https://docs.gitlab.com/ci/runners/), create a project runner
-   with tag `plsqlwks`, disable **Run untagged jobs**, and run the displayed
-   registration command and token on the same host or a separately isolated
-   host. Select the Docker executor and `python:3.14-slim` as its default image.
-   Do not retain the token outside the runner's protected configuration.
+   [runner setup](https://docs.gitlab.com/ci/runners/), create a protected project
+   runner with tags `plsqlwks` and `docker`, disable **Run untagged jobs**, and run
+   the displayed registration command and token on the same host or a separately
+   isolated host. Select the Docker executor and `python:3.14-slim` as its default
+   image. Do not retain the token outside the runner's protected configuration.
 4. Install both runner agents as system services under dedicated unprivileged
    operating-system accounts. Do not store Oracle passwords or guard tokens in
    the runner checkout or service environment. From the configured GitHub
@@ -386,11 +467,11 @@ sources. Do not reuse a credentialed runner for untrusted fork code.
    `sudo ./svc.sh status` install, start, and inspect that service. For a
    package-installed GitLab runner, use `sudo gitlab-runner start`,
    `sudo gitlab-runner status`, and `sudo gitlab-runner verify`.
-5. Disable GitLab shared runners and GitHub-hosted fallback in project,
-   organization, and billing/policy settings. Disable vendor-hosted artifact
-   and remote-cache use for these workflows. Confirm a deliberately unmatched
-   label leaves a harmless test job pending/queued rather than selecting a
-   hosted runner, then cancel that job.
+5. Disable GitLab instance runners, non-compliant group/project runners, and
+   GitHub-hosted fallback in project, organization, and billing/policy settings.
+   Disable vendor-hosted remote-cache use for these workflows. Confirm a
+   deliberately unmatched label leaves a harmless test job pending/queued rather
+   than selecting a hosted runner, then cancel that job.
 6. Add the protected GitLab variables and GitHub secrets listed above. Protect
    the GitLab runner and variables, and configure the GitHub
    `oracle-integration` environment for trusted branches or tags with the
@@ -398,18 +479,20 @@ sources. Do not reuse a credentialed runner for untrusted fork code.
 7. Start the services. In GitHub open **Actions > CI > Run workflow** and choose
    a protected branch. In GitLab open **Build > Pipelines > New pipeline** and
    choose a protected ref. Verify in both job UIs that the selected runner has
-   the expected private identity and `plsqlwks` label/tag before allowing the
-   Oracle commands to run.
-8. Confirm both version jobs pass, leave only secret-free test output in the
-   logs, remove temporary credential files, and upload no artifacts or caches.
+   the expected private identity and the required `plsqlwks` and `docker` tags
+   before allowing the Oracle commands to run.
+8. Confirm both Oracle version jobs pass, leave only secret-free test output in
+   the logs, remove temporary credential files, and upload no Oracle artifacts
+   or caches.
    Stop and investigate immediately if either platform selects an unexpected
    runner.
 
 Self-hosted runner hardware or cloud instances, network traffic, electricity,
 maintenance, and Oracle licensing remain the operator's responsibility. The
-zero-vendor-usage guarantee is specifically that these definitions consume no
-GitHub/GitLab hosted-runner minutes and upload no vendor-hosted artifacts or
-remote caches; a job waits when the private runner is unavailable. Confirm the
+private-runner guarantee is specifically that these definitions consume no
+GitHub/GitLab hosted-runner minutes and upload no Oracle artifacts or remote
+caches; only non-Oracle machine-readable test and coverage reports are retained
+for seven days. A job waits when the private runner is unavailable. Confirm the
 account-side boundary in the current [GitHub Actions billing documentation](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 and [GitLab compute-minute documentation](https://docs.gitlab.com/ci/pipelines/instance_runner_compute_minutes/)
 before the first run.

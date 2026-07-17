@@ -3,7 +3,8 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .db_worker import (
     DatabaseWorker,
@@ -13,7 +14,7 @@ from .db_worker import (
     DbWorkerFinished,
     DbWorkerProgress,
 )
-from .errors import short_execution_error_message
+from .errors import is_execution_interrupted, short_execution_error_message
 from .ports import DatabaseWorkerPort, DbTask
 from .state import (
     DbOperation,
@@ -21,8 +22,11 @@ from .state import (
     FileTab,
     ScriptExecutionFailed,
     UIState,
+    begin_database_operation,
+    finish_database_operation,
+    request_database_operation_cancel,
+    update_database_operation_progress,
 )
-
 
 ResultHandler = Callable[[DbOperationFinished], None]
 WorkerFactory = Callable[[object], DatabaseWorkerPort]
@@ -41,12 +45,9 @@ class DatabaseOperations:
     ) -> None:
         self.state = state
         self._worker = worker
-        self._session_state_is_authoritative = (
-            worker is not None or isinstance(state.db, DbSessionState)
-        )
+        self._session_state_is_authoritative = worker is not None or isinstance(state.db, DbSessionState)
         self._worker_factory = worker_factory
         self._result_handler = result_handler
-        self._completion_target_was_active = True
 
     @property
     def active(self) -> bool:
@@ -54,7 +55,12 @@ class DatabaseOperations:
 
     @property
     def completion_target_was_active(self) -> bool:
-        return self._completion_target_was_active
+        return self.state.database.completion_target_was_active
+
+    @property
+    def completion_interrupted(self) -> bool:
+        """Return whether the completion callback is handling an interruption."""
+        return self.state.database.completion_interrupted
 
     def set_result_handler(self, handler: ResultHandler) -> None:
         """Set the UI-thread fallback used for operations without callbacks."""
@@ -72,26 +78,71 @@ class DatabaseOperations:
             self.state.status = "No database operation running"
             return
         if operation.cancel_requested:
-            self.state.status = "Database interrupt already requested"
+            self.state.status = (
+                "Database interrupt already requested"
+                if operation.interrupt_database
+                else "Cancellation already requested"
+            )
             return
+        cooperative = False
         try:
-            if not self._ensure_worker().cancel_current_operation(
-                operation.handle.command_id
-            ):
-                operation.label = "Database interrupt unavailable"
+            if operation.on_interrupt is not None:
+                operation.on_interrupt()
+                cooperative = True
+            database_cancelled = False
+            if operation.interrupt_database:
+                database_cancelled = self._ensure_worker().cancel_current_operation(operation.handle.command_id)
+            if operation.interrupt_database and not database_cancelled:
+                if cooperative:
+                    operation = request_database_operation_cancel(
+                        operation,
+                        "Cancellation requested",
+                    )
+                    self.state.db_operation = operation
+                    self.state.status = (
+                        "Cancellation requested; database interrupt unavailable; "
+                        "the operation will stop after the current unit of work"
+                    )
+                    return
+                operation = update_database_operation_progress(
+                    operation,
+                    "Database interrupt unavailable",
+                    operation.progress_current,
+                    operation.progress_total,
+                )
+                self.state.db_operation = operation
                 self.state.status = "Database interrupt unavailable"
                 return
         except Exception as exc:
             message = short_execution_error_message(exc) or str(exc)
-            operation.label = "Database interrupt failed"
-            self.state.status = (
-                f"Database interrupt failed: {message}"
-                if message
-                else "Database interrupt failed"
-            )
+            if cooperative:
+                operation = request_database_operation_cancel(
+                    operation,
+                    "Cancellation requested",
+                )
+                self.state.db_operation = operation
+                self.state.status = "Cancellation requested"
+                if message:
+                    self.state.status += f"; database interrupt failed: {message}"
+                self.state.status += "; the operation will stop after the current unit of work"
+            else:
+                operation = update_database_operation_progress(
+                    operation,
+                    "Database interrupt failed",
+                    operation.progress_current,
+                    operation.progress_total,
+                )
+                self.state.db_operation = operation
+                self.state.status = f"Database interrupt failed: {message}" if message else "Database interrupt failed"
             return
-        operation.cancel_requested = True
-        self.state.status = "Database interrupt requested"
+        operation = request_database_operation_cancel(
+            operation,
+            operation.label,
+        )
+        self.state.db_operation = operation
+        self.state.status = (
+            "Cancellation requested" if not operation.interrupt_database else "Database interrupt requested"
+        )
 
     def start(
         self,
@@ -107,6 +158,10 @@ class DatabaseOperations:
         source_text: str | None = None,
         statement_count: int = 1,
         replace_terminal_worker: bool = False,
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        on_interrupt: Callable[[], object] | None = None,
+        interrupt_database: bool = True,
     ) -> bool:
         if self.reject_if_active():
             return False
@@ -126,14 +181,12 @@ class DatabaseOperations:
             disconnected_state = self._sync_worker_session_state(worker)
             message = short_execution_error_message(exc) or str(exc)
             self.state.status = (
-                f"Database operation unavailable: {message}"
-                if message
-                else "Database operation unavailable"
+                f"Database operation unavailable: {message}" if message else "Database operation unavailable"
             )
             if disconnected_state is not None:
                 self.state.status += f" | {self._disconnect_warning(disconnected_state)}"
             return False
-        self.state.db_operation = DbOperation(
+        operation = DbOperation(
             kind=kind,
             label=label,
             started_at=time.monotonic(),
@@ -146,7 +199,12 @@ class DatabaseOperations:
             restore_active_tab=restore_active_tab,
             source_text=source_text,
             statement_count=max(1, statement_count),
+            progress_current=progress_current,
+            progress_total=progress_total,
+            on_interrupt=on_interrupt,
+            interrupt_database=interrupt_database,
         )
+        self.state.database = begin_database_operation(self.state.database, operation)
         self.state.status = label
         return True
 
@@ -181,26 +239,27 @@ class DatabaseOperations:
                 event = DbWorkerFinished(
                     operation.handle.command_id,
                     None,
-                    DatabaseWorkerUnavailableError(
-                        "database worker stopped without a completion event"
-                    ),
+                    DatabaseWorkerUnavailableError("database worker stopped without a completion event"),
                     session_state,
                 )
             if isinstance(event, DbWorkerProgress):
-                operation.label = event.label
+                operation = update_database_operation_progress(
+                    operation,
+                    event.label,
+                    event.current,
+                    event.total,
+                )
+                self.state.db_operation = operation
                 continue
             if not isinstance(event, DbWorkerFinished):
                 continue
             was_connected = bool(getattr(self.state.db, "connected", False))
             self.state.db = event.session_state
-            disconnected = (
-                not event.session_state.connected
-                and (was_connected or self._session_state_is_authoritative)
-            )
+            disconnected = not event.session_state.connected and (was_connected or self._session_state_is_authoritative)
             session_lost = was_connected and disconnected
             if disconnected:
-                self._detach_live_result_state()
-            self.state.db_operation = None
+                self._detach_live_result_state("Connection lost; materialized rows are read-only")
+            self.state.database = finish_database_operation(self.state.database)
             error = event.error
             partial_results = None
             statement_start_line = operation.statement_start_line
@@ -214,6 +273,11 @@ class DatabaseOperations:
                 failed_statement_index = error.statement_index
                 statement_count = error.statement_count
                 error = error.original
+            interrupted = operation.interrupt_database and (
+                operation.cancel_requested or (error is not None and is_execution_interrupted(error))
+            )
+            if interrupted:
+                self._detach_live_result_state("Database operation interrupted; materialized rows are read-only")
             completed = DbOperationFinished(
                 kind=operation.kind,
                 result=event.result,
@@ -223,11 +287,11 @@ class DatabaseOperations:
                 partial_results=partial_results,
                 source_text=operation.source_text,
                 source_unchanged=(
-                    operation.source_text is None
-                    or operation.tab.buffer.text() == operation.source_text
+                    operation.source_text is None or operation.tab.buffer.text() == operation.source_text
                 ),
                 statement_count=statement_count,
                 failed_statement_index=failed_statement_index,
+                interrupted=interrupted,
             )
             try:
                 self._complete(completed, operation)
@@ -237,20 +301,27 @@ class DatabaseOperations:
                     # script's partial results after the first detach above.
                     # Those rows remain useful, but their cursor tokens belong
                     # to the session that just disappeared.
-                    self._detach_live_result_state()
+                    self._detach_live_result_state("Connection lost; materialized rows are read-only")
+                elif interrupted:
+                    self._detach_live_result_state("Database operation interrupted; materialized rows are read-only")
+                    self.submit_background(lambda db, progress: db.close_all_result_continuations())
             if session_lost:
                 warning = self._disconnect_warning(event.session_state)
                 self.state.status = f"{self.state.status} | {warning}"
+            elif interrupted:
+                detail = "Database operation interrupted; materialized results are read-only"
+                normalized_status = self.state.status.casefold()
+                if "interrupted" in normalized_status and "read-only" not in normalized_status:
+                    self.state.status += " | Materialized results are read-only"
+                elif "interrupted" not in normalized_status and "cancel" not in normalized_status:
+                    self.state.status = f"{self.state.status} | {detail}"
+                self.state.status += f" | {self._interrupt_transaction_warning(event.session_state)}"
             return
 
     def wait(self, timeout: float | None = None) -> None:
         deadline = None if timeout is None else time.monotonic() + timeout
         while (operation := self.state.db_operation) is not None:
-            remaining = (
-                None
-                if deadline is None
-                else max(0.0, deadline - time.monotonic())
-            )
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
             operation.handle.done.wait(timeout=remaining)
             self.poll()
             if deadline is not None and time.monotonic() >= deadline:
@@ -271,7 +342,8 @@ class DatabaseOperations:
         if target_idx is None:
             target_idx = original_idx
         self.state.active_tab_idx = target_idx
-        self._completion_target_was_active = target_idx == original_idx
+        self.state.database.completion_target_was_active = target_idx == original_idx
+        self.state.database.completion_interrupted = event.interrupted
         try:
             try:
                 if event.error is not None and operation.on_error is not None:
@@ -281,9 +353,7 @@ class DatabaseOperations:
                 elif self._result_handler is not None:
                     self._result_handler(event)
                 else:
-                    raise RuntimeError(
-                        "database operation result handler is not configured"
-                    )
+                    raise RuntimeError("database operation result handler is not configured")
             except Exception as exc:
                 message = short_execution_error_message(exc) or str(exc)
                 self.state.results = [
@@ -296,7 +366,8 @@ class DatabaseOperations:
                     else "Database operation completion failed"
                 )
         finally:
-            self._completion_target_was_active = False
+            self.state.database.completion_interrupted = False
+            self.state.database.completion_target_was_active = False
             if operation.restore_active_tab:
                 if original_idx < len(self.state.tabs):
                     self.state.active_tab_idx = original_idx
@@ -309,7 +380,13 @@ class DatabaseOperations:
                 return idx
         return None
 
-    def _detach_live_result_state(self) -> None:
+    def detach_live_result_state(self, reason: str) -> None:
+        self._detach_live_result_state(reason)
+
+    def _detach_live_result_state(
+        self,
+        reason: str = "Connection lost; materialized rows are read-only",
+    ) -> None:
         """Keep materialized rows visible while removing dead-session handles."""
         for tab in self.state.tabs:
             seen: set[int] = set()
@@ -318,12 +395,12 @@ class DatabaseOperations:
                     continue
                 seen.add(id(result))
                 result.continuation = None
+                result.editable_context = None
+                result.edit_message = reason
+                result.detached_reason = reason
             draft = tab.result_insert_draft
             if draft is not None:
-                if (
-                    0 <= draft.row_index < len(draft.result.rows)
-                    and draft.result.rows[draft.row_index] is draft.row
-                ):
+                if 0 <= draft.row_index < len(draft.result.rows) and draft.result.rows[draft.row_index] is draft.row:
                     draft.result.rows.pop(draft.row_index)
                     if draft.row_index < len(draft.result.original_rows):
                         draft.result.original_rows.pop(draft.row_index)
@@ -342,35 +419,36 @@ class DatabaseOperations:
         self.state.db = session_state
         if session_state.connected:
             return None
-        self._detach_live_result_state()
+        self._detach_live_result_state("Connection lost; materialized rows are read-only")
         return session_state
 
     def _worker_session_state_or_disconnected(self) -> DbSessionState:
         try:
-            session_state = (
-                self._worker.session_state
-                if self._worker is not None
-                else self.state.db
-            )
+            session_state = self._worker.session_state if self._worker is not None else self.state.db
         except Exception:
             session_state = self.state.db
         return DbSessionState(
             connected=False,
             autocommit=bool(getattr(session_state, "autocommit", False)),
             read_only=bool(getattr(session_state, "read_only", False)),
-            has_uncommitted_changes=bool(
-                getattr(session_state, "has_uncommitted_changes", False)
-            ),
+            has_uncommitted_changes=bool(getattr(session_state, "has_uncommitted_changes", False)),
         )
 
     @staticmethod
     def _disconnect_warning(session_state: DbSessionState) -> str:
         if session_state.has_uncommitted_changes:
             return (
-                "Disconnected; transaction outcome is unknown. "
-                "Reconnect and explicitly resolve or discard the session"
+                "Disconnected; transaction outcome is unknown. Reconnect and explicitly resolve or discard the session"
             )
-        return "Disconnected; reconnect before retrying"
+        return "Disconnected; no pending transaction was tracked; server outcome cannot be confirmed"
+
+    @staticmethod
+    def _interrupt_transaction_warning(session_state: DbSessionState) -> str:
+        if session_state.autocommit:
+            return "Autocommit was enabled; verify whether interrupted changes took effect"
+        if session_state.has_uncommitted_changes:
+            return "Pending transaction remains unresolved; commit or roll back explicitly"
+        return "No pending transaction was tracked"
 
     def _ensure_worker(
         self,

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Literal, TextIO
+from typing import Literal, TextIO
 
 from ..exporting import atomic_write_text
-
 from .constants import UNDO_HISTORY_LIMIT
+
 
 @dataclass(frozen=True)
 class UndoSnapshot:
@@ -488,11 +489,7 @@ class Buffer:
         self.dirty = False
 
     def _refresh_dirty(self) -> None:
-        self.dirty = (
-            self._clean_text is None
-            or self.text() != self._clean_text
-            or self.path != self._clean_path
-        )
+        self.dirty = self._clean_text is None or self.text() != self._clean_text or self.path != self._clean_path
 
     def refresh_dirty(self) -> None:
         """Recompute whether the buffer differs from its clean checkpoint."""
@@ -525,6 +522,7 @@ class Buffer:
         self._append_undo_snapshot(self.snapshot())
         self.restore_snapshot(self.redo_stack.pop())
         return True
+
 
 def is_word_char(ch: str) -> bool:
     return ch.isalnum() or ch in "_$#"
@@ -586,6 +584,7 @@ def next_token_position(lines: list[str], row: int, col: int) -> tuple[int, int]
     while idx < len(text) and token_kind(text[idx]) == "space":
         idx += 1
     return text_index_to_position(lines, idx)
+
 
 def line_indent_width(line: str) -> int:
     return len(line) - len(line.lstrip(" \t"))

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-import re
 from time import monotonic
-from typing import Any, Mapping
+from typing import Any
 from uuid import uuid4
 
 import oracledb
@@ -31,7 +33,6 @@ from .models import (
 )
 from .transactions import transaction_statement_kind
 
-
 ORACLE_IDENTIFIER_RE = r'(?:"(?:""|[^"])*"|[A-Za-z][A-Za-z0-9_$#]*)'
 ORACLE_QUALIFIED_IDENTIFIER_RE = rf"{ORACLE_IDENTIFIER_RE}(?:\s*\.\s*{ORACLE_IDENTIFIER_RE})?"
 ORACLE_IDENTIFIER_TOKEN_RE = re.compile(ORACLE_IDENTIFIER_RE)
@@ -46,6 +47,11 @@ CREATE_PLSQL_OBJECT_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 LOB_DISPLAY_LIMIT = 64 * 1024
+TIME_ZONE_FETCH_WARNING = (
+    "python-oracledb Thin mode cannot losslessly fetch TIMESTAMP WITH TIME ZONE or "
+    "TIMESTAMP WITH LOCAL TIME ZONE values; affected cells are hidden, and explicit "
+    "TO_CHAR is required to preserve zone and precision"
+)
 
 
 @dataclass
@@ -53,6 +59,7 @@ class _QueryResultContinuationState:
     cursor: Any
     lookahead_row: Any
     elapsed_seconds: float
+    column_metadata: list[ResultColumnMetadata]
 
 
 class _DbmsOutputDrainError(RuntimeError):
@@ -97,6 +104,7 @@ class ExecutionMixin:
         completed_result: QueryResult | None = None
         primary_error: BaseException | None = None
         try:
+
             def read_output() -> tuple[list[str], str, list[str]]:
                 return self._read_dbms_output_safely()
 
@@ -149,11 +157,7 @@ class ExecutionMixin:
                     except Exception as exc:
                         commit_error = exc
                 output, output_error, output_warnings = read_output()
-                commit_warnings = (
-                    [_autocommit_failure_warning(commit_error)]
-                    if commit_error is not None
-                    else []
-                )
+                commit_warnings = [_autocommit_failure_warning(commit_error)] if commit_error is not None else []
                 raise OracleExecutionError(
                     compilation_error,
                     title,
@@ -190,8 +194,13 @@ class ExecutionMixin:
                 output, output_error, output_warnings = read_output()
                 result_rows = fetched[: self.config.max_rows]
                 warnings = [*compilation_warnings, *output_warnings]
+                if has_lossy_time_zone_columns(column_metadata):
+                    warnings.append(TIME_ZONE_FETCH_WARNING)
                 try:
-                    rows, original_rows = materialize_result_rows(result_rows)
+                    rows, original_rows = materialize_result_rows(
+                        result_rows,
+                        column_metadata=column_metadata,
+                    )
                 except Exception as exc:
                     raise OracleExecutionError(
                         exc,
@@ -218,18 +227,16 @@ class ExecutionMixin:
                         cursor,
                         fetched[self.config.max_rows],
                         elapsed,
+                        column_metadata,
                     )
                     keep_cursor_open = True
-                    more = (
-                        f" (limited to {len(rows)} rows; more rows available)"
-                    )
+                    more = f" (limited to {len(rows)} rows; more rows available)"
                 completed_result = QueryResult(
                     title=title,
                     columns=columns,
                     rows=rows,
                     message=(
-                        f"{len(rows)} row(s){more} in {elapsed:.2f}s"
-                        f"{_dbms_output_message_suffix(output, warnings)}"
+                        f"{len(rows)} row(s){more} in {elapsed:.2f}s{_dbms_output_message_suffix(output, warnings)}"
                     ),
                     editable_context=editable_context,
                     edit_message=edit_message,
@@ -295,9 +302,7 @@ class ExecutionMixin:
                             f"Statement cursor cleanup failed: {exc}",
                         )
                     elif isinstance(primary_error, OracleExecutionError):
-                        primary_error.warnings.append(
-                            f"Statement cursor cleanup failed: {exc}"
-                        )
+                        primary_error.warnings.append(f"Statement cursor cleanup failed: {exc}")
                     elif primary_error is not None:
                         _add_exception_note(
                             primary_error,
@@ -310,7 +315,11 @@ class ExecutionMixin:
         self,
         continuation: QueryResultContinuation,
         loaded_rows: int,
+        page_rows: int | None = None,
     ) -> QueryResultPage:
+        row_limit = self.config.max_rows if page_rows is None else page_rows
+        if row_limit <= 0:
+            raise ValueError("Page row limit must be positive")
         state = self._result_continuations.get(continuation.token)
         if state is None:
             raise RuntimeError("Query result is stale or no longer available")
@@ -319,12 +328,10 @@ class ExecutionMixin:
             try:
                 fetched = [
                     state.lookahead_row,
-                    *state.cursor.fetchmany(self.config.max_rows),
+                    *state.cursor.fetchmany(row_limit),
                 ]
             except Exception as exc:
-                output, output_error, output_warnings = (
-                    self._read_dbms_output_safely()
-                )
+                output, output_error, output_warnings = self._read_dbms_output_safely()
                 raise OracleExecutionError(
                     exc,
                     "Fetch rows",
@@ -333,9 +340,12 @@ class ExecutionMixin:
                     warnings=output_warnings,
                 ) from exc
             output, output_error, warnings = self._read_dbms_output_safely()
-            result_rows = fetched[: self.config.max_rows]
+            result_rows = fetched[:row_limit]
             try:
-                rows, original_rows = materialize_result_rows(result_rows)
+                rows, original_rows = materialize_result_rows(
+                    result_rows,
+                    column_metadata=state.column_metadata,
+                )
             except Exception as exc:
                 raise OracleExecutionError(
                     exc,
@@ -347,12 +357,10 @@ class ExecutionMixin:
             total_loaded_rows = loaded_rows + len(rows)
             more = ""
             next_continuation: QueryResultContinuation | None = None
-            if len(fetched) > self.config.max_rows:
-                state.lookahead_row = fetched[self.config.max_rows]
+            if len(fetched) > row_limit:
+                state.lookahead_row = fetched[row_limit]
                 next_continuation = continuation
-                more = (
-                    f" (limited to {total_loaded_rows} rows; more rows available)"
-                )
+                more = f" (limited to {total_loaded_rows} rows; more rows available)"
             else:
                 try:
                     self.close_result_continuation(continuation)
@@ -363,10 +371,7 @@ class ExecutionMixin:
                 state.elapsed_seconds = elapsed
             page = QueryResultPage(
                 rows,
-                (
-                    f"{total_loaded_rows} row(s){more} in {elapsed:.2f}s"
-                    f"{_dbms_output_message_suffix(output, warnings)}"
-                ),
+                (f"{total_loaded_rows} row(s){more} in {elapsed:.2f}s{_dbms_output_message_suffix(output, warnings)}"),
                 original_rows,
                 next_continuation,
                 output,
@@ -380,9 +385,7 @@ class ExecutionMixin:
                 self.close_result_continuation(continuation)
             except Exception as close_exc:
                 if isinstance(exc, OracleExecutionError):
-                    exc.warnings.append(
-                        f"Statement cursor cleanup failed: {close_exc}"
-                    )
+                    exc.warnings.append(f"Statement cursor cleanup failed: {close_exc}")
             raise
 
     def close_result_continuation(self, continuation: QueryResultContinuation) -> None:
@@ -408,12 +411,14 @@ class ExecutionMixin:
         cursor: Any,
         lookahead_row: Any,
         elapsed_seconds: float,
+        column_metadata: list[ResultColumnMetadata],
     ) -> QueryResultContinuation:
         continuation = QueryResultContinuation(uuid4().hex)
         self._result_continuations[continuation.token] = _QueryResultContinuationState(
             cursor,
             lookahead_row,
             elapsed_seconds,
+            column_metadata,
         )
         return continuation
 
@@ -440,10 +445,8 @@ class ExecutionMixin:
                 if not previous.columns or _is_dbms_output_result(previous):
                     continue
                 if previous.continuation is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         self.close_result_continuation(previous.continuation)
-                    except Exception:
-                        pass
                     previous.continuation = None
                 break
         results.append(result)
@@ -470,9 +473,7 @@ class ExecutionMixin:
                 output_error = str(exc.read_error)
                 warnings.append(f"DBMS_OUTPUT read failed: {output_error}")
             if exc.cleanup_error is not None:
-                warnings.append(
-                    f"DBMS_OUTPUT cursor cleanup failed: {exc.cleanup_error}"
-                )
+                warnings.append(f"DBMS_OUTPUT cursor cleanup failed: {exc.cleanup_error}")
             return exc.output, output_error, warnings
         except Exception as exc:
             error = str(exc)
@@ -584,9 +585,14 @@ def materialize_result_value(
     value: Any,
     *,
     lob_limit: int = LOB_DISPLAY_LIMIT,
+    metadata: ResultColumnMetadata | None = None,
 ) -> tuple[str, Any]:
     if value is None:
         return NULL_DISPLAY_TOKEN, None
+    time_zone_type = lossy_time_zone_type_name(metadata)
+    if time_zone_type is not None:
+        marker = f"<{time_zone_type}: lossless Thin-mode fetch unavailable; use TO_CHAR>"
+        return marker, marker
     if isinstance(value, oracledb.Cursor):
         value.close()
         return "<REF CURSOR>", "<REF CURSOR>"
@@ -628,9 +634,7 @@ def _materialize_plain_result_value(value: Any, *, lob_limit: int) -> Any:
     if isinstance(value, set):
         return {_materialize_plain_result_value(item, lob_limit=lob_limit) for item in value}
     if isinstance(value, frozenset):
-        return frozenset(
-            _materialize_plain_result_value(item, lob_limit=lob_limit) for item in value
-        )
+        return frozenset(_materialize_plain_result_value(item, lob_limit=lob_limit) for item in value)
     if type(value).__module__.startswith("oracledb"):
         return str(value)
     return value
@@ -735,9 +739,7 @@ def _plsql_compilation_result(
     except Exception as exc:
         cleanup_error = exc
     cleanup_warnings = (
-        [f"PL/SQL diagnostic cursor cleanup failed: {cleanup_error}"]
-        if cleanup_error is not None
-        else []
+        [f"PL/SQL diagnostic cursor cleanup failed: {cleanup_error}"] if cleanup_error is not None else []
     )
     if read_error is not None:
         if isinstance(read_error, Exception) and cleanup_warnings:
@@ -794,11 +796,7 @@ def fetch_plsql_compile_diagnostics(cursor: Any, plsql_object: PlsqlObject) -> l
             line=int(row[0] or 1),
             position=int(row[1] or 1),
             text=str(row[2]).strip(),
-            severity=(
-                str(row[3] or "ERROR").strip().upper()
-                if len(row) > 3
-                else "ERROR"
-            ),
+            severity=(str(row[3] or "ERROR").strip().upper() if len(row) > 3 else "ERROR"),
         )
         for row in cursor.fetchall()
     ]
@@ -817,11 +815,7 @@ def _offset_plsql_compile_diagnostics(
     return [
         PlsqlCompileDiagnostic(
             line=diagnostic.line + line_offset,
-            position=(
-                diagnostic.position + first_line_column_offset
-                if diagnostic.line == 1
-                else diagnostic.position
-            ),
+            position=(diagnostic.position + first_line_column_offset if diagnostic.line == 1 else diagnostic.position),
             text=diagnostic.text,
             severity=diagnostic.severity,
         )
@@ -859,19 +853,39 @@ def format_result_rows(rows: list[Any]) -> list[list[str]]:
     return formatted
 
 
-def materialize_result_rows(rows: list[Any]) -> tuple[list[list[str]], list[list[Any]]]:
+def materialize_result_rows(
+    rows: list[Any],
+    *,
+    column_metadata: list[ResultColumnMetadata] | None = None,
+) -> tuple[list[list[str]], list[list[Any]]]:
     formatted_rows: list[list[str]] = []
     original_rows: list[list[Any]] = []
     for row in rows:
+        if column_metadata is not None and len(column_metadata) != len(row):
+            raise ValueError("Result column metadata does not match the fetched row")
         formatted_row: list[str] = []
         original_row: list[Any] = []
-        for value in row:
-            formatted, original = materialize_result_value(value)
+        for column_index, value in enumerate(row):
+            metadata = column_metadata[column_index] if column_metadata is not None else None
+            formatted, original = materialize_result_value(value, metadata=metadata)
             formatted_row.append(formatted)
             original_row.append(original)
         formatted_rows.append(formatted_row)
         original_rows.append(original_row)
     return formatted_rows, original_rows
+
+
+def lossy_time_zone_type_name(metadata: ResultColumnMetadata | None) -> str | None:
+    type_code = metadata.type_code if metadata is not None else None
+    if type_code is oracledb.DB_TYPE_TIMESTAMP_TZ:
+        return "TIMESTAMP WITH TIME ZONE"
+    if type_code is oracledb.DB_TYPE_TIMESTAMP_LTZ:
+        return "TIMESTAMP WITH LOCAL TIME ZONE"
+    return None
+
+
+def has_lossy_time_zone_columns(column_metadata: list[ResultColumnMetadata]) -> bool:
+    return any(lossy_time_zone_type_name(metadata) is not None for metadata in column_metadata)
 
 
 def csv_cell(value: str) -> str:

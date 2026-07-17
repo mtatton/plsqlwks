@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import curses
 
-
 CTRL_Q = 17
 CTRL_S = 19
 CTRL_B = 2
@@ -69,6 +68,22 @@ KEY_ALT_DIGIT_BASE = 1_000_100
 
 def curses_function_key(number: int) -> int:
     return getattr(curses, f"KEY_F{number}", curses.KEY_F0 + number)
+
+
+# Platform key codes enter the application through this adapter module so
+# controllers can remain independent of the curses implementation.
+KEY_UP = curses.KEY_UP
+KEY_DOWN = curses.KEY_DOWN
+KEY_LEFT = curses.KEY_LEFT
+KEY_RIGHT = curses.KEY_RIGHT
+KEY_HOME = curses.KEY_HOME
+KEY_END = curses.KEY_END
+KEY_PAGE_UP = curses.KEY_PPAGE
+KEY_PAGE_DOWN = curses.KEY_NPAGE
+KEY_BACKSPACE = curses.KEY_BACKSPACE
+KEY_DELETE = curses.KEY_DC
+KEY_INSERT = curses.KEY_IC
+KEY_ENTER = curses.KEY_ENTER
 
 
 FUNCTION_KEY_SEQUENCES = {

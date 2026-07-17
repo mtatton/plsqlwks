@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import curses
 from collections.abc import Sequence
 from typing import cast
@@ -44,27 +45,21 @@ def right_clip_text(text: str, max_width: int) -> str:
 
 
 def safe_window_box(window: curses.window) -> None:
-    try:
+    with contextlib.suppress(curses.error):
         window.box()
-    except curses.error:
-        pass
 
 
 def safe_window_move(window: curses.window, y: int, x: int) -> None:
     height, width = window.getmaxyx()
     if height <= 0 or width <= 0:
         return
-    try:
+    with contextlib.suppress(curses.error):
         window.move(min(max(y, 0), height - 1), min(max(x, 0), width - 1))
-    except curses.error:
-        pass
 
 
 def safe_window_refresh(window: curses.window) -> None:
-    try:
+    with contextlib.suppress(curses.error):
         window.refresh()
-    except curses.error:
-        pass
 
 
 class DialogService:
@@ -76,10 +71,8 @@ class DialogService:
         self.key_reader = key_reader
 
     def prompt(self, label: str, default: str = "", strip: bool = True) -> str | None:
-        try:
+        with contextlib.suppress(curses.error):
             curses.curs_set(1)
-        except curses.error:
-            pass
         text = default
         cursor = len(text)
         while True:
@@ -140,10 +133,8 @@ class DialogService:
         default: str = "",
         strip: bool = True,
     ) -> str | None:
-        try:
+        with contextlib.suppress(curses.error):
             curses.curs_set(1)
-        except curses.error:
-            pass
         text = default
         previous_geometry: tuple[int, int, int, int] | None = None
         while True:
@@ -170,10 +161,8 @@ class DialogService:
                     self.draw_prompt_line(label, text)
                     key = self.key_reader.read_key()
                 else:
-                    try:
+                    with contextlib.suppress(curses.error):
                         win.keypad(True)
-                    except curses.error:
-                        pass
                     safe_window_box(win)
                     safe_window_addstr(win, 0, 2, clip_text(f" {label} ", max(0, box_w - 4)))
                     safe_window_addstr(win, 2, 2, fit_text(visible_text, input_w), curses.A_REVERSE)
@@ -281,10 +270,7 @@ class DialogService:
             visible_rows = max(1, min(len(rows) or 1, height - 4))
             box_h = min(height - 1, visible_rows + 3)
             labels = [tree_menu_row_label(row, items, shortcut_width) for row in rows]
-            max_text_width = max(
-                display_width(text)
-                for text in [*labels, f"Filter: {filter_text}", "No matches"]
-            )
+            max_text_width = max(display_width(text) for text in [*labels, f"Filter: {filter_text}", "No matches"])
             box_w = min(width, max(32, max_text_width + 4))
             top = 1 if height > box_h else 0
             left = 0
@@ -297,10 +283,8 @@ class DialogService:
             except curses.error:
                 self.state.status = "Command menu unavailable"
                 return None
-            try:
+            with contextlib.suppress(curses.error):
                 win.keypad(True)
-            except curses.error:
-                pass
             safe_window_box(win)
             safe_window_addstr(
                 win,
@@ -370,14 +354,10 @@ class DialogService:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if filter_text:
                     filter_text = filter_text[:-1]
-                    selected = first_tree_menu_row_index(
-                        tree_menu_rows(items, filter_text, expanded_sections)
-                    )
+                    selected = first_tree_menu_row_index(tree_menu_rows(items, filter_text, expanded_sections))
             elif isinstance(key, str) and is_printable_text(key):
                 filter_text += key
-                selected = first_tree_menu_row_index(
-                    tree_menu_rows(items, filter_text, expanded_sections)
-                )
+                selected = first_tree_menu_row_index(tree_menu_rows(items, filter_text, expanded_sections))
 
     def show_cell_viewer(self, cell: ResultCell) -> None:
         scroll = 0
@@ -433,13 +413,9 @@ class DialogService:
     def refresh_modal_background(self) -> None:
         touchwin = getattr(self.screen, "touchwin", None)
         if callable(touchwin):
-            try:
+            with contextlib.suppress(curses.error):
                 touchwin()
-            except curses.error:
-                pass
         refresh = getattr(self.screen, "refresh", None)
         if callable(refresh):
-            try:
+            with contextlib.suppress(curses.error):
                 refresh()
-            except curses.error:
-                pass

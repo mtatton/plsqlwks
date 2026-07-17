@@ -9,13 +9,14 @@ from the public :mod:`plsqlwks.plugins` API.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from pathlib import Path
-import re
-from typing import Sequence
+from typing import TypeAlias
 
-from .api import PluginContext, ResultSnapshot
-
+from ..exporting import raise_if_export_cancelled
+from .api import PluginContext, PluginHandler, ResultSnapshot
 
 _MAX_ERROR_DETAIL_LENGTH = 160
 _NULL_DISPLAY_VALUE = "<NULL>"
@@ -24,12 +25,23 @@ _ISO_TIMESTAMP_DISPLAY_RE = re.compile(
     r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
     r"(?:\.\d{1,6})?(?:[+-]\d{2}:\d{2})?\Z"
 )
-_INSERT_DRAFT_STATUS = (
-    "Export unavailable while an insert draft is active; "
-    "commit or cancel the draft first"
-)
+_INSERT_DRAFT_STATUS = "Export unavailable while an insert draft is active; commit or cancel the draft first"
 _NO_RESULT_STATUS = "No table result is available for export"
 _CANCELLED_STATUS = "Export cancelled"
+
+BuiltinExportHandler: TypeAlias = Callable[[str, PluginContext, object], None]
+_PRIVATE_HOST_EXPORT_HANDLER_ATTR = "_plsqlwks_private_host_export"
+
+
+def mark_private_host_export_handler(handler: PluginHandler) -> PluginHandler:
+    """Mark one bundled handler for the application's deferred context path."""
+    setattr(handler, _PRIVATE_HOST_EXPORT_HANDLER_ATTR, True)
+    return handler
+
+
+def is_private_host_export_handler(handler: object) -> bool:
+    """Return whether a bundled command uses private host orchestration."""
+    return bool(getattr(handler, _PRIVATE_HOST_EXPORT_HANDLER_ATTR, False))
 
 
 def local_now() -> datetime:
@@ -110,19 +122,26 @@ def format_export_rows(
     *,
     null_value: str,
     date_format: str,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[tuple[str, ...], ...]:
     """Return transformed row copies without mutating a result snapshot."""
-    return tuple(
-        tuple(
-            format_export_value(
-                value,
-                null_value=null_value,
-                date_format=date_format,
+    raise_if_export_cancelled(cancelled)
+    formatted_rows: list[tuple[str, ...]] = []
+    for row in rows:
+        raise_if_export_cancelled(cancelled)
+        formatted_row: list[str] = []
+        for value in row:
+            raise_if_export_cancelled(cancelled)
+            formatted_row.append(
+                format_export_value(
+                    value,
+                    null_value=null_value,
+                    date_format=date_format,
+                )
             )
-            for value in row
-        )
-        for row in rows
-    )
+        formatted_rows.append(tuple(formatted_row))
+    raise_if_export_cancelled(cancelled)
+    return tuple(formatted_rows)
 
 
 def prepare_result_export(
@@ -139,6 +158,17 @@ def prepare_result_export(
     the format-specific handler so it can report an appropriately titled
     failure through :class:`~plsqlwks.plugins.api.PluginContext`.
     """
+    snapshot = result_snapshot_for_export(context)
+    if snapshot is None:
+        return None
+    path = prepare_export_path(context, label, default_filename)
+    if path is None:
+        return None
+    return snapshot, path
+
+
+def result_snapshot_for_export(context: PluginContext) -> ResultSnapshot | None:
+    """Validate the active result without prompting for a destination."""
     if context.has_active_insert_draft():
         context.set_status(_INSERT_DRAFT_STATUS)
         return None
@@ -147,6 +177,15 @@ def prepare_result_export(
     if snapshot is None or not snapshot.columns:
         context.set_status(_NO_RESULT_STATUS)
         return None
+    return snapshot
+
+
+def prepare_export_path(
+    context: PluginContext,
+    label: str,
+    default_filename: str,
+) -> Path | None:
+    """Prompt for and validate a destination for an already-approved result."""
 
     results_dir = context.results_dir
     default_path = results_dir / default_filename
@@ -159,4 +198,4 @@ def prepare_result_export(
     if path.exists() and not context.confirm_overwrite(path):
         context.set_status(_CANCELLED_STATUS)
         return None
-    return snapshot, path
+    return path

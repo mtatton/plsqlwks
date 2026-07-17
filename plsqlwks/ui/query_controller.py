@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol
 
 from ..db import ExplainPlanResult, QueryResult
 from ..sqlbinds import bind_name_key, find_bind_names, find_unique_binds
@@ -16,8 +17,20 @@ from .ports import DbOperationsPort, DialogPort
 from .results import is_dbms_output_result
 from .state import ExecutionDiagnostic, ScriptExecutionFailed, UIState
 
-if TYPE_CHECKING:
-    from .result_presenter import ResultPresenter
+
+class QueryResultPort(Protocol):
+    def finish_execution(
+        self,
+        results: list[QueryResult],
+        *,
+        source_text: str | None = None,
+        source_unchanged: bool = True,
+        statement_start_line: int = 1,
+        statement_start_col: int = 0,
+        statement_count: int = 1,
+    ) -> None: ...
+
+    def set_results(self, lines: list[str], clear_table: bool = True) -> None: ...
 
 
 def error_location_line(location: ErrorLocation) -> str:
@@ -62,13 +75,9 @@ def bind_values_for_statement(
 ) -> dict[str, str]:
     if not bind_values:
         return {}
-    values_by_key = {
-        bind_name_key(name): value for name, value in bind_values.items()
-    }
+    values_by_key = {bind_name_key(name): value for name, value in bind_values.items()}
     return {
-        name: values_by_key[key]
-        for name in find_bind_names(statement)
-        if (key := bind_name_key(name)) in values_by_key
+        name: values_by_key[key] for name in find_bind_names(statement) if (key := bind_name_key(name)) in values_by_key
     }
 
 
@@ -106,10 +115,8 @@ def append_script_worker_result(
             if not previous.columns or is_dbms_output_result(previous):
                 continue
             if previous.continuation is not None:
-                try:
+                with contextlib.suppress(Exception):
                     db.close_result_continuation(previous.continuation)
-                except Exception:
-                    pass
                 previous.continuation = None
             break
     results.append(result)
@@ -134,7 +141,7 @@ class QueryController:
         state: UIState,
         db_operations: DbOperationsPort,
         dialogs: DialogPort,
-        presenter: ResultPresenter,
+        presenter: QueryResultPort,
     ) -> None:
         self.state = state
         self.db_operations = db_operations
@@ -171,10 +178,7 @@ class QueryController:
             mapped.append((line, column, issue.message))
         first_issue = mapped[0]
         tab = self.state.active_tab
-        tab.execution_diagnostics = [
-            ExecutionDiagnostic(line, column, message)
-            for line, column, message in mapped
-        ]
+        tab.execution_diagnostics = [ExecutionDiagnostic(line, column, message) for line, column, message in mapped]
         tab.execution_diagnostic_index = 0
         tab.execution_diagnostic_source = self.state.buffer.text()
         move_buffer_to_error(
@@ -184,17 +188,11 @@ class QueryController:
         self.presenter.set_results(
             [
                 f"{action} was not started; unsupported client syntax:",
-                *[
-                    f"line {line}, column {column}: {message}"
-                    for line, column, message in mapped
-                ],
+                *[f"line {line}, column {column}: {message}" for line, column, message in mapped],
             ]
         )
         self.state.focus = FOCUS_EDITOR
-        self.state.status = (
-            f"{action} blocked at line {first_issue[0]}, "
-            f"column {first_issue[1]}: {first_issue[2]}"
-        )
+        self.state.status = f"{action} blocked at line {first_issue[0]}, column {first_issue[1]}: {first_issue[2]}"
         return True
 
     def remembered_bind_value(self, name: str) -> str:
@@ -220,11 +218,7 @@ class QueryController:
     ) -> dict[str, str] | None:
         values: dict[str, str] = {}
         for name in self.bind_names_for_statements(statements):
-            default = (
-                self.remembered_bind_value(name)
-                if self.state.config.remember_bind_values
-                else ""
-            )
+            default = self.remembered_bind_value(name) if self.state.config.remember_bind_values else ""
             value = self.dialogs.prompt_text_box(
                 f"Value for :{name}",
                 default,
@@ -334,24 +328,14 @@ class QueryController:
         if not diagnostics:
             self.state.status = "No execution diagnostics"
             return
-        if (
-            tab.execution_diagnostic_source is None
-            or self.state.buffer.text() != tab.execution_diagnostic_source
-        ):
-            self.state.status = (
-                "Execution diagnostics are stale because the source changed; "
-                "run the statement again"
-            )
+        if tab.execution_diagnostic_source is None or self.state.buffer.text() != tab.execution_diagnostic_source:
+            self.state.status = "Execution diagnostics are stale because the source changed; run the statement again"
             return
         if direction >= 0:
             index = (tab.execution_diagnostic_index + 1) % len(diagnostics)
         else:
             current = tab.execution_diagnostic_index
-            index = (
-                (current - 1) % len(diagnostics)
-                if current >= 0
-                else len(diagnostics) - 1
-            )
+            index = (current - 1) % len(diagnostics) if current >= 0 else len(diagnostics) - 1
         tab.execution_diagnostic_index = index
         diagnostic = diagnostics[index]
         moved = move_buffer_to_error(
@@ -361,8 +345,7 @@ class QueryController:
         self.state.focus = FOCUS_EDITOR
         message = f": {diagnostic.message}" if diagnostic.message else ""
         self.state.status = (
-            f"Diagnostic {index + 1}/{len(diagnostics)} at line {moved.line}, "
-            f"column {moved.column}{message}"
+            f"Diagnostic {index + 1}/{len(diagnostics)} at line {moved.line}, column {moved.column}{message}"
         )
 
     def next_execution_diagnostic(self) -> None:
@@ -392,9 +375,7 @@ class QueryController:
             return
         statements = split_script(script)
         if not statements:
-            self.presenter.finish_execution(
-                [QueryResult("Selection", [], [], "No statements to execute.")]
-            )
+            self.presenter.finish_execution([QueryResult("Selection", [], [], "No statements to execute.")])
             return
         bind_values = self.prompt_bind_values_for_statements(
             [statement.text for statement in statements],
@@ -452,10 +433,7 @@ class QueryController:
                 )
                 start_col = document_statement_start_col(statement, first_col)
                 title = f"Selection {idx} lines {start_line}-{end_line}"
-                progress(
-                    f"Running selection {idx}/{statement_count}: "
-                    f"lines {start_line}-{end_line}"
-                )
+                progress(f"Running selection {idx}/{statement_count}: lines {start_line}-{end_line}")
                 try:
                     result = execute_statement_with_bind_values(
                         db,
@@ -542,9 +520,7 @@ class QueryController:
             return
         statements = split_script(source_text)
         if not statements:
-            self.presenter.finish_execution(
-                [QueryResult("Script", [], [], "No statements to execute.")]
-            )
+            self.presenter.finish_execution([QueryResult("Script", [], [], "No statements to execute.")])
             return
         bind_values = self.prompt_bind_values_for_statements(
             [statement.text for statement in statements],
@@ -563,10 +539,7 @@ class QueryController:
                 start_line, end_line = document_statement_lines(statement)
                 start_col = document_statement_start_col(statement)
                 title = f"Statement {idx} lines {start_line}-{end_line}"
-                progress(
-                    f"Running statement {idx}/{statement_count}: "
-                    f"lines {start_line}-{end_line}"
-                )
+                progress(f"Running statement {idx}/{statement_count}: lines {start_line}-{end_line}")
                 try:
                     result = execute_statement_with_bind_values(
                         db,

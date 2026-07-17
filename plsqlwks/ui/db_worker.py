@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import queue
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 __all__ = (
     "DatabaseWorker",
     "DatabaseWorkerUnavailableError",
     "DbCommandHandle",
+    "DbProgressCallback",
     "DbSessionState",
+    "DbWorkerTask",
     "DbWorkerEvent",
     "DbWorkerFinished",
     "DbWorkerProgress",
@@ -28,6 +32,8 @@ class DbSessionState:
 class DbWorkerProgress:
     command_id: int
     label: str
+    current: int | None = None
+    total: int | None = None
 
 
 @dataclass(frozen=True)
@@ -39,7 +45,18 @@ class DbWorkerFinished:
 
 
 DbWorkerEvent = DbWorkerProgress | DbWorkerFinished
-DbProgressCallback = Callable[[str], None]
+
+
+class DbProgressCallback(Protocol):
+    def __call__(
+        self,
+        label: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+    ) -> None: ...
+
+
 DbWorkerTask = Callable[[Any, DbProgressCallback], Any]
 
 
@@ -181,9 +198,7 @@ class DatabaseWorker:
     def _run(self) -> None:
         fatal_error: Exception | None = None
         try:
-            initial_state, initial_error, _ = self._safe_snapshot_workspace(
-                self._session_state
-            )
+            initial_state, initial_error, _ = self._safe_snapshot_workspace(self._session_state)
             self._set_session_state(initial_state)
             if initial_error is not None:
                 fatal_error = DatabaseWorkerUnavailableError(
@@ -243,8 +258,7 @@ class DatabaseWorker:
                         autocommit=final_state.autocommit,
                         read_only=final_state.read_only,
                         has_uncommitted_changes=(
-                            pre_close_state.has_uncommitted_changes
-                            or final_state.has_uncommitted_changes
+                            pre_close_state.has_uncommitted_changes or final_state.has_uncommitted_changes
                         ),
                     )
                 self._set_session_state(final_state)
@@ -262,8 +276,13 @@ class DatabaseWorker:
         result: Any = None
         error: Exception | None = None
 
-        def report_progress(label: str) -> None:
-            handle._emit(DbWorkerProgress(handle.command_id, label))
+        def report_progress(
+            label: str,
+            *,
+            current: int | None = None,
+            total: int | None = None,
+        ) -> None:
+            handle._emit(DbWorkerProgress(handle.command_id, label, current, total))
 
         fatal_error: Exception | None = None
         try:
@@ -285,11 +304,7 @@ class DatabaseWorker:
                 snapshot_error,
                 snapshot_fatal,
             ) = self._safe_snapshot_workspace(fallback_state)
-            if (
-                fatal_error is None
-                and snapshot_fatal
-                and snapshot_error is not None
-            ):
+            if fatal_error is None and snapshot_fatal and snapshot_error is not None:
                 fatal_error = snapshot_error
                 with self._state_lock:
                     self._terminal_error = fatal_error
@@ -303,14 +318,10 @@ class DatabaseWorker:
                 )
             if snapshot_error is not None:
                 if error is None:
-                    error = DatabaseWorkerUnavailableError(
-                        f"database session snapshot failed: {snapshot_error}"
-                    )
+                    error = DatabaseWorkerUnavailableError(f"database session snapshot failed: {snapshot_error}")
                 else:
-                    try:
-                        setattr(error, "worker_snapshot_error", snapshot_error)
-                    except Exception:
-                        pass
+                    with suppress(Exception):
+                        setattr(error, "worker_snapshot_error", snapshot_error)  # noqa: B010  # reason: cleanup diagnostics are attached to arbitrary exception types when supported
             with self._state_lock:
                 self._session_state = session_state
             self._finish_handle(
@@ -335,16 +346,12 @@ class DatabaseWorker:
                 connected = False
             else:
                 is_healthy = getattr(connection, "is_healthy", None)
-                connected = (
-                    bool(is_healthy()) if callable(is_healthy) else True
-                )
+                connected = bool(is_healthy()) if callable(is_healthy) else True
         return DbSessionState(
             connected=connected,
             autocommit=bool(getattr(self._workspace, "autocommit", False)),
             read_only=bool(getattr(self._workspace, "read_only", False)),
-            has_uncommitted_changes=bool(
-                getattr(self._workspace, "has_uncommitted_changes", False)
-            ),
+            has_uncommitted_changes=bool(getattr(self._workspace, "has_uncommitted_changes", False)),
         )
 
     def _safe_snapshot_workspace(
@@ -392,6 +399,4 @@ class DatabaseWorker:
     def _exception_as_unavailable(exc: BaseException) -> Exception:
         if isinstance(exc, Exception):
             return DatabaseWorkerUnavailableError(str(exc) or type(exc).__name__)
-        return DatabaseWorkerUnavailableError(
-            f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-        )
+        return DatabaseWorkerUnavailableError(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)

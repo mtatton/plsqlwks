@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import oracledb
+import contextlib
 from typing import Any
+
+import oracledb
 
 from ..config import AppConfig
 from .editing import EditingMixin
 from .execution import ExecutionMixin
 from .explain import ExplainMixin
-from .metadata import MetadataMixin
+from .metadata import MetadataPort, MetadataService
 from .transactions import TransactionMixin
 
 
@@ -15,7 +17,6 @@ class OracleWorkspace(
     TransactionMixin,
     ExecutionMixin,
     ExplainMixin,
-    MetadataMixin,
     EditingMixin,
 ):
     def __init__(self, config: AppConfig):
@@ -26,6 +27,7 @@ class OracleWorkspace(
         self.pending_rows_changed = 0
         self.pending_unknown_changes = False
         self._result_continuations: dict[str, Any] = {}
+        self._metadata: MetadataPort = MetadataService(lambda: self.ensure_connected())
 
     def connect(self) -> None:
         from . import read_password
@@ -42,10 +44,8 @@ class OracleWorkspace(
             self.apply_autocommit()
             self.enable_dbms_output()
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 connection.close()
-            except Exception:
-                pass
             self.connection = None
             raise
 
@@ -65,9 +65,7 @@ class OracleWorkspace(
         if self.connection is None:
             self.connect()
         elif not self.connection_is_healthy():
-            raise RuntimeError(
-                "Oracle session is no longer usable; reconnect before retrying"
-            )
+            raise RuntimeError("Oracle session is no longer usable; reconnect before retrying")
         assert self.connection is not None
         return self.connection
 
@@ -105,3 +103,12 @@ class OracleWorkspace(
     def apply_autocommit(self) -> None:
         if self.connection is not None and hasattr(self.connection, "autocommit"):
             self.connection.autocommit = self.autocommit
+
+    def list_schema_objects(self) -> dict[str, list[str]]:
+        return self._metadata.list_schema_objects()
+
+    def get_object_definition(self, object_type: str, object_name: str) -> str:
+        return self._metadata.get_object_definition(object_type, object_name)
+
+    def list_object_columns(self, object_name: str) -> list[str]:
+        return self._metadata.list_object_columns(object_name)

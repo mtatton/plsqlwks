@@ -4,16 +4,21 @@ An ncurses SQL and PL/SQL workspace for Oracle databases.
 
 Author and support: [unu2000 on Ko-fi](https://ko-fi.com/unu2000).
 
-The supported and continuously tested database releases are Oracle Database
-19c and Oracle AI Database 26ai. See the
+The mandatory release-gate targets are Oracle Database 19c and Oracle AI
+Database 26ai. A target is described as continuously tested only after both CI
+systems have recorded ten consecutive qualifying green runs spanning at least
+30 days. See the
 [Oracle compatibility matrix](https://gitlab.com/unununu/plsqlwks/-/blob/main/COMPATIBILITY.md) for the tested connection and
 privilege profiles, safety gate, and integration-test setup.
 
 ![PLSQLWKS PREVIEW](https://gitlab.com/unununu/plsqlwks/-/raw/main/img/preview.png)
 
-New here? Follow the [installation-to-first-query quick start](QUICKSTART.md)
+New here? Follow the [installation-to-first-query quick start](https://gitlab.com/unununu/plsqlwks/-/blob/main/QUICKSTART.md)
 for copy-ready connection setup, screenshots, practical SQL workflows,
 troubleshooting, and a complete installed-plugin example.
+
+For implementation ownership and boundaries, see the
+[architecture guide](https://gitlab.com/unununu/plsqlwks/-/blob/main/ARCHITECTURE.md).
 
 ## Connection
 
@@ -57,7 +62,7 @@ build that provides the standard-library `curses` module.
 For development, install the package in editable mode:
 
 ```bash
-python3 -m pip install -e '.[dev]'
+python3 tools/dev.py install
 ```
 
 `oracledb` is the only runtime dependency. Supporting functionality uses the Python standard library.
@@ -71,16 +76,34 @@ python3 -m pip install .
 Run the default test and lint checks from a development checkout with:
 
 ```bash
-python3 -m pytest -q --maxfail=1
-python3 -m ruff check .
+python3 tools/dev.py lint
+python3 tools/dev.py test core
 ```
 
-Plugin API and built-in plugin tests are optional and are not part of the
-default core test run. Run them with either opt-in form:
+`tools/dev.py` is the versioned command surface shared by local development,
+GitHub Actions, and GitLab CI. Its test profiles sanitize optional test flags
+before enabling only the requested group. Development and CI installs use the
+exact versions in `constraints/ci.txt`; the package metadata keeps broader
+minimum versions for normal consumers.
+
+From a clean checkout and an activated disposable virtual environment, run the
+complete non-Oracle CI workflow with one command:
 
 ```bash
-PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q --maxfail=1
-python3 -m pytest -q --maxfail=1 -m plugin
+python3 tools/dev.py ci
+```
+
+This checks repository hygiene, installs the constrained development and XLSX
+dependencies, runs Ruff, mypy, non-Oracle coverage and plugin tests, and builds
+and smoke-tests the distributions. It removes only packaging artifacts created
+by that invocation and leaves the coverage reports under `coverage-reports/`.
+
+Plugin API and built-in plugin tests are optional and are not part of the
+default core test run. Install XLSX support and run them with:
+
+```bash
+python3 tools/dev.py install --xlsx
+python3 tools/dev.py test plugins
 ```
 
 The CSV and HTML export plugins have no additional dependencies. XLSX export
@@ -92,7 +115,7 @@ python3 -m pip install 'plsqlwks[xlsx]'
 ```
 
 For an editable development checkout, install the development and XLSX extras
-together with `python3 -m pip install -e '.[dev,xlsx]'`. The repository also
+together with `python3 tools/dev.py install --xlsx`. The repository also
 retains `plugin-requirements/xlsx-export/requirements.txt` as a compatible
 fallback for existing checkout automation.
 
@@ -105,19 +128,39 @@ server release:
 
 ```bash
 PLSQLWKS_TEST_ORACLE=1 PLSQLWKS_TEST_ORACLE_TARGET=19c \
-  python3 -m pytest -q -m oracle --maxfail=1
+  python3 tools/dev.py test oracle
 ```
 
 Omit the target for an ad-hoc run against another reachable Oracle database.
 The complete release-gating setup, including the developer, DML-only, and
 read-only profiles, is documented in the
 [Oracle compatibility matrix](https://gitlab.com/unununu/plsqlwks/-/blob/main/COMPATIBILITY.md).
-Enable every optional test group with:
+Run all non-Oracle tests, including PTY and slow coverage, with:
 
 ```bash
-PLSQLWKS_TEST_ORACLE=1 PLSQLWKS_TEST_PLUGINS=1 PLSQLWKS_TEST_PTY=1 PLSQLWKS_TEST_SLOW=1 \
-  python3 -m pytest -q -rs --maxfail=1
+python3 tools/dev.py test non-oracle
 ```
+
+After configuring the complete Oracle matrix environment documented in
+`COMPATIBILITY.md`, run every test without profile-based deselection with:
+
+```bash
+./test.sh --all
+```
+
+This enables plugin, PTY, slow, Oracle, and Oracle-matrix tests together and
+fails collection if the required live Oracle configuration is incomplete.
+
+Run the same non-Oracle and plugin coverage gate used by CI with:
+
+```bash
+python3 tools/dev.py coverage --report-dir coverage-reports
+```
+
+This writes separate JUnit XML files plus Cobertura XML and coverage JSON. It
+rejects line or branch coverage below the recorded Python 3.10/3.14 baselines,
+and applies 95% line and 90% branch floors to transaction safety, SQL analysis,
+Oracle matrix preflight, and atomic export code.
 
 ## Run
 
@@ -125,6 +168,12 @@ After installation, start the workspace with:
 
 ```bash
 plsqlwks
+```
+
+Print the installed package version without starting curses with:
+
+```bash
+plsqlwks --version
 ```
 
 Select a workspace for one invocation with:
@@ -182,11 +231,16 @@ explicitly, so Oracle rolls its uncommitted work back.
 If the old connection is already dead and reports an error while closing,
 plsqlwks still attempts the replacement connection and reports the close error
 as a warning after a successful reconnect.
-An unexpected connection loss is shown in the header and status bar. Rows that
-were already loaded remain available for viewing, but paging, editing, and
-inserting are disabled until reconnect because their live cursor/session state
-is no longer valid. If manual work may have been pending, the status explicitly
-warns that the transaction outcome is unknown.
+An interrupted Oracle operation or unexpected connection loss is shown in the
+header and status bar. Rows materialized before the interruption remain
+available for viewing, but the old continuation cursor and any insert draft are
+discarded and the result stays read-only; reconnect and rerun the query to
+restore paging or editing. A cancelled full-export fetch also states
+whether no pending transaction was tracked, a pending transaction still needs
+an explicit commit or rollback, or autocommit was enabled. If manual work may
+have been pending after a lost connection, the status warns that the
+transaction outcome is unknown and directs you to reconnect and resolve or
+discard the session.
 
 After a successful quit, plsqlwks records the open file-backed tabs, active tab, and cursor positions in the managed `[session.tabs]` section of `config.ini`. Fresh platform-default workspaces use the user-config directory; explicitly selected and legacy workspaces keep `config.ini` inside the workspace for compatibility. On the next start the app tries each saved path independently, silently skips files that are missing or unreadable, and leaves the initial empty tab in place when none can be opened. A saved cursor position that no longer exists in its file starts at the beginning instead. Untitled, template, and generated schema tabs are not persisted because they do not have a file to reopen.
 
@@ -284,10 +338,10 @@ Editor search is literal and case-insensitive. `Ctrl-F` prompts for text and sel
 
 Editor autocomplete is available with `Shift-Tab`. It completes PL/SQL keywords,
 current-schema object names, and table/view columns from cached or lazily loaded
-database metadata; multiple matches open a picker. Database-object and column
-completion currently supports conventional unquoted identifiers; quoted
-mixed-case names are not preserved. Use `Alt-+` to reload schema-object metadata
-and clear cached column metadata.
+database metadata; multiple matches open a picker. Quoted and mixed-case object
+and column names retain their exact spelling and are inserted with Oracle-safe
+double quoting, while conventional unquoted completion remains case-insensitive.
+Use `Alt-+` to reload schema-object metadata and clear cached column metadata.
 
 Editor syntax and explain-plan colors can be overridden in the active `config.ini` with color names or numeric curses color indexes. Unsupported values fall back to the built-in palette for the current terminal:
 
@@ -332,9 +386,11 @@ Read-only mode is a client-side guardrail that rejects statements which the SQL 
 | `Home` / `End` | Move to the first/last explain-plan line |
 
 When more result rows are available, `PageDown` at the loaded end fetches and
-appends the next result page. For simple queries against one conventional
-unquoted current-schema table that include `ROWID`, press `Enter` on a directly
-selected unquoted table column to update it by rowid. Press `INS` in the grid to
+appends the next result page. For simple queries against one current-schema
+base table that include `ROWID`, press `Enter` on a directly selected table
+column to update it by rowid. Exact quoted and mixed-case table and column names
+are supported and safely quoted; schema-qualified, cross-schema, joined, and
+otherwise ambiguous results remain read-only. Press `INS` in the grid to
 prepare a draft row at the top of the grid, edit its cells with `Enter`, use
 `Ctrl-Alt-C` to insert it, or use `Esc` to cancel it.
 While entering a cell, use Left/Right or Home/End to move within the existing
@@ -351,6 +407,12 @@ period; DATE and TIMESTAMP input uses ISO
 Character and CLOB input is preserved as entered. Types that cannot be compared
 without losing information, including time-zone timestamps and timestamps with
 precision above six, are read-only in the grid.
+In python-oracledb Thin mode, non-null `TIMESTAMP WITH TIME ZONE` and
+`TIMESTAMP WITH LOCAL TIME ZONE` values are shown and exported as explicit
+lossless-fetch-unavailable markers instead of misleading naive datetimes. Use
+an explicit `TO_CHAR` expression with the required precision and zone fields
+when the exact value is needed; named-zone timestamps are not supported by the
+current Thin driver.
 Displayed CLOB and BLOB values are limited to the first 65,536 characters or
 bytes and include a truncation marker with the full size. Truncated LOB cells
 cannot be edited safely. Schema-browser DDL is always read in full.
@@ -363,15 +425,27 @@ errors remain execution failures with navigable source locations.
 
 To export the active table, use one of these command paths:
 
-- `Alt-O -> Results -> Export loaded rows to CSV`
-- `Alt-O -> Results -> Export loaded rows to HTML`
-- `Alt-O -> Results -> Export loaded rows to XLSX`
+- `Alt-O -> Results -> Export result to CSV`
+- `Alt-O -> Results -> Export result to HTML`
+- `Alt-O -> Results -> Export result to XLSX`
 
-All three built-in Plugin API commands write the columns and exactly the rows
-currently loaded in the grid; they never fetch additional result pages.
+Each command opens an **Export rows** picker with **Loaded rows only (default)**
+selected first. Keep that choice for the safe default, which exports exactly
+the rows currently loaded in the grid without fetching. Choose **All available
+rows (keep the result grid unchanged)** to fetch every continuation page into a
+private export buffer, including results larger than 10,000 rows, without
+appending those rows to the grid. Escape cancels the picker. The status bar
+shows the number of rows prepared during fetching and determinate write
+progress; `Ctrl-C` cancels the active phase. Cancelling while rows are fetched
+keeps the originally loaded grid rows but makes them read-only and discards the
+interrupted cursor; cancelling only the file-writing phase leaves the result
+unchanged and leaves the destination unchanged.
+
 Relative names and the timestamped default name are resolved under the active
 workspace's `results/` directory; absolute paths are also accepted, and an
-existing file requires confirmation before replacement. Commit or cancel an
+existing file requires confirmation before replacement. A full export requires
+a live continuation when more rows remain; if the result is disconnected or
+already detached, choose the loaded-row default instead. Commit or cancel an
 active insert draft before exporting so its temporary row cannot be included.
 Each enabled export remains available in read-only mode because it does not
 execute SQL or change a transaction.
@@ -396,24 +470,25 @@ exporters, not installed entry-point plugins, and take effect after restarting
 PLSQLWKS.
 
 The HTML command writes a standalone UTF-8 HTML5 document with column headings
-and table rows, followed by the loaded-row count and any additional-row notice.
+and table rows, followed by the exported-row count and any additional-row notice.
 The result title is used only as browser-tab document metadata, not as a visible
 heading. Document titles, column headers, and cell values are escaped as
 untrusted text. The document contains a static embedded stylesheet, no
-JavaScript, and no external resources. It reports when more rows are available
-in PLSQLWKS but does not fetch them, and it does not open a browser after export.
+JavaScript, and no external resources. It reports when more rows remain after
+the selected export mode and does not open a browser after export.
 
 The XLSX command writes one `Query result` worksheet with a header row and the
-currently loaded display rows. The header row is frozen by default so it stays
+display rows selected by the loaded or full export mode. The header row is
+frozen by default so it stays
 visible while scrolling. Genuine source numbers become native Excel
 numeric cells when they fit Excel's range and 15-significant-digit precision;
 fixed-point scale such as `10.50` is preserved. Numeric-looking character data
 and unsafe-precision numbers remain exact text and can still receive Excel's
 number-as-text warning. Headers and other values, including text beginning with
 `=`, `+`, `-`, or `@`, remain literal strings and are never interpreted as
-spreadsheet formulas. The workbook contains no macros, external links, or
-fetched continuation rows and is not opened after export. XLSX support is
-optional and obtains `openpyxl>=3.1` from the standard `plsqlwks[xlsx]` extra;
+spreadsheet formulas. The workbook contains no macros or external links and is
+not opened after export. XLSX support remains optional and obtains
+`openpyxl>=3.1` from the standard `plsqlwks[xlsx]` extra;
 the repository plugin requirements file remains a source-checkout fallback.
 Each column uses the larger of its bold column name or widest data value,
 estimated with Calibri 11-compatible proportional glyph widths, clamped from 3
@@ -462,10 +537,10 @@ spreadsheet strings rather than formulas or typed Excel dates. The
 controls by default. It accepts case-insensitive, whitespace-tolerant `1`,
 `yes`, `true`, or `on` to enable them and `0`, `no`, `false`, or `off` to
 disable them; an unset or malformed value falls back to enabled. When enabled,
-the filter range spans exactly the header and currently loaded rows, without
+the filter range spans exactly the header and exported rows, without
 applying filter criteria or initially hiding any rows.
 `PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH` controls proportional sizing from the widest
-header or loaded data value and uses the same boolean syntax. When filtering is
+header or exported data value and uses the same boolean syntax. When filtering is
 enabled, the header candidate includes three extra character units for the filter
 dropdown. Auto-width defaults to enabled; disabling it leaves Excel's default
 column widths while preserving the existing multiline and over-60-unit cell
@@ -509,11 +584,7 @@ validate this opt-in mode with the applications in use.
 
 ### Schema Browser
 
-The `F9` schema browser groups tables, views, procedures, functions, packages, triggers, sequences, indexes, and private synonyms from the current schema. Type while the browser is focused to filter object names with a case-insensitive substring match; groups without matches are hidden and matching groups expand automatically without changing their saved expansion state.
-
-Definition loading supports conventional unquoted identifiers. Quoted
-mixed-case objects can appear in the browser but their definitions cannot
-currently be loaded from it.
+The `F9` schema browser groups tables, views, procedures, functions, packages, triggers, sequences, indexes, and private synonyms from the current schema. Type while the browser is focused to filter object names with a case-insensitive substring match; groups without matches are hidden and matching groups expand automatically without changing their saved expansion state. Exact quoted and mixed-case names are preserved when columns or definitions are loaded, with Oracle-safe quoting applied to metadata requests.
 
 | Key | Action |
 | --- | --- |
@@ -561,9 +632,10 @@ The first launch creates the workspace folders and starter SQL/PLSQL files.
 
 Plugin API version 1 is a deliberately small, command-only extension point.
 See [PLUGINS.md](PLUGINS.md) for the focused plugin author and testing guide.
-PLSQLWKS uses that same API for its built-in loaded-row CSV, HTML, and XLSX
-exporters; adding formats requires no direct App integration or public API
-expansion.
+The bundled CSV, HTML, and XLSX commands remain API v1 `Plugin` objects with a
+loaded-snapshot fallback for standalone embedding. The application supplies
+their full-result picker, progress, and cancellation through private host
+integration that does not widen or break Plugin API v1.
 Installed Python packages can add commands to the `Alt-O` menu through the
 standard `plsqlwks.plugins` entry-point group:
 

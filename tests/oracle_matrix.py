@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import contextlib
 import os
-from pathlib import Path
 import re
-from typing import Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import oracledb
 
 from plsqlwks.config import AppConfig, read_password
 from plsqlwks.db import OracleWorkspace
-
 
 MATRIX_ENV_FLAG = "PLSQLWKS_TEST_ORACLE_MATRIX"
 GUARD_NAME = "PLSQLWKS_ORACLE_MATRIX"
@@ -175,15 +175,11 @@ class VerifiedOracleMatrix:
 
     def close(self) -> None:
         try:
-            try:
+            with contextlib.suppress(Exception):
                 self.lock_workspace.rollback()
-            except Exception:
-                pass
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 self.lock_workspace.close()
-            except Exception:
-                pass
 
 
 def oracle_matrix_requested(environ: Mapping[str, str] | None = None) -> bool:
@@ -198,21 +194,15 @@ def load_oracle_matrix_config(
     if environ is None:
         environ = os.environ
     if environ.get("PLSQLWKS_TEST_ORACLE") != "1":
-        raise OracleMatrixConfigurationError(
-            "Oracle matrix mode requires PLSQLWKS_TEST_ORACLE=1"
-        )
+        raise OracleMatrixConfigurationError("Oracle matrix mode requires PLSQLWKS_TEST_ORACLE=1")
 
     missing = [name for name in _MATRIX_ENV_NAMES if not environ.get(name, "").strip()]
     if missing:
-        raise OracleMatrixConfigurationError(
-            "Oracle matrix configuration is missing: " + ", ".join(missing)
-        )
+        raise OracleMatrixConfigurationError("Oracle matrix configuration is missing: " + ", ".join(missing))
 
     target = environ["PLSQLWKS_TEST_ORACLE_TARGET"].strip().lower()
     if target not in {"19c", "26ai"}:
-        raise OracleMatrixConfigurationError(
-            "PLSQLWKS_TEST_ORACLE_TARGET must be 19c or 26ai in matrix mode"
-        )
+        raise OracleMatrixConfigurationError("PLSQLWKS_TEST_ORACLE_TARGET must be 19c or 26ai in matrix mode")
 
     for name in _SECRET_FILE_ENV_NAMES:
         _validate_secret_file(name, environ[name])
@@ -243,24 +233,16 @@ def load_oracle_matrix_config(
                 f"Oracle matrix {profile.label} user must be a local non-system account"
             )
     if len({profile.user.casefold() for profile in profiles}) != len(profiles):
-        raise OracleMatrixConfigurationError(
-            "Oracle matrix developer, DML, and read-only users must be distinct"
-        )
+        raise OracleMatrixConfigurationError("Oracle matrix developer, DML, and read-only users must be distinct")
 
     easy_connect_dsn = environ["ORACLE_DSN"].strip()
     descriptor_dsn = environ["PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN"].strip()
     if not is_easy_connect_dsn(easy_connect_dsn):
-        raise OracleMatrixConfigurationError(
-            "ORACLE_DSN must use Easy Connect syntax in matrix mode"
-        )
+        raise OracleMatrixConfigurationError("ORACLE_DSN must use Easy Connect syntax in matrix mode")
     if not is_connect_descriptor(descriptor_dsn):
-        raise OracleMatrixConfigurationError(
-            "PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN must be a full connect descriptor"
-        )
+        raise OracleMatrixConfigurationError("PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN must be a full connect descriptor")
     if easy_connect_dsn == descriptor_dsn:
-        raise OracleMatrixConfigurationError(
-            "Oracle matrix Easy Connect and descriptor DSNs must be distinct"
-        )
+        raise OracleMatrixConfigurationError("Oracle matrix Easy Connect and descriptor DSNs must be distinct")
 
     guard_token_file = _secret_path(environ["PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"])
     guard_token = read_secret_file(
@@ -279,13 +261,9 @@ def load_oracle_matrix_config(
         developer=developer,
         dml=dml,
         read_only=read_only,
-        expected_db_unique_name=environ[
-            "PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME"
-        ].strip(),
+        expected_db_unique_name=environ["PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME"].strip(),
         expected_con_name=environ["PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME"].strip(),
-        expected_service_name=environ[
-            "PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME"
-        ].strip(),
+        expected_service_name=environ["PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME"].strip(),
         guard_token_file=guard_token_file,
     )
 
@@ -303,9 +281,7 @@ def _validate_secret_file(name: str, value: str) -> None:
     except OSError:
         valid = False
     if not valid:
-        raise OracleMatrixConfigurationError(
-            f"{name} must be a private, nonempty, regular non-symlink file"
-        )
+        raise OracleMatrixConfigurationError(f"{name} must be a private, nonempty, regular non-symlink file")
 
 
 def read_secret_file(path: Path, label: str) -> str:
@@ -364,9 +340,7 @@ def run_oracle_matrix_preflight(config: OracleMatrixConfig) -> VerifiedOracleMat
             if not verified_version:
                 verified_version = identity.server_version
             elif identity.server_version != verified_version:
-                raise OracleMatrixSafetyError(
-                    "Oracle matrix DSNs or profiles reported different server versions"
-                )
+                raise OracleMatrixSafetyError("Oracle matrix DSNs or profiles reported different server versions")
 
     lock_workspace = _acquire_matrix_lock(config)
     return VerifiedOracleMatrix(
@@ -390,9 +364,7 @@ def verify_oracle_session(
         try:
             connection = workspace.ensure_connected()
         except Exception:
-            raise OracleMatrixSafetyError(
-                f"Oracle matrix {profile_label}/{dsn_style} connection failed"
-            ) from None
+            raise OracleMatrixSafetyError(f"Oracle matrix {profile_label}/{dsn_style} connection failed") from None
         identity = _read_session_identity(connection)
         _verify_identity(config, profile, identity)
         _verify_privileges(connection, profile_label, config)
@@ -404,15 +376,11 @@ def verify_oracle_session(
     except OracleMatrixSafetyError:
         raise
     except Exception:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label}/{dsn_style} preflight failed"
-        ) from None
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label}/{dsn_style} preflight failed") from None
     finally:
         if workspace is not None:
-            try:
+            with contextlib.suppress(Exception):
                 workspace.close()
-            except Exception:
-                pass
 
 
 def _read_session_identity(connection: oracledb.Connection) -> OracleSessionIdentity:
@@ -474,9 +442,7 @@ def _verify_identity(
             f"Oracle matrix {profile.label} session user did not match its configured profile"
         )
     if identity.current_schema.casefold() != expected_user:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} current schema did not match its session user"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} current schema did not match its session user")
     expected_identity = (
         config.expected_db_unique_name.casefold(),
         config.expected_con_name.casefold(),
@@ -488,25 +454,15 @@ def _verify_identity(
         identity.service_name.casefold(),
     )
     if actual_identity != expected_identity:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} endpoint fingerprint did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} endpoint fingerprint did not match")
     if identity.authentication_method.upper() != "PASSWORD":
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} did not use password authentication"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} did not use password authentication")
     if identity.proxy_user:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} unexpectedly used a proxy user"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} unexpectedly used a proxy user")
     if identity.is_dba.upper() != "FALSE":
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} unexpectedly has DBA session status"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} unexpectedly has DBA session status")
     if identity.database_role.upper() != "PRIMARY":
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} endpoint is not the expected primary database"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} endpoint is not the expected primary database")
     if (
         identity.common_user.upper() != "NO"
         or identity.oracle_maintained.upper() != "N"
@@ -515,9 +471,7 @@ def _verify_identity(
         or identity.all_shard_user.upper() != "NO"
         or identity.proxy_only_connect.upper() != "N"
     ):
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile.label} must be a local application account"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile.label} must be a local application account")
     if not version_matches_target(config.target, identity.server_version):
         raise OracleMatrixSafetyError(
             f"Oracle matrix {profile.label} server version did not match target {config.target}"
@@ -535,12 +489,8 @@ def _verify_privileges(
         privileges = frozenset(str(row[0]).upper() for row in cursor)
         cursor.execute("select role from session_roles")
         roles = frozenset(str(row[0]).upper() for row in cursor)
-        cursor.execute(
-            "select privilege, admin_option, common, inherited from user_sys_privs"
-        )
-        direct_system_grants = frozenset(
-            tuple(str(value or "").upper() for value in row) for row in cursor
-        )
+        cursor.execute("select privilege, admin_option, common, inherited from user_sys_privs")
+        direct_system_grants = frozenset(tuple(str(value or "").upper() for value in row) for row in cursor)
         cursor.execute("select granted_role from user_role_privs")
         received_roles = frozenset(str(row[0]).upper() for row in cursor)
         cursor.execute(
@@ -550,9 +500,7 @@ def _verify_privileges(
             from user_tab_privs_recd
             """
         )
-        object_grants = frozenset(
-            tuple(str(value or "").upper() for value in row) for row in cursor
-        )
+        object_grants = frozenset(tuple(str(value or "").upper() for value in row) for row in cursor)
         cursor.execute("select count(*) from user_col_privs_recd")
         received_column_grant_count = int(cursor.fetchone()[0])
         cursor.execute(
@@ -562,9 +510,7 @@ def _verify_privileges(
             from user_tab_privs_made
             """
         )
-        made_object_grants = frozenset(
-            tuple(str(value or "").upper() for value in row) for row in cursor
-        )
+        made_object_grants = frozenset(tuple(str(value or "").upper() for value in row) for row in cursor)
         cursor.execute("select count(*) from user_col_privs_made")
         made_column_grant_count = int(cursor.fetchone()[0])
         cursor.execute("select count(*) from user_objects")
@@ -578,9 +524,7 @@ def _verify_privileges(
             where resource_name in ('CONNECT_TIME', 'IDLE_TIME')
             """
         )
-        session_time_limits = {
-            str(row[0]).upper(): str(row[1] or "").upper() for row in cursor
-        }
+        session_time_limits = {str(row[0]).upper(): str(row[1] or "").upper() for row in cursor}
         cursor.execute(
             """
             select grantee, owner, table_name, grantor, privilege, grantable,
@@ -593,9 +537,7 @@ def _verify_privileges(
             guard_table=GUARD_TABLE,
             fixture_table=FIXTURE_TABLE,
         )
-        effective_test_object_grants = frozenset(
-            tuple(str(value or "").upper() for value in row) for row in cursor
-        )
+        effective_test_object_grants = frozenset(tuple(str(value or "").upper() for value in row) for row in cursor)
         cursor.execute(
             """
             select count(*)
@@ -618,28 +560,20 @@ def _verify_privileges(
         direct_schema_grants: frozenset[tuple[str, ...]] = frozenset()
         if config.target == "26ai":
             cursor.execute("select privilege, schema from session_schema_privs")
-            session_schema_grants = frozenset(
-                tuple(str(value or "").upper() for value in row) for row in cursor
-            )
+            session_schema_grants = frozenset(tuple(str(value or "").upper() for value in row) for row in cursor)
             cursor.execute(
                 """
                 select username, privilege, schema, admin_option, common, inherited
                 from user_schema_privs
                 """
             )
-            direct_schema_grants = frozenset(
-                tuple(str(value or "").upper() for value in row) for row in cursor
-            )
+            direct_schema_grants = frozenset(tuple(str(value or "").upper() for value in row) for row in cursor)
     finally:
         cursor.close()
     validate_privilege_contract(profile_label, privileges, roles)
-    expected_direct_system_grants = frozenset(
-        (privilege, "NO", "NO", "NO") for privilege in privileges
-    )
+    expected_direct_system_grants = frozenset((privilege, "NO", "NO", "NO") for privilege in privileges)
     if direct_system_grants != expected_direct_system_grants or received_roles:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} direct system grant contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} direct system grant contract did not match")
     validate_schema_privilege_contract(
         profile_label,
         session_schema_grants,
@@ -675,13 +609,9 @@ def validate_privilege_contract(
 ) -> None:
     expected = DEVELOPER_PRIVILEGES if profile_label == "developer" else RESTRICTED_PRIVILEGES
     if roles:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} must use direct grants and no roles"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} must use direct grants and no roles")
     if privileges != expected:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} system privilege contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} system privilege contract did not match")
 
 
 def validate_object_grant_contract(
@@ -722,9 +652,7 @@ def validate_object_grant_contract(
             }
         )
     if object_grants != expected:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} direct object grant contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} direct object grant contract did not match")
 
 
 def validate_schema_isolation_contract(
@@ -743,9 +671,7 @@ def validate_schema_isolation_contract(
         or public_column_grant_count
         or (profile_label != "developer" and owned_object_count)
     ):
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} schema isolation contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} schema isolation contract did not match")
 
 
 def validate_schema_privilege_contract(
@@ -754,9 +680,7 @@ def validate_schema_privilege_contract(
     direct_schema_grants: frozenset[tuple[str, ...]],
 ) -> None:
     if session_schema_grants or direct_schema_grants:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} schema privilege contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} schema privilege contract did not match")
 
 
 def validate_quota_contract(
@@ -768,9 +692,7 @@ def validate_quota_contract(
     else:
         valid = not tablespace_quotas
     if not valid:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} tablespace quota contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} tablespace quota contract did not match")
 
 
 def validate_session_time_limit_contract(
@@ -781,9 +703,7 @@ def validate_session_time_limit_contract(
         "CONNECT_TIME": "UNLIMITED",
         "IDLE_TIME": "UNLIMITED",
     }:
-        raise OracleMatrixSafetyError(
-            "Oracle matrix developer session time limits could release its guard lock"
-        )
+        raise OracleMatrixSafetyError("Oracle matrix developer session time limits could release its guard lock")
 
 
 def validate_made_object_grant_contract(
@@ -804,9 +724,7 @@ def validate_made_object_grant_contract(
             }
         )
     if made_object_grants != expected:
-        raise OracleMatrixSafetyError(
-            f"Oracle matrix {profile_label} outgoing object grant contract did not match"
-        )
+        raise OracleMatrixSafetyError(f"Oracle matrix {profile_label} outgoing object grant contract did not match")
 
 
 def validate_effective_test_object_grant_contract(
@@ -888,20 +806,14 @@ def _acquire_matrix_lock(config: OracleMatrixConfig) -> OracleWorkspace:
         return workspace
     except OracleMatrixSafetyError:
         if workspace is not None:
-            try:
+            with contextlib.suppress(Exception):
                 workspace.close()
-            except Exception:
-                pass
         raise
     except Exception:
         if workspace is not None:
-            try:
+            with contextlib.suppress(Exception):
                 workspace.close()
-            except Exception:
-                pass
-        raise OracleMatrixSafetyError(
-            "Oracle matrix endpoint is already in use or could not be locked"
-        ) from None
+        raise OracleMatrixSafetyError("Oracle matrix endpoint is already in use or could not be locked") from None
 
 
 def _lock_verified_guard(

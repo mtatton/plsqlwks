@@ -8,11 +8,11 @@ not part of this contract.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable, Protocol
-
+from typing import Protocol
 
 PLUGIN_API_VERSION = 1
 PLUGIN_ENTRY_POINT_GROUP = "plsqlwks.plugins"

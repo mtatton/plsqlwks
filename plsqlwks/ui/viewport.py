@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
-from .browser import browser_panel_width, clamp_browser_row, flatten_browser_entries
+from .browser import (
+    browser_panel_width,
+    clamp_browser_row,
+    flatten_browser_entries,
+    visible_tab_labels,
+)
 from .constants import (
     FOCUS_BROWSER,
     FOCUS_EDITOR,
@@ -12,19 +18,24 @@ from .constants import (
     RESULT_RATIO_FULLSCREEN,
     RESULT_RATIO_GRID_SPLIT,
     RESULT_ROW_DETAIL,
+    RESULT_STYLE_HELP,
 )
 from .results import (
     clamp_cell_view_scroll,
+    clamp_result_position,
     editor_result_pane_heights,
     explain_plan_lines,
     result_pane_is_editor_fullscreen,
     result_pane_is_fullscreen,
     result_pane_status,
     result_pane_tab_height,
+    row_detail_lines,
     scroll_start,
+    table_column_widths,
+    visible_table_columns,
     wrapped_dbms_output_lines,
 )
-from .state import UIState
+from .state import DocumentState, UIState, normalize_document_state
 
 
 class ScreenSizePort(Protocol):
@@ -37,11 +48,245 @@ class ResultStatusPort(Protocol):
     def update_result_status(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class LayoutSnapshot:
+    height: int
+    width: int
+    grid_fullscreen: bool
+    editor_fullscreen: bool
+    usable_height: int
+    tab_height: int
+    browser_width: int
+    content_x: int
+    content_width: int
+    editor_height: int
+    result_height: int
+    browser_body_height: int
+
+
+def build_layout_snapshot(state: UIState, height: int, width: int) -> LayoutSnapshot:
+    """Calculate terminal geometry without mutating UI state."""
+    height = max(0, height)
+    width = max(1, width)
+    grid_fullscreen = state.result_grid_fullscreen and state.active_result is not None
+    editor_fullscreen = result_pane_is_editor_fullscreen(state.result_ratio)
+    if grid_fullscreen:
+        return LayoutSnapshot(
+            height,
+            width,
+            True,
+            False,
+            height,
+            0,
+            0,
+            0,
+            width,
+            0,
+            height,
+            0,
+        )
+    if editor_fullscreen:
+        return LayoutSnapshot(
+            height,
+            width,
+            False,
+            True,
+            height,
+            0,
+            0,
+            0,
+            width,
+            height,
+            0,
+            0,
+        )
+    status_h = 1
+    header_h = 1
+    tab_h = result_pane_tab_height(state.result_ratio)
+    usable_h = max(3, height - status_h - header_h)
+    content_usable_h = max(3, usable_h - tab_h)
+    browser_w = browser_panel_width(width) if state.browser_visible else 0
+    content_x = browser_w + 1 if state.browser_visible else 0
+    content_w = max(1, width - content_x)
+    editor_h, result_h = editor_result_pane_heights(content_usable_h, state.result_ratio)
+    return LayoutSnapshot(
+        height,
+        width,
+        False,
+        False,
+        usable_h,
+        tab_h,
+        browser_w,
+        content_x,
+        content_w,
+        max(0, editor_h),
+        max(0, result_h),
+        max(0, usable_h - 1),
+    )
+
+
+def reveal_selection(selected: int, scroll: int, visible: int, total: int) -> tuple[int, int]:
+    """Clamp a selected index and reveal it inside a scroll window."""
+    if total <= 0:
+        return 0, 0
+    selected = min(max(selected, 0), total - 1)
+    visible = max(1, visible)
+    scroll = clamp_cell_view_scroll(scroll, total, visible)
+    if selected < scroll:
+        scroll = selected
+    elif selected >= scroll + visible:
+        scroll = selected - visible + 1
+    return selected, scroll
+
+
+def visible_tab_scroll(documents: DocumentState, width: int) -> int:
+    """Return the first tab index that keeps the active tab visible."""
+    normalized = normalize_document_state(documents)
+    active = normalized.active_tab_idx
+    scroll = normalized.tab_scroll
+    if active < scroll:
+        return active
+    while active not in [
+        idx for idx, _, _ in visible_tab_labels(normalized.tabs, scroll, width)
+    ]:
+        if scroll >= active:
+            break
+        scroll += 1
+    return scroll
+
+
 class ViewportController:
     def __init__(self, screen: ScreenSizePort, state: UIState, results: ResultStatusPort):
         self.screen = screen
         self.state = state
         self.results = results
+
+    def prepare_frame(self) -> LayoutSnapshot:
+        """Normalize viewport state before the renderer reads it."""
+        try:
+            height, width = self.screen.getmaxyx()
+        except Exception:
+            height, width = 24, 120
+        self.state.documents = normalize_document_state(self.state.documents)
+        snapshot = build_layout_snapshot(self.state, height, width)
+        self.state.tab_scroll = visible_tab_scroll(self.state.documents, snapshot.content_width)
+        self._prepare_browser(snapshot)
+        self._prepare_editor(snapshot)
+        self._prepare_results(snapshot)
+        return snapshot
+
+    def _prepare_browser(self, snapshot: LayoutSnapshot) -> None:
+        entries = flatten_browser_entries(
+            self.state.browser_objects,
+            self.state.browser_expanded,
+            self.state.browser_filter,
+        )
+        visible = max(1, snapshot.browser_body_height)
+        row = clamp_browser_row(self.state.browser_row, entries)
+        row, scroll = reveal_selection(row, self.state.browser_scroll, visible, len(entries))
+        self.state.browser_row = row
+        self.state.browser_scroll = scroll
+        self.state.browser_page_size = visible
+
+    def _prepare_editor(self, snapshot: LayoutSnapshot) -> None:
+        if snapshot.editor_height <= 0:
+            return
+        buffer = self.state.buffer
+        if buffer.row < buffer.scroll:
+            buffer.scroll = buffer.row
+        elif buffer.row >= buffer.scroll + snapshot.editor_height:
+            buffer.scroll = buffer.row - snapshot.editor_height + 1
+
+    def _prepare_results(self, snapshot: LayoutSnapshot) -> None:
+        result_height = snapshot.result_height
+        body_height = max(0, result_height - 1)
+        tab = self.state.active_tab
+        if self.state.show_dbms_output and self.state.dbms_output:
+            wrapped = wrapped_dbms_output_lines(self.state.dbms_output, snapshot.content_width)
+            if tab.dbms_output_scroll is not None:
+                tab.dbms_output_scroll = scroll_start(
+                    tab.dbms_output_scroll,
+                    len(wrapped),
+                    body_height,
+                )
+            return
+        if self.state.explain_result is not None:
+            lines = explain_plan_lines(self.state.explain_result)
+            self.state.explain_page_size = max(1, body_height)
+            self.state.explain_scroll = clamp_cell_view_scroll(
+                self.state.explain_scroll,
+                len(lines),
+                body_height,
+            )
+            return
+        result = self.state.active_result
+        if result is None:
+            lines_count = len(tab.help_lines) if self.state.results_style == RESULT_STYLE_HELP else len(self.state.results)
+            if tab.results_scroll is not None:
+                tab.results_scroll = scroll_start(tab.results_scroll, lines_count, body_height)
+            return
+        position = clamp_result_position(
+            result,
+            self.state.result_row,
+            self.state.result_col,
+            self.state.result_row_scroll,
+            self.state.result_col_scroll,
+        )
+        self.state.result_row = position.row
+        self.state.result_col = position.col
+        self.state.result_row_scroll = position.row_scroll
+        self.state.result_col_scroll = position.col_scroll
+        if self.state.result_mode == RESULT_ROW_DETAIL:
+            self.state.result_page_size = max(1, body_height)
+            _, self.state.result_col_scroll = reveal_selection(
+                self.state.result_col,
+                self.state.result_col_scroll,
+                body_height,
+                len(result.columns),
+            )
+            while (
+                body_height > 0
+                and self.state.result_col_scroll < self.state.result_col
+                and not any(
+                    field_idx == self.state.result_col
+                    for field_idx, _ in row_detail_lines(
+                        result,
+                        self.state.result_row,
+                        snapshot.content_width,
+                        self.state.result_col_scroll,
+                    )[:body_height]
+                )
+            ):
+                self.state.result_col_scroll += 1
+            return
+        label_height = 0 if snapshot.grid_fullscreen else 1
+        visible_rows = max(0, result_height - label_height - 2)
+        self.state.result_page_size = max(1, visible_rows)
+        self.state.result_row, self.state.result_row_scroll = reveal_selection(
+            self.state.result_row,
+            self.state.result_row_scroll,
+            visible_rows,
+            len(result.rows),
+        )
+        widths = table_column_widths(result)
+        if self.state.result_col < self.state.result_col_scroll:
+            self.state.result_col_scroll = self.state.result_col
+        selected_width = min(
+            widths[self.state.result_col],
+            snapshot.content_width,
+        )
+        while self.state.result_col_scroll < self.state.result_col:
+            visible = visible_table_columns(
+                widths,
+                self.state.result_col_scroll,
+                snapshot.content_width,
+            )
+            if any(
+                column.index == self.state.result_col and column.width == selected_width
+                for column in visible
+            ):
+                break
+            self.state.result_col_scroll += 1
 
     def toggle_result_pane_size(self) -> None:
         if self.state.result_grid_fullscreen:
@@ -93,21 +338,13 @@ class ViewportController:
             height, width = self.screen.getmaxyx()
         except Exception:
             height, width = 24, 120
-        if self.state.result_grid_fullscreen and self.state.active_result is not None:
-            return 0, max(0, height), max(1, width), 0
-        if result_pane_is_editor_fullscreen(self.state.result_ratio):
-            return max(0, height), 0, max(1, width), 0
-        status_h = 1
-        header_h = 1
-        tab_h = result_pane_tab_height(self.state.result_ratio)
-        usable_h = max(3, height - status_h - header_h)
-        content_usable_h = max(3, usable_h - tab_h)
-        browser_w = browser_panel_width(width) if self.state.browser_visible else 0
-        content_x = browser_w + 1 if self.state.browser_visible else 0
-        content_w = max(1, width - content_x)
-        editor_h, result_h = editor_result_pane_heights(content_usable_h, self.state.result_ratio)
-        browser_body_h = max(0, usable_h - 1)
-        return max(0, editor_h), max(0, result_h), content_w, browser_body_h
+        snapshot = build_layout_snapshot(self.state, height, width)
+        return (
+            snapshot.editor_height,
+            snapshot.result_height,
+            snapshot.content_width,
+            snapshot.browser_body_height,
+        )
 
     def scroll_editor_window(self, delta: int) -> None:
         editor_h, _, _, _ = self.current_pane_sizes()

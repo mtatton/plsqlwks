@@ -76,11 +76,12 @@ through the UI instead of terminating the application.
 
 ## Built-in result exports
 
-The bundled CSV, HTML, and XLSX commands are normal built-in `Plugin` objects
-using the same API v1 context available to installed plugins. When enabled,
-they are registered in that order in the **Results** section and have no global
-keyboard shortcuts. None is an App method, and adding export formats requires
-no public API expansion.
+The bundled CSV, HTML, and XLSX commands are normal built-in `Plugin` objects.
+Their standalone handlers use only the same loaded snapshot exposed by API v1.
+In the application, a private host coordinator adds the loaded/full choice,
+background progress, and cancellation without exposing Oracle handles or
+widening Plugin API v1. When enabled, the commands are registered in that order
+in the **Results** section and have no global keyboard shortcuts.
 
 ### Exporter availability
 
@@ -102,15 +103,25 @@ A missing or malformed value defaults to enabled. These switches control only
 the bundled exporters; installed entry-point plugins are still discovered and
 loaded normally. Restart PLSQLWKS after changing an availability switch.
 
+Each command opens an **Export rows** picker. **Loaded rows only (default)** is
+selected first and never fetches a continuation page. **All available rows
+(keep the result grid unchanged)** fetches every continuation page into a
+private export buffer with no 10,000-row cap; the grid retains only the rows it
+already displayed. Escape cancels the picker. The status bar shows the prepared
+row count while fetching and determinate write progress. `Ctrl-C` cancels either
+active phase: an interrupted fetch preserves the original grid rows but detaches
+the cursor and editing state, while a cancelled file phase leaves Oracle and
+transaction state alone. Atomic replacement leaves an existing destination
+unchanged in either case. An active insert draft must first be committed or
+cancelled.
+
 ### CSV export
 
-Choose **Alt-O -> Results -> Export loaded rows to CSV** to export the active
-table snapshot. The command proposes a timestamped name in the workspace
+Choose **Alt-O -> Results -> Export result to CSV** to export the rows selected
+by the shared mode picker. The command proposes a timestamped name in the workspace
 `results/` directory, accepts relative or absolute paths, and asks before
-replacing an existing file. It writes UTF-8 CSV with a header and exactly the
-currently loaded display rows; it never fetches a continuation page. Export is
-available in read-only mode. An active insert draft must first be committed or
-cancelled so its temporary row cannot be exported.
+replacing an existing file. It writes UTF-8 CSV with a header and the selected
+display rows. Export is available in read-only mode.
 
 The shared CSV writer writes a temporary sibling file and atomically replaces
 the destination after a successful close. A failed write therefore does not
@@ -118,14 +129,14 @@ turn an existing destination into an apparently successful partial export.
 
 ### HTML export
 
-Choose **Alt-O -> Results -> Export loaded rows to HTML** to write a complete,
-standalone UTF-8 HTML5 document for the active table snapshot. The command
+Choose **Alt-O -> Results -> Export result to HTML** to write a complete,
+standalone UTF-8 HTML5 document for the selected rows. The command
 proposes a timestamped `.html` name in the workspace `results/` directory,
 accepts relative or absolute paths, and asks before replacing an existing file.
-It writes the headers and exactly the currently loaded display rows, followed
-by the loaded-row count and a notice when additional rows remain available; the
-plugin never fetches them. The result title is retained only as browser-tab
-document metadata and is not repeated as a visible heading.
+It writes the headers and selected display rows, followed by the exported-row
+count and a notice when additional rows remain available. The result title is
+retained only as browser-tab document metadata and is not repeated as a visible
+heading.
 
 The result-derived document title, column names, and cell values are escaped as
 untrusted text. The document has a small static embedded stylesheet and no
@@ -169,14 +180,12 @@ installed third-party entry-point factories remain zero-argument callables.
 
 ### XLSX export
 
-Choose **Alt-O -> Results -> Export loaded rows to XLSX** to write one `Query
-result` worksheet containing a header and exactly the loaded result snapshot.
+Choose **Alt-O -> Results -> Export result to XLSX** to write one `Query result`
+worksheet containing a header and the selected result rows.
 The command proposes a timestamped `.xlsx` name in the workspace `results/`
 directory, accepts relative or absolute paths, and asks before replacing an
-existing file. It does not fetch continuation rows, access the database, start
-a subprocess, or open the resulting workbook. It remains available in
-read-only mode and rejects an active insert draft before reading the snapshot
-or prompting.
+existing file. The format writer starts no subprocess and does not open the
+resulting workbook. The command remains available in read-only mode.
 
 Headers and text cells are explicitly stored as strings. Genuine source
 numbers become native Excel numeric cells only when they are finite, within
@@ -202,7 +211,7 @@ the standard extra:
 python3 -m pip install 'plsqlwks[xlsx]'
 ```
 
-For an editable checkout, use `python3 -m pip install -e '.[xlsx]'`. The
+For an editable development checkout, use `python3 tools/dev.py install --xlsx`. The
 repository keeps `plugin-requirements/xlsx-export/requirements.txt` as a
 compatible fallback for existing source-checkout automation.
 
@@ -236,7 +245,7 @@ PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW="no"
   `1`, `yes`, `true`, or `on` to enable them and `0`, `no`, `false`, or `off`
   to disable them. An unset or malformed value falls back to enabled.
 - `PLSQLWKS_XLSX_EXPORT_AUTO_WIDTH` controls proportional column sizing from
-  the widest header or loaded data value. With filtering enabled, the header
+  the widest header or exported data value. With filtering enabled, the header
   candidate includes three extra character units for the filter dropdown. It
   accepts the same boolean values, defaults to enabled, and leaves Excel's
   default column widths when disabled.
@@ -244,8 +253,8 @@ PLSQLWKS_XLSX_EXPORT_FREEZE_TOP_ROW="no"
   while scrolling. It accepts the same boolean values, defaults to enabled,
   and leaves the worksheet unfrozen when disabled.
 
-When enabled, the auto-filter covers exactly the header row and currently
-loaded rows. It applies no filter criteria, so no data rows are initially
+When enabled, the auto-filter covers exactly the header row and exported rows.
+It applies no filter criteria, so no data rows are initially
 hidden. Disabling automatic widths does not change cell wrapping: multiline
 values and values above the 60-character-unit wrapping threshold still wrap.
 Freezing is independent of the auto-filter and automatic-width settings.
@@ -304,12 +313,11 @@ third-party plugins.
 
 ## Optional plugin tests
 
-Plugin-specific tests are excluded from the default core test run. Run them
-explicitly with either:
+Plugin-specific tests are excluded from the default core test run. Run the
+deterministic plugin profile explicitly with:
 
 ```bash
-python3 -m pytest -q -m plugin
-PLSQLWKS_TEST_PLUGINS=1 python3 -m pytest -q
+python3 tools/dev.py test plugins
 ```
 
 Compatibility manifests for repository plugins remain under

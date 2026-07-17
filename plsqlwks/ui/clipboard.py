@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import shutil
 import subprocess
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class ClipboardProvider:
     name: str
     copy: Callable[[str], bool] | None = None
     paste: Callable[[], str | None] | None = None
+
 
 def normalize_clipboard_text(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
@@ -68,9 +70,7 @@ def system_clipboard_providers() -> list[ClipboardProvider]:
             ClipboardProvider(
                 name="Windows clipboard",
                 copy=command_clipboard_copy(["clip.exe"]) if shutil.which("clip.exe") else None,
-                paste=command_clipboard_paste(
-                    ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"]
-                )
+                paste=command_clipboard_paste(["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"])
                 if shutil.which("powershell.exe")
                 else None,
             )

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import curses
+import zipfile
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-import zipfile
 
 import pytest
 
@@ -32,7 +32,6 @@ from plsqlwks.ui.constants import FOCUS_RESULTS
 from plsqlwks.ui.plugin_host import PluginHost, UIPluginContext, snapshot_result
 from plsqlwks.ui.state import UIState
 from tests.ui_harness import ServiceHarness
-
 
 pytestmark = pytest.mark.plugin
 
@@ -99,9 +98,7 @@ def open_plugin_command(
     host: PluginHost,
     handler: str,
 ) -> None:
-    selected = next(
-        command for command in host.command_menu_items if command.handler == handler
-    )
+    selected = next(command for command in host.command_menu_items if command.handler == handler)
     app.input.command_menu_items = host.command_menu_items
     app.input.dispatcher = CommandDispatcher(
         {command.handler: lambda: None for command in COMMAND_MENU_ITEMS},
@@ -171,9 +168,7 @@ def test_snapshot_copies_only_aligned_numeric_source_values():
     snapshot = snapshot_result(result)
 
     assert snapshot is not None
-    assert snapshot.numeric_values == (
-        (Decimal("10.50"), 42, 1.25, None, None, None, None, None),
-    )
+    assert snapshot.numeric_values == ((Decimal("10.50"), 42, 1.25, None, None, None, None, None),)
     assert isinstance(snapshot.numeric_values, tuple)
     assert isinstance(snapshot.numeric_values[0], tuple)
 
@@ -233,6 +228,31 @@ def test_context_captures_insert_draft_without_a_result(tmp_path):
 
     assert context.has_active_insert_draft() is True
     assert context.get_active_result() is None
+
+
+def test_context_defers_and_caches_result_snapshot_factory(tmp_path):
+    snapshot = ResultSnapshot("Result", ("ID",), (("1",),), False)
+    calls = 0
+
+    def create_snapshot() -> ResultSnapshot:
+        nonlocal calls
+        calls += 1
+        return snapshot
+
+    context = UIPluginContext(
+        tmp_path,
+        result_snapshot=None,
+        insert_draft=False,
+        prompt=lambda label, default, strip: None,
+        set_status=lambda message: None,
+        set_results=lambda lines, clear_table: None,
+        result_snapshot_factory=create_snapshot,
+    )
+
+    assert calls == 0
+    assert context.get_active_result() is snapshot
+    assert context.get_active_result() is snapshot
+    assert calls == 1
 
 
 def test_context_delegates_modal_prompts_and_overwrite_confirmation(tmp_path):
@@ -303,30 +323,24 @@ def test_plugin_host_adds_csv_html_xlsx_without_mutating_builtin_commands(tmp_pa
     assert len(host.command_menu_items) == len(original_commands) + 3
     csv_command, html_command, xlsx_command = host.command_menu_items[-3:]
     assert csv_command.section == "Results"
-    assert csv_command.title == "Export loaded rows to CSV"
+    assert csv_command.title == "Export result to CSV"
     assert csv_command.shortcut == ""
     assert html_command.section == "Results"
-    assert html_command.title == "Export loaded rows to HTML"
+    assert html_command.title == "Export result to HTML"
     assert html_command.shortcut == ""
     assert html_command.handler == "__plugin__:html-export:export-loaded-rows"
     assert not hasattr(App, html_command.handler)
     assert not hasattr(App, "export_loaded_rows_to_html")
     assert xlsx_command.section == "Results"
-    assert xlsx_command.title == "Export loaded rows to XLSX"
+    assert xlsx_command.title == "Export result to XLSX"
     assert xlsx_command.shortcut == ""
     assert xlsx_command.handler == "__plugin__:xlsx-export:export-loaded-rows"
     assert not hasattr(App, xlsx_command.handler)
     assert not hasattr(App, "export_loaded_rows_to_xlsx")
     assert PLUGIN_API_VERSION == 1
-    assert filtered_command_indexes(host.command_menu_items, "csv") == [
-        len(host.command_menu_items) - 3
-    ]
-    assert filtered_command_indexes(host.command_menu_items, "html") == [
-        len(host.command_menu_items) - 2
-    ]
-    assert filtered_command_indexes(host.command_menu_items, "xlsx") == [
-        len(host.command_menu_items) - 1
-    ]
+    assert filtered_command_indexes(host.command_menu_items, "csv") == [len(host.command_menu_items) - 3]
+    assert filtered_command_indexes(host.command_menu_items, "html") == [len(host.command_menu_items) - 2]
+    assert filtered_command_indexes(host.command_menu_items, "xlsx") == [len(host.command_menu_items) - 1]
 
 
 def test_open_commands_menu_dispatches_html_through_plugin_mapping(tmp_path):
@@ -390,9 +404,7 @@ def test_plugin_handler_exception_is_reported_without_changing_grid(tmp_path):
     plugin = Plugin(
         id="broken-command",
         name="Broken command",
-        commands=(
-            PluginCommand("explode", "Results", "Explode", fail),
-        ),
+        commands=(PluginCommand("explode", "Results", "Explode", fail),),
     )
     app = make_service_harness(make_config(tmp_path), object())
     continuation = QueryResultContinuation("opaque-token")
@@ -444,9 +456,7 @@ def test_plugin_command_remains_available_in_read_only_mode(tmp_path):
     plugin = Plugin(
         id="readonly-export",
         name="Read-only export",
-        commands=(
-            PluginCommand("run", "Results", "Export", calls.append),
-        ),
+        commands=(PluginCommand("run", "Results", "Export", calls.append),),
     )
     config = make_config(tmp_path, read_only=True)
     app = make_service_harness(config, SimpleNamespace(read_only=True))
@@ -626,9 +636,7 @@ def test_xlsx_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp
     with zipfile.ZipFile(destination) as workbook:
         assert "[Content_Types].xml" in workbook.namelist()
         assert "xl/worksheets/sheet1.xml" in workbook.namelist()
-    assert app.state.status == (
-        f"Exported 1 loaded row(s) to {destination}; additional rows are available"
-    )
+    assert app.state.status == (f"Exported 1 loaded row(s) to {destination}; additional rows are available")
     assert app.state.active_result is result
     assert result.rows == [["1", "display value"]]
     assert result.original_rows == original_rows
@@ -663,6 +671,7 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
 
     monkeypatch.setattr(app_module, "OracleWorkspace", lambda config: object())
     monkeypatch.setattr(app_module, "DatabaseWorker", FakeWorker)
+
     def load_registry(**options):
         loaded_options.append(options)
         return registry
@@ -684,11 +693,12 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
 
     assert app.command_menu_items[: len(COMMAND_MENU_ITEMS)] == COMMAND_MENU_ITEMS
     assert [command.title for command in app.command_menu_items[-3:]] == [
-        "Export loaded rows to CSV",
-        "Export loaded rows to HTML",
-        "Export loaded rows to XLSX",
+        "Export result to CSV",
+        "Export result to HTML",
+        "Export result to XLSX",
     ]
     assert app._plugin_startup_warnings == ("Plugin warning",)
+    assert loaded_options[0].pop("host_export") is app.result_export
     assert loaded_options == [
         {
             "csv_export_options": CsvExportOptions(
@@ -709,15 +719,15 @@ def test_app_initialization_owns_combined_commands_and_plugin_warnings(monkeypat
     (
         (
             {"csv_export_enabled": False},
-            ["Export loaded rows to HTML", "Export loaded rows to XLSX"],
+            ["Export result to HTML", "Export result to XLSX"],
         ),
         (
             {"html_export_enabled": False},
-            ["Export loaded rows to CSV", "Export loaded rows to XLSX"],
+            ["Export result to CSV", "Export result to XLSX"],
         ),
         (
             {"xlsx_export_enabled": False},
-            ["Export loaded rows to CSV", "Export loaded rows to HTML"],
+            ["Export result to CSV", "Export result to HTML"],
         ),
         (
             {
@@ -750,9 +760,7 @@ def test_app_command_menu_exposes_only_enabled_builtin_exporters(
 
     app = App(FakeScreen(), replace(make_config(tmp_path), **config_changes))
 
-    assert [
-        command.title for command in app.command_menu_items[len(COMMAND_MENU_ITEMS) :]
-    ] == expected_titles
+    assert [command.title for command in app.command_menu_items[len(COMMAND_MENU_ITEMS) :]] == expected_titles
 
 
 @pytest.mark.parametrize(
@@ -776,12 +784,6 @@ def test_app_configures_the_builtin_csv_handler(
     config_changes,
     expected,
 ):
-    class FakeWorker:
-        def __init__(self, workspace: object) -> None:
-            self.session_state = object()
-
-    monkeypatch.setattr(app_module, "OracleWorkspace", lambda config: object())
-    monkeypatch.setattr(app_module, "DatabaseWorker", FakeWorker)
     monkeypatch.setattr(
         app_module,
         "load_plugin_registry",
@@ -798,16 +800,16 @@ def test_app_configures_the_builtin_csv_handler(
         "1 row",
     )
     app.results.active_insert_draft = lambda: None
-    app.dialogs.prompt_text_box = lambda label, default="", strip=True: str(destination)
+    app.dialogs.pick = lambda title, options: 0
+    responses = iter([str(destination)])
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: next(responses)
 
-    csv_command = next(
-        command
-        for command in app.command_menu_items
-        if command.title == "Export loaded rows to CSV"
-    )
+    csv_command = next(command for command in app.command_menu_items if command.title == "Export result to CSV")
     assert app._plugin_host.execute(csv_command.handler) is True
+    app.db_operations.wait(timeout=2)
 
     assert destination.read_text(encoding="utf-8") == expected
+    app.db_operations.shutdown(timeout=2)
 
 
 def test_app_context_factory_checks_draft_before_snapshot(monkeypatch, tmp_path):
@@ -889,9 +891,7 @@ def test_run_includes_plugin_warnings_in_startup_help(monkeypatch, tmp_path):
     app.result_presenter.close_all_result_continuations = lambda: None
     app.db_operations.shutdown = lambda timeout=None: None
     seen: list[tuple[list[str], bool]] = []
-    app.result_presenter.show_help = lambda messages, focus_results=True: seen.append(
-        (messages, focus_results)
-    )
+    app.result_presenter.show_help = lambda messages, focus_results=True: seen.append((messages, focus_results))
     monkeypatch.setattr(app_module, "workspace_health", lambda config: ["Workspace health"])
     monkeypatch.setattr(app_module, "enable_extended_keyboard_reporting", lambda: False)
     monkeypatch.setattr(curses, "raw", lambda: None)

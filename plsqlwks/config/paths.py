@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import stat
 import sys
-
+from pathlib import Path
 
 APP_NAME = "plsqlwks"
 LEGACY_PASSWORD_FILE = Path("/tmp/orapass")
@@ -135,7 +134,7 @@ def _windows_known_folder(*, roaming: bool) -> Path | None:
         import ctypes
 
         buffer = ctypes.create_unicode_buffer(260)
-        shell32 = getattr(getattr(ctypes, "windll"), "shell32")
+        shell32 = getattr(getattr(ctypes, "windll"), "shell32")  # noqa: B009  # reason: ctypes exposes Windows loader attributes dynamically on guarded Windows paths
         csidl = 26 if roaming else 28
         result = shell32.SHGetFolderPathW(None, csidl, None, 0, buffer)
     except (AttributeError, OSError):

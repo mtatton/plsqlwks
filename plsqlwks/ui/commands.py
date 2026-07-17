@@ -18,7 +18,9 @@ COMMAND_MENU_ITEMS = (
     CommandMenuItem("Application", "Show help", "F1", "show_help", "keyboard shortcuts"),
     CommandMenuItem("Application", "Quit", "Ctrl-Q", "request_quit", "exit close"),
     CommandMenuItem("Layout", "Toggle DBMS_OUTPUT/results", "F6", "toggle_dbms_output_view", "output transcript"),
-    CommandMenuItem("Layout", "Cycle result pane layout", "F7", "toggle_result_pane_size", "split fullscreen editor grid"),
+    CommandMenuItem(
+        "Layout", "Cycle result pane layout", "F7", "toggle_result_pane_size", "split fullscreen editor grid"
+    ),
     CommandMenuItem("Layout", "Toggle grid/row detail", "F8", "toggle_result_mode", "results detail"),
     CommandMenuItem("Layout", "Show/focus/hide schema browser", "F9", "toggle_browser", "objects tree"),
     CommandMenuItem("Database", "Choose transaction mode", "F12", "choose_transaction_mode", "autocommit manual"),
@@ -39,7 +41,9 @@ COMMAND_MENU_ITEMS = (
     CommandMenuItem("File", "New file tab", "Ctrl-T", "new_tab", "tab"),
     CommandMenuItem("File", "Close current file tab", "Ctrl-W", "close_active_tab", "tab"),
     CommandMenuItem("File", "Refresh workspace file list", "Ctrl-R", "refresh_workspace_file_list", "files"),
-    CommandMenuItem("Editor", "Execute selection/current statement", "F5 / Ctrl-Enter / Alt-X", "run_current_statement", "run sql"),
+    CommandMenuItem(
+        "Editor", "Execute selection/current statement", "F5 / Ctrl-Enter / Alt-X", "run_current_statement", "run sql"
+    ),
     CommandMenuItem("Editor", "Execute selection/buffer script", "F11", "run_script", "run sql script"),
     CommandMenuItem("Editor", "Explain current statement", "Ctrl-E", "explain_current_statement", "plan"),
     CommandMenuItem(
@@ -49,7 +53,9 @@ COMMAND_MENU_ITEMS = (
         "generate_sql_with_columns",
         "table view select insert update",
     ),
-    CommandMenuItem("Editor", "Refresh autocomplete cache", "Alt-+", "refresh_autocomplete_cache", "completion metadata"),
+    CommandMenuItem(
+        "Editor", "Refresh autocomplete cache", "Alt-+", "refresh_autocomplete_cache", "completion metadata"
+    ),
     CommandMenuItem("Editor", "Autocomplete", "Shift-Tab", "autocomplete_editor", "complete"),
     CommandMenuItem("Editor", "Toggle line comment", "Ctrl-B", "toggle_current_line_comment", "comment uncomment"),
     CommandMenuItem("Editor", "Find text", "Ctrl-F", "prompt_search", "search"),

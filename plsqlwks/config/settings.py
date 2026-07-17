@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import configparser
-from pathlib import Path
+import contextlib
 import os
 import tempfile
+from pathlib import Path
 
 from ..exporting import preserve_existing_posix_permissions
-from .models import AppConfig, _CSV_EXPORT_DEFAULT_NULL_VALUE
-
+from .models import _CSV_EXPORT_DEFAULT_NULL_VALUE, AppConfig
 
 EDITOR_COLOR_SECTION = "editor.colors"
 EDITOR_COLOR_KINDS = ("keyword", "string", "number", "comment", "bind", "operator")
@@ -68,10 +68,8 @@ def write_ini_atomic(path: Path, parser: configparser.ConfigParser) -> None:
         temporary_path = None
     except BaseException:
         if temporary_path is not None:
-            try:
+            with contextlib.suppress(OSError):
                 temporary_path.unlink()
-            except OSError:
-                pass
         raise
 
 

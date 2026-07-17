@@ -7,11 +7,11 @@ import pytest
 
 from plsqlwks.config import AppConfig
 from plsqlwks.db import (
+    NULL_DISPLAY_TOKEN,
     CellUpdateResult,
     ConcurrentEditError,
-    NULL_DISPLAY_TOKEN,
-    EditOperationRollbackError,
     EditableResultContext,
+    EditOperationRollbackError,
     OracleWorkspace,
     QueryResult,
     ReadOnlyModeError,
@@ -140,6 +140,17 @@ def test_parse_simple_select_keeps_tail_keywords_out_of_table_alias():
     )
 
 
+def test_parse_simple_select_allows_safe_offset_tail():
+    parsed, reason = parse_simple_select("select rowid, name from decisions offset 10 rows fetch next 5 rows only")
+
+    assert reason == ""
+    assert parsed == SimpleSelect(
+        table_name="DECISIONS",
+        alias=None,
+        items=[SelectItem("rowid"), SelectItem("column", "NAME")],
+    )
+
+
 def test_builds_editable_context_for_qualified_alias_with_where_tail():
     context, reason = build_editable_result_context(
         "select d.rowid as rowid, d.name from decisions d where d.id = 1",
@@ -187,7 +198,11 @@ def test_parse_simple_select_allows_rejected_words_inside_literals_and_comments(
     ("statement", "columns", "reason_part"),
     [
         ("select name from decisions", ["NAME"], "ROWID"),
-        ("select d.rowid as rowid, d.name from decisions d join projects p on p.id = d.project_id", ["ROWID", "NAME"], "Joins"),
+        (
+            "select d.rowid as rowid, d.name from decisions d join projects p on p.id = d.project_id",
+            ["ROWID", "NAME"],
+            "Joins",
+        ),
         ("select rowid, name from decisions group by rowid, name", ["ROWID", "NAME"], "Joins"),
         ("select rowid, upper(name) as name from decisions", ["ROWID", "NAME"], "Expressions"),
         ("select rowid, name from decisions for update", ["ROWID", "NAME"], "locking queries"),
@@ -205,7 +220,6 @@ def test_rejects_non_editable_select_shapes(statement, columns, reason_part):
 @pytest.mark.parametrize(
     ("statement", "reason_part"),
     [
-        ('select rowid, "Name" from decisions', "Quoted identifiers"),
         ("select rowid, name from (select * from decisions)", "Subquery"),
         ("select rowid, name from decisions as d", "Oracle table aliases"),
         ("select distinct rowid, name from decisions", "DISTINCT"),
@@ -220,6 +234,36 @@ def test_parse_simple_select_rejects_non_editable_shapes(statement, reason_part)
     assert reason_part in reason
 
 
+def test_builds_editable_context_for_quoted_mixed_case_identifiers():
+    context, reason = build_editable_result_context(
+        'select "t".rowid as rowid, "t"."Display ""Name" as "Shown" from "Mixed Table" "t"',
+        ["ROWID", "Shown"],
+        ['Display "Name'],
+    )
+
+    assert reason == ""
+    assert context == EditableResultContext(
+        "Mixed Table",
+        0,
+        {1: 'Display "Name'},
+    )
+
+
+def test_editable_context_keeps_case_distinct_quoted_columns_separate():
+    context, reason = build_editable_result_context(
+        'select rowid, "FOO", "Foo" from "CaseTable"',
+        ["ROWID", "FOO", "Foo"],
+        ["FOO", "Foo"],
+    )
+
+    assert reason == ""
+    assert context == EditableResultContext(
+        "CaseTable",
+        0,
+        {1: "FOO", 2: "Foo"},
+    )
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -229,6 +273,8 @@ def test_parse_simple_select_rejects_non_editable_shapes(statement, reason_part)
         "select rowid, name from decisions unpivot (value for col in (name))",
         "select rowid, name from decisions model dimension by (id) measures (name) rules (name[1] = 'x')",
         "select rowid, name from decisions versions between timestamp systimestamp - 1 and systimestamp",
+        "select rowid, name from decisions match_recognize (measures first(rowid) as rowid pattern (x) define x as 1 = 1)",
+        "select rowid, name from decisions /* remote */ @remote",
     ],
 )
 def test_parse_simple_select_rejects_oracle_table_and_flashback_clauses(statement):
@@ -381,14 +427,39 @@ def test_update_cell_by_rowid_validates_binds_commits_and_refreshes_value():
     assert savepoint_params == {}
     update_sql, update_params = connection.statements[3]
     assert update_sql == (
-        "update DECISIONS set NAME = :new_value "
-        "where rowid = chartorowid(:target_rowid) and NAME = :original_value"
+        'update "DECISIONS" set "NAME" = :new_value '
+        'where rowid = chartorowid(:target_rowid) and "NAME" = :original_value'
     )
     assert update_params == {
         "new_value": "Příliš",
         "target_rowid": "AAABBBCCC",
         "original_value": "old",
     }
+
+
+def test_update_cell_by_rowid_quotes_exact_mixed_case_identifiers():
+    workspace = OracleWorkspace(make_config())
+    connection = FakeConnection(
+        refreshed_value="new",
+        table_columns=['Display "Name'],
+    )
+    workspace.connection = connection
+    context = EditableResultContext(
+        "Mixed Table",
+        0,
+        {1: 'Display "Name'},
+    )
+
+    workspace.update_cell_by_rowid(context, "AAABBBCCC", 1, "old", "new")
+
+    update_sql, _params = next(
+        (sql, params) for sql, params in connection.statements if sql.startswith('update "Mixed Table"')
+    )
+    assert update_sql == (
+        'update "Mixed Table" set "Display ""Name" = :new_value '
+        "where rowid = chartorowid(:target_rowid) "
+        'and "Display ""Name" = :original_value'
+    )
 
 
 def test_update_cell_by_rowid_binds_typed_number_and_original_value():
@@ -407,9 +478,9 @@ def test_update_cell_by_rowid_binds_typed_number_and_original_value():
     )
 
     update_sql, update_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("update DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('update "DECISIONS"')
     )
-    assert update_sql.endswith("and ID = :original_value")
+    assert update_sql.endswith('and "ID" = :original_value')
     assert update_params == {
         "new_value": Decimal("10.50"),
         "target_rowid": "AAABBBCCC",
@@ -446,11 +517,10 @@ def test_update_cell_by_rowid_uses_fixed_sysdate_expression_for_datetime_types(t
     )
 
     update_sql, update_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("update DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('update "DECISIONS"')
     )
     assert update_sql == (
-        "update DECISIONS set NAME = sysdate "
-        "where rowid = chartorowid(:target_rowid) and NAME = :original_value"
+        'update "DECISIONS" set "NAME" = sysdate where rowid = chartorowid(:target_rowid) and "NAME" = :original_value'
     )
     assert update_params == {
         "target_rowid": "AAABBBCCC",
@@ -474,9 +544,9 @@ def test_update_cell_by_rowid_keeps_sysdate_literal_for_text_columns():
     workspace.update_cell_by_rowid(context, "AAABBBCCC", 1, "old", "  SySdAtE  ")
 
     update_sql, update_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("update DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('update "DECISIONS"')
     )
-    assert "set NAME = :new_value" in update_sql
+    assert 'set "NAME" = :new_value' in update_sql
     assert update_params["new_value"] == "  SySdAtE  "
     assert connection.input_sizes == [
         {
@@ -516,9 +586,9 @@ def test_update_cell_by_rowid_uses_null_and_lob_optimistic_predicates():
     workspace.update_cell_by_rowid(text_context, "AAABBBCCC", 1, None, "new")
 
     null_sql, null_params = next(
-        (sql, params) for sql, params in null_connection.statements if sql.startswith("update DECISIONS")
+        (sql, params) for sql, params in null_connection.statements if sql.startswith('update "DECISIONS"')
     )
-    assert null_sql.endswith("and NAME is null")
+    assert null_sql.endswith('and "NAME" is null')
     assert "original_value" not in null_params
 
     lob_connection = FakeConnection(refreshed_value="new clob")
@@ -529,9 +599,9 @@ def test_update_cell_by_rowid_uses_null_and_lob_optimistic_predicates():
     workspace.update_cell_by_rowid(lob_context, "AAABBBCCC", 1, "old clob", "new clob")
 
     lob_sql, lob_params = next(
-        (sql, params) for sql, params in lob_connection.statements if sql.startswith("update DECISIONS")
+        (sql, params) for sql, params in lob_connection.statements if sql.startswith('update "DECISIONS"')
     )
-    assert lob_sql.endswith("and dbms_lob.compare(NAME, :original_value) = 0")
+    assert lob_sql.endswith('and dbms_lob.compare("NAME", :original_value) = 0')
     assert lob_params["original_value"] == "old clob"
     assert lob_connection.input_sizes == [
         {
@@ -570,9 +640,9 @@ def test_update_cell_by_rowid_preserves_literal_null_and_formats_database_null()
     refreshed = workspace.update_cell_by_rowid(context, "AAABBBCCC", 1, "old", "NULL")
 
     update_sql, update_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("update DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('update "DECISIONS"')
     )
-    assert update_sql.startswith("update DECISIONS")
+    assert update_sql.startswith('update "DECISIONS"')
     assert update_params["new_value"] == "NULL"
     assert refreshed == CellUpdateResult(None, NULL_DISPLAY_TOKEN)
 
@@ -735,12 +805,14 @@ def test_insert_row_for_result_validates_binds_commits_and_refreshes_row():
     )
     assert connection.statements[2][0].startswith("savepoint PLSQLWKS_EDIT_")
     insert_sql, insert_params = connection.statements[3]
-    assert insert_sql == "insert into DECISIONS (ID, NAME) values (:value_0, :value_1) returning rowid into :new_rowid"
+    assert insert_sql == (
+        'insert into "DECISIONS" ("ID", "NAME") values (:value_0, :value_1) returning rowid into :new_rowid'
+    )
     assert insert_params["value_0"] == "7"
     assert insert_params["value_1"] == "Příliš"
     assert "new_rowid" in insert_params
     refresh_sql, refresh_params = connection.statements[4]
-    assert refresh_sql == "select rowid, ID, NAME from DECISIONS where rowid = chartorowid(:new_rowid)"
+    assert refresh_sql == ('select rowid, "ID", "NAME" from "DECISIONS" where rowid = chartorowid(:new_rowid)')
     assert refresh_params == {"new_rowid": "AAANEW"}
     assert connection.commits == 1
     assert connection.rollbacks == 0
@@ -768,7 +840,7 @@ def test_insert_row_for_result_binds_typed_number_and_date_values():
     )
 
     _insert_sql, insert_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("insert into DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('insert into "DECISIONS"')
     )
     assert insert_params["value_0"] == Decimal("7")
     assert insert_params["value_1"] == inserted_at
@@ -806,11 +878,10 @@ def test_insert_row_for_result_uses_fixed_sysdate_expression_for_datetime_types(
     workspace.insert_row_for_result(context, {1: "7", 2: "  SySdAtE  "}, 3)
 
     insert_sql, insert_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("insert into DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('insert into "DECISIONS"')
     )
     assert insert_sql == (
-        "insert into DECISIONS (ID, NAME) values (:value_0, sysdate) "
-        "returning rowid into :new_rowid"
+        'insert into "DECISIONS" ("ID", "NAME") values (:value_0, sysdate) returning rowid into :new_rowid'
     )
     assert insert_params["value_0"] == Decimal("7")
     assert "value_1" not in insert_params
@@ -844,7 +915,7 @@ def test_insert_row_for_result_preserves_literal_null_and_defaults_missing_value
     row = workspace.insert_row_for_result(context, {1: "NULL"}, 3)
 
     _insert_sql, insert_params = next(
-        (sql, params) for sql, params in connection.statements if sql.startswith("insert into DECISIONS")
+        (sql, params) for sql, params in connection.statements if sql.startswith('insert into "DECISIONS"')
     )
     assert insert_params["value_0"] == "NULL"
     assert insert_params["value_1"] is None
@@ -959,6 +1030,8 @@ class FakeConnection:
         inserted_rowid: str = "AAANEW",
         inserted_row: tuple[object, ...] = ("AAANEW", 1, "inserted"),
         insert_refresh_row_exists: bool = True,
+        table_columns: list[str] | None = None,
+        object_counts: tuple[int, int] = (1, 1),
     ):
         self.update_rowcount = update_rowcount
         self.refreshed_value = refreshed_value
@@ -970,6 +1043,8 @@ class FakeConnection:
         self.inserted_rowid = inserted_rowid
         self.inserted_row = inserted_row
         self.insert_refresh_row_exists = insert_refresh_row_exists
+        self.table_columns = table_columns or ["ID", "NAME"]
+        self.object_counts = object_counts
         self.statements: list[tuple[str, dict[str, object]]] = []
         self.input_sizes: list[dict[str, object]] = []
         self.commits = 0
@@ -1008,16 +1083,16 @@ class FakeCursor:
     def execute(self, sql: str, **params):
         normalized_sql = " ".join(sql.split())
         self.connection.statements.append((normalized_sql, params))
-        lowered = normalized_sql.lower()
+        lowered = normalized_sql.lower().replace('"', "")
         if lowered.startswith("rollback to savepoint "):
             self.connection.savepoint_rollbacks += 1
             if self.connection.savepoint_rollback_raises:
                 raise RuntimeError("savepoint rollback failed")
             self.rows = []
         elif "from user_objects" in lowered:
-            self.rows = [("TABLE",)]
+            self.rows = [self.connection.object_counts]
         elif "from user_tab_columns" in lowered:
-            self.rows = [("ID",), ("NAME",)]
+            self.rows = [(column,) for column in self.connection.table_columns]
         elif lowered.startswith("insert "):
             if self.connection.transaction_state is not None:
                 self.connection.transaction_state = True
@@ -1033,7 +1108,7 @@ class FakeCursor:
             self.rows = []
         elif lowered.startswith("select rowid, id, name from decisions"):
             self.rows = [self.connection.inserted_row] if self.connection.insert_refresh_row_exists else []
-        elif lowered.startswith(("select id from decisions", "select name from decisions")):
+        elif lowered.startswith("select ") and ":target_rowid" in lowered:
             self.rows = [(self.connection.refreshed_value,)] if self.connection.refresh_row_exists else []
         else:
             self.rows = []
@@ -1061,3 +1136,33 @@ class FakeVar:
 
     def getvalue(self):
         return self.value
+
+
+def test_editable_table_columns_accepts_table_with_same_named_secondary_object():
+    workspace = OracleWorkspace(make_config())
+    workspace.connection = FakeConnection(object_counts=(1, 2))
+
+    columns, reason = workspace.editable_table_columns("DECISIONS")
+
+    assert columns == ["ID", "NAME"]
+    assert reason == ""
+
+
+@pytest.mark.parametrize(
+    ("object_counts", "reason"),
+    (
+        ((0, 1), "Only base tables are editable"),
+        ((0, 0), '"DECISIONS" was not found in the current schema'),
+    ),
+)
+def test_editable_table_columns_rejects_non_table_or_missing_object(
+    object_counts,
+    reason,
+):
+    workspace = OracleWorkspace(make_config())
+    workspace.connection = FakeConnection(object_counts=object_counts)
+
+    columns, actual_reason = workspace.editable_table_columns("DECISIONS")
+
+    assert columns == []
+    assert actual_reason == reason

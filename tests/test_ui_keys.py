@@ -7,7 +7,6 @@ import pytest
 
 import plsqlwks.ui as ui
 from plsqlwks.config import AppConfig
-from tests.ui_harness import ServiceHarness
 from plsqlwks.db import (
     EditableResultContext,
     ExplainPlanResult,
@@ -17,23 +16,16 @@ from plsqlwks.db import (
     PlsqlCompileDiagnostic,
     PlsqlObject,
     QueryResult,
+    QueryResultContinuation,
     TransactionReport,
+    assemble_package_definition,
+    ensure_sql_terminator,
+    normalize_identifier,
+    terminate_plsql_ddl,
 )
-from plsqlwks.db import QueryResultContinuation
-from plsqlwks.db import assemble_package_definition, ensure_sql_terminator, terminate_plsql_ddl
 from plsqlwks.sqlsplit import split_script
-from plsqlwks.ui.menu import (
-    first_tree_menu_row_index,
-    tree_menu_row_label,
-    tree_menu_rows,
-)
 from plsqlwks.ui import (
-    App,
-    Buffer,
-    BrowserEntry,
-    ClipboardProvider,
-    CompletionCandidate,
-    CompletionContext,
+    COMMAND_MENU_ITEMS,
     CTRL_B,
     CTRL_C,
     CTRL_F,
@@ -43,44 +35,37 @@ from plsqlwks.ui import (
     CTRL_P,
     CTRL_R,
     CTRL_U,
-    ErrorLocation,
-    ESC,
-    EXTENDED_KEYBOARD_ENABLE,
-    EXTENDED_KEYBOARD_RESET,
-    FileTab,
-    FOCUS_EDITOR,
-    FOCUS_BROWSER,
-    FOCUS_RESULTS,
-    ResultCell,
-    SearchMatch,
-    SyntaxSegment,
-    SyntaxToken,
-    UIState,
     CTRL_X,
     CTRL_Y,
     CTRL_Z,
-    KEY_ALT_PLUS,
-    KEY_ALT_O,
-    KEY_ALT_R,
+    ESC,
+    EXTENDED_KEYBOARD_ENABLE,
+    EXTENDED_KEYBOARD_RESET,
+    FOCUS_BROWSER,
+    FOCUS_EDITOR,
+    FOCUS_RESULTS,
     KEY_ALT_G,
+    KEY_ALT_O,
+    KEY_ALT_PLUS,
+    KEY_ALT_R,
     KEY_ALT_X,
     KEY_CTRL_ALT_C,
     KEY_CTRL_ALT_R,
     KEY_CTRL_BACKSPACE,
     KEY_CTRL_DELETE,
-    KEY_CTRL_EQUALS,
-    KEY_CTRL_LEFT,
-    KEY_CTRL_RIGHT,
-    KEY_CTRL_SHIFT_LEFT,
-    KEY_CTRL_SHIFT_RIGHT,
+    KEY_CTRL_DOWN,
     KEY_CTRL_END,
     KEY_CTRL_ENTER,
+    KEY_CTRL_EQUALS,
     KEY_CTRL_HOME,
-    KEY_CTRL_DOWN,
+    KEY_CTRL_LEFT,
     KEY_CTRL_PAGEDOWN,
     KEY_CTRL_PAGEUP,
+    KEY_CTRL_RIGHT,
     KEY_CTRL_SHIFT_END,
     KEY_CTRL_SHIFT_HOME,
+    KEY_CTRL_SHIFT_LEFT,
+    KEY_CTRL_SHIFT_RIGHT,
     KEY_CTRL_UP,
     KEY_SHIFT_END,
     KEY_SHIFT_HOME,
@@ -98,16 +83,32 @@ from plsqlwks.ui import (
     SYNTAX_OPERATOR,
     SYNTAX_STRING,
     UNDO_HISTORY_LIMIT,
+    App,
+    BrowserEntry,
+    Buffer,
+    ClipboardProvider,
+    CommandMenuItem,
+    CompletionCandidate,
+    CompletionContext,
+    ErrorLocation,
+    FileTab,
+    ResultCell,
+    SearchMatch,
+    SyntaxSegment,
+    SyntaxToken,
+    UIState,
     alt_digit_from_key,
     alt_digit_key,
-    cell_view_lines,
-    clip_text,
-    clamp_cell_view_scroll,
     browser_entry_text,
     browser_panel_width,
+    cell_view_lines,
     clamp_browser_row,
+    clamp_cell_view_scroll,
     clamp_result_position,
     clamp_tab_index,
+    clip_text,
+    command_menu_label,
+    completion_context_for_buffer,
     copy_to_system_clipboard,
     curses_function_key,
     decode_key_sequence,
@@ -116,55 +117,68 @@ from plsqlwks.ui import (
     display_width,
     editor_line_segments,
     enable_extended_keyboard_reporting,
-    first_document_error_location,
-    flatten_browser_entries,
-    fit_text,
-    completion_context_for_buffer,
-    file_source_key,
-    execution_error_lines,
     execution_error_diagnostics,
-    find_matching_bracket_positions,
-    format_table,
-    format_tab_label,
+    execution_error_lines,
+    file_source_key,
+    filtered_command_indexes,
     filtered_picker_indexes,
+    find_matching_bracket_positions,
     find_search_matches,
+    first_document_error_location,
+    fit_text,
+    flatten_browser_entries,
+    format_tab_label,
+    format_table,
     generated_insert_sql,
     generated_select_sql,
     generated_sql_table_from_statement,
     generated_update_sql,
     move_buffer_to_error,
+    normalize_clipboard_text,
     normalize_curses_keyname,
     normalize_key,
-    normalize_clipboard_text,
     object_completion_candidates,
     parse_error_locations,
     paste_from_clipboard,
+    resolve_completion_qualifier,
     row_detail_lines,
-    selected_editable_cell,
-    selected_result_cell,
     schema_object_title,
     search_match_index,
     search_status,
+    selected_editable_cell,
+    selected_result_cell,
     statement_table_references,
     syntax_line_segments,
-    table_column_widths,
     tab_display_title,
+    table_column_widths,
     template_source_key,
-    transaction_pending_indicator,
+    tokenize_sql_line,
+    tokenize_sql_lines,
     transaction_mode_name,
+    transaction_pending_indicator,
     transaction_report_status,
     transaction_rows_changed_text,
     transform_sql_code_in_selection,
-    tokenize_sql_lines,
-    tokenize_sql_line,
-    visible_table_columns,
     visible_tab_labels,
+    visible_table_columns,
     wrap_display_text,
-    COMMAND_MENU_ITEMS,
-    CommandMenuItem,
-    command_menu_label,
-    filtered_command_indexes,
 )
+from plsqlwks.ui.menu import (
+    first_tree_menu_row_index,
+    tree_menu_row_label,
+    tree_menu_rows,
+)
+from plsqlwks.ui.state import (
+    BrowserState,
+    DatabaseActivityState,
+    begin_database_operation,
+    finish_database_operation,
+    replace_browser_filter,
+    request_database_operation_cancel,
+    update_database_operation_progress,
+)
+from plsqlwks.ui.viewport import reveal_selection
+from tests.ui_harness import ServiceHarness
 
 
 class FakeTerminalStream:
@@ -216,7 +230,7 @@ class CompletionDb:
         return self.objects
 
     def list_object_columns(self, object_name: str) -> list[str]:
-        normalized = object_name.upper()
+        normalized = normalize_identifier(object_name) or object_name
         self.column_calls.append(normalized)
         return self.columns.get(normalized, [])
 
@@ -229,17 +243,41 @@ def test_ui_facade_reexports_split_module_symbols():
 
     from plsqlwks.ui import (
         app as ui_app,
+    )
+    from plsqlwks.ui import (
         browser as ui_browser,
+    )
+    from plsqlwks.ui import (
         buffer as ui_buffer,
+    )
+    from plsqlwks.ui import (
         clipboard as ui_clipboard,
+    )
+    from plsqlwks.ui import (
         completion as ui_completion,
+    )
+    from plsqlwks.ui import (
         display as ui_display,
+    )
+    from plsqlwks.ui import (
         errors as ui_errors,
+    )
+    from plsqlwks.ui import (
         help as ui_help,
+    )
+    from plsqlwks.ui import (
         keys as ui_keys,
+    )
+    from plsqlwks.ui import (
         results as ui_results,
+    )
+    from plsqlwks.ui import (
         sql as ui_sql,
+    )
+    from plsqlwks.ui import (
         state as ui_state,
+    )
+    from plsqlwks.ui import (
         syntax as ui_syntax,
     )
 
@@ -266,9 +304,7 @@ def test_ui_facade_reexports_split_module_symbols():
 
 def test_ui_facade_export_contract_matches_pre_package_surface():
     expected_exports = set(
-        (Path(__file__).parent / "fixtures" / "ui_exports.txt")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        (Path(__file__).parent / "fixtures" / "ui_exports.txt").read_text(encoding="utf-8").splitlines()
     )
     expected_exports.update(
         {
@@ -330,6 +366,18 @@ def test_ui_package_contains_composed_service_modules():
     for module_name in implementation_modules:
         assert importlib.util.find_spec(f"plsqlwks.ui.{module_name}") is not None
         assert importlib.util.find_spec(f"plsqlwks.ui_{module_name}") is None
+
+    legacy_mixin_modules = (
+        "app_db",
+        "app_editor",
+        "app_files",
+        "app_input",
+        "app_render",
+        "app_results",
+        "app_tabs_browser",
+    )
+    for module_name in legacy_mixin_modules:
+        assert importlib.util.find_spec(f"plsqlwks.ui.{module_name}") is None
 
 
 def test_app_is_plain_composition_root_and_services_own_ui_behavior():
@@ -820,10 +868,7 @@ def test_transaction_mode_persistence_interruption_reports_live_mode_then_propag
     assert app.state.db_operation is None
     assert app.state.status.startswith("Transaction mode: manual")
     assert "live mode changed, preference save was interrupted" in app.state.status
-    assert (
-        type(interruption).__name__ in app.state.status
-        or str(interruption) in app.state.status
-    )
+    assert type(interruption).__name__ in app.state.status or str(interruption) in app.state.status
 
 
 def test_manual_to_autocommit_commits_pending_transaction_before_switch(tmp_path):
@@ -2122,6 +2167,22 @@ def test_completion_context_detects_prefix_and_qualifier():
     assert context.start_col == 17
 
 
+def test_completion_context_parses_quoted_prefix_and_qualifier():
+    line = 'select "Alias"."Na'
+    buffer = Buffer(lines=[line], row=0, col=len(line))
+
+    assert completion_context_for_buffer(buffer, line) == CompletionContext(
+        row=0,
+        start_col=15,
+        end_col=len(line),
+        prefix="Na",
+        qualifier="Alias",
+        statement=line,
+        prefix_quoted=True,
+        qualifier_quoted=True,
+    )
+
+
 def test_apply_completion_recomputes_exact_clean_checkpoint():
     app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
@@ -2153,35 +2214,93 @@ def test_statement_table_references_extract_tables_and_aliases():
     }
 
 
+def test_statement_table_references_preserve_quoted_exact_names():
+    references = statement_table_references('select "d"."Name" from "Mixed Table" "d" join "Foo" "Where" on 1 = 1')
+
+    assert references == {
+        "Mixed Table": "Mixed Table",
+        "d": "Mixed Table",
+        "Foo": "Foo",
+        "Where": "Foo",
+    }
+
+
+def test_statement_table_references_ignore_literals_and_comments():
+    references = statement_table_references(
+        'select a."Name" from "Actual" a where note = \'from "String table" a\' -- from "Comment table" a\n'
+    )
+
+    assert references == {"Actual": "Actual", "A": "Actual"}
+
+
+def test_completion_qualifier_respects_quoted_and_unquoted_aliases():
+    references = statement_table_references('select 1 from "First" "a" join "Second" a on 1 = 1')
+
+    assert references == {
+        "First": "First",
+        "a": "First",
+        "Second": "Second",
+        "A": "Second",
+    }
+    assert (
+        resolve_completion_qualifier(
+            "a",
+            references,
+            {},
+            quoted=False,
+        )
+        == "Second"
+    )
+    assert (
+        resolve_completion_qualifier(
+            "a",
+            references,
+            {},
+            quoted=True,
+        )
+        == "First"
+    )
+
+
 def test_generated_sql_table_from_statement_uses_first_table_reference():
-    assert generated_sql_table_from_statement("select d.name from decisions d join projects p on p.id = d.project_id") == "DECISIONS"
+    assert (
+        generated_sql_table_from_statement("select d.name from decisions d join projects p on p.id = d.project_id")
+        == "DECISIONS"
+    )
     assert generated_sql_table_from_statement("begin null; end;") == ""
 
 
 def test_generated_sql_with_columns_formats_statement_templates():
-    columns = ["id", "first_name"]
+    columns = ["ID", "FIRST_NAME"]
 
-    assert generated_select_sql("employees", columns) == (
-        "select\n"
-        "  ID,\n"
-        "  FIRST_NAME\n"
-        "from EMPLOYEES;\n"
+    assert generated_select_sql("EMPLOYEES", columns) == ("select\n  ID,\n  FIRST_NAME\nfrom EMPLOYEES;\n")
+    assert generated_insert_sql("EMPLOYEES", columns) == (
+        "insert into EMPLOYEES (\n  ID,\n  FIRST_NAME\n) values (\n  :id,\n  :first_name\n);\n"
     )
-    assert generated_insert_sql("employees", columns) == (
-        "insert into EMPLOYEES (\n"
-        "  ID,\n"
-        "  FIRST_NAME\n"
+    assert generated_update_sql("EMPLOYEES", columns) == (
+        "update EMPLOYEES\nset\n  ID = :id,\n  FIRST_NAME = :first_name\nwhere <condition>;\n"
+    )
+
+
+def test_generated_sql_quotes_exact_names_and_deduplicates_bind_names():
+    columns = ["Display Name", "Display-Name", "SELECT"]
+
+    assert generated_insert_sql("Mixed Table", columns) == (
+        'insert into "Mixed Table" (\n'
+        '  "Display Name",\n'
+        '  "Display-Name",\n'
+        '  "SELECT"\n'
         ") values (\n"
-        "  :id,\n"
-        "  :first_name\n"
+        "  :display_name,\n"
+        "  :display_name_2,\n"
+        "  :select\n"
         ");\n"
     )
-    assert generated_update_sql("employees", columns) == (
-        "update EMPLOYEES\n"
-        "set\n"
-        "  ID = :id,\n"
-        "  FIRST_NAME = :first_name\n"
-        "where <condition>;\n"
+
+
+def test_generated_sql_bind_names_stay_unique_after_real_suffixes():
+    assert generated_update_sql("CaseTable", ["FOO", "Foo", "FOO_2"]) == (
+        'update "CaseTable"\nset\n  FOO = :foo,\n  "Foo" = :foo_2,\n  FOO_2 = :foo_2_2\nwhere <condition>;\n'
     )
 
 
@@ -2313,7 +2432,7 @@ def run_prompt_text_box(
     app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.screen = screen or FakeScreen(height=12, width=80)
-    windows: list["FakePickerWindow"] = []
+    windows: list[FakePickerWindow] = []
 
     def fake_newwin(height: int, width: int, top: int, left: int):
         window = FakePickerWindow(height, width, top, left)
@@ -2404,10 +2523,7 @@ def test_prompt_text_box_survives_resize_window_draw_errors(monkeypatch):
 
     def fake_newwin(height: int, width: int, top: int, left: int):
         window: FakePickerWindow
-        if not windows:
-            window = FailingWindow(height, width, top, left)
-        else:
-            window = FakePickerWindow(height, width, top, left)
+        window = FailingWindow(height, width, top, left) if not windows else FakePickerWindow(height, width, top, left)
         windows.append(window)
         return window
 
@@ -2433,12 +2549,7 @@ def test_prompt_text_box_clips_long_value_inside_field(monkeypatch):
     )
 
     assert value == long_value
-    field_calls = [
-        (window, call)
-        for window in windows
-        for call in window.calls
-        if call.attr == curses.A_REVERSE
-    ]
+    field_calls = [(window, call) for window in windows for call in window.calls if call.attr == curses.A_REVERSE]
     assert field_calls
     assert all(display_width(call.text) <= window.width - 4 for window, call in field_calls)
     assert field_calls[-1][1].text.endswith(long_value[-1])
@@ -2605,6 +2716,20 @@ def test_object_completion_excludes_browser_only_object_types():
         "APP_FUNCTION",
         "APP_PACKAGE",
     }
+
+
+def test_quoted_completion_matches_case_insensitively_and_inserts_exact_names():
+    schema_objects = {
+        "TABLE": ["FOO", "Foo", "Mixed Table"],
+        "VIEW": [],
+        "PROCEDURE": [],
+        "FUNCTION": [],
+        "PACKAGE": [],
+    }
+
+    candidates = object_completion_candidates(schema_objects, "fo", quoted=True)
+
+    assert [candidate.insert_text for candidate in candidates] == ['"FOO"', '"Foo"']
 
 
 def test_shift_tab_picker_filter_selects_completion_candidate(monkeypatch):
@@ -2849,12 +2974,7 @@ def test_generate_sql_with_columns_infers_table_and_replaces_selection():
     assert prompts == [("Table or view", "EMPLOYEES", True)]
     assert picks == [("Generate SQL", ["SELECT with columns", "INSERT with columns", "UPDATE with columns"])]
     assert db.column_calls == ["EMPLOYEES"]
-    assert app.state.buffer.text() == (
-        "select\n"
-        "  EMPLOYEE_ID,\n"
-        "  FIRST_NAME\n"
-        "from EMPLOYEES;\n"
-    )
+    assert app.state.buffer.text() == ("select\n  EMPLOYEE_ID,\n  FIRST_NAME\nfrom EMPLOYEES;\n")
     assert app.state.status == "Inserted SELECT with columns for EMPLOYEES"
 
 
@@ -2878,13 +2998,7 @@ def test_generate_sql_with_columns_uses_selected_browser_table_default():
     app.wait_for_db_operation(timeout=1)
 
     assert prompts == [("Table or view", "DECISIONS")]
-    assert app.state.buffer.text() == (
-        "update DECISIONS\n"
-        "set\n"
-        "  ID = :id,\n"
-        "  NAME = :name\n"
-        "where <condition>;\n"
-    )
+    assert app.state.buffer.text() == ("update DECISIONS\nset\n  ID = :id,\n  NAME = :name\nwhere <condition>;\n")
     assert app.state.focus == FOCUS_EDITOR
     assert app.state.status == "Inserted UPDATE with columns for DECISIONS"
 
@@ -2915,12 +3029,7 @@ def test_alt_g_generates_select_columns_for_selected_browser_view():
 
     assert prompts == [("Table or view", "DECISION_VIEW")]
     assert db.column_calls == ["DECISION_VIEW"]
-    assert app.state.buffer.text() == (
-        "select\n"
-        "  ID,\n"
-        "  NAME\n"
-        "from DECISION_VIEW;\n"
-    )
+    assert app.state.buffer.text() == ("select\n  ID,\n  NAME\nfrom DECISION_VIEW;\n")
     assert app.state.focus == FOCUS_EDITOR
     assert app.state.status == "Inserted SELECT with columns for DECISION_VIEW"
 
@@ -3414,6 +3523,54 @@ def test_reconnect_keeps_session_results_while_commit_is_in_progress():
     assert app.state.status == "Connected as hr"
 
 
+def test_reconnect_is_rejected_during_gated_worker_command_then_succeeds_in_order():
+    db = ReconnectDb(pending=False)
+    app, result = make_reconnect_app(db)
+    app._wire()
+    entered = ui.threading.Event()
+    release = ui.threading.Event()
+    completion = []
+
+    def active_command(_db, progress):
+        entered.set()
+        assert release.wait(1)
+        return "finished"
+
+    try:
+        assert app.db_operations.start(
+            "execute",
+            "Executing gated command",
+            active_command,
+            on_success=completion.append,
+        )
+        assert entered.wait(1)
+
+        app.reconnect_database()
+
+        assert app.state.status == "Database operation already running"
+        assert db.calls == []
+        assert db.connection is db.original_connection
+        assert result.continuation == QueryResultContinuation("old-session-cursor")
+        assert app.state.active_result is result
+
+        release.set()
+        app.wait_for_db_operation(timeout=1)
+        assert completion == ["finished"]
+
+        app.reconnect_database()
+        app.wait_for_db_operation(timeout=1)
+
+        assert db.calls == ["close", "connect"]
+        assert db.connection is db.reconnected_connection
+        assert result.continuation is None
+        assert app.state.active_result is None
+        assert app.state.last_result is None
+        assert app.state.status == "Connected as hr"
+    finally:
+        release.set()
+        app.shutdown_database_worker(timeout=1)
+
+
 def test_ctrl_b_toggles_current_line_comment_with_indent():
     app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
@@ -3537,9 +3694,7 @@ def test_copy_selected_result_cell_command_falls_back_to_internal_clipboard(monk
     app.state.result_mode = RESULT_ROW_DETAIL
     app.state.active_result = QueryResult("data", ["VALUE"], [["<NULL>"]], "1 row")
     monkeypatch.setattr(ui, "copy_to_system_clipboard", lambda text: None)
-    command = next(
-        item for item in COMMAND_MENU_ITEMS if item.handler == "copy_selected_result_cell"
-    )
+    command = next(item for item in COMMAND_MENU_ITEMS if item.handler == "copy_selected_result_cell")
     app._wire()
 
     app.dispatcher.execute(command.handler)
@@ -3571,7 +3726,9 @@ def test_ctrl_x_cuts_multiline_utf8_selection_and_undo_restores_it(monkeypatch):
     app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
-    app.state.buffer = Buffer(lines=["select Příliš", "žluťoučký kůň", "from dual"], row=1, col=7, selection_anchor=(0, 7), dirty=False)
+    app.state.buffer = Buffer(
+        lines=["select Příliš", "žluťoučký kůň", "from dual"], row=1, col=7, selection_anchor=(0, 7), dirty=False
+    )
     monkeypatch.setattr(ui, "copy_to_system_clipboard", lambda text: None)
 
     app.handle_key(CTRL_X)
@@ -4310,10 +4467,7 @@ def test_parse_error_locations_from_oracle_errors():
 
 
 def test_parse_error_locations_from_sqlerrm_diagnostic_and_named_backtrace():
-    text = (
-        "Error raised in: SCOTT.PKG_RUN at line 42 - ORA-20000: boom\n"
-        'ORA-06512: at "SCOTT.PKG_RUN", line 17'
-    )
+    text = 'Error raised in: SCOTT.PKG_RUN at line 42 - ORA-20000: boom\nORA-06512: at "SCOTT.PKG_RUN", line 17'
 
     assert parse_error_locations(text) == [ErrorLocation(42, 1), ErrorLocation(17, 1)]
     diagnostics = ui.parse_plsql_diagnostics(text)
@@ -4333,10 +4487,7 @@ def test_first_document_error_location_uses_ora_06512_fallback():
 
 
 def test_first_document_error_location_ignores_named_external_units():
-    exc = RuntimeError(
-        'ORA-06512: at "SCOTT.PKG_RUN", line 17\n'
-        "ORA-06512: at line 3"
-    )
+    exc = RuntimeError('ORA-06512: at "SCOTT.PKG_RUN", line 17\nORA-06512: at line 3')
 
     assert first_document_error_location(exc, statement_start_line=8) == ErrorLocation(10, 1)
     assert (
@@ -4395,9 +4546,7 @@ def test_first_document_error_location_maps_multiline_oracle_sql_offset():
 
 def test_first_document_error_location_prefers_line_column_over_oracle_sql_offset():
     exc = OracleExecutionError(
-        FakeOracleOffsetError(
-            FakeOracleOffsetInfo(1, "ORA-06550: line 2, column 3:\nPLS-00103: bad")
-        ),
+        FakeOracleOffsetError(FakeOracleOffsetInfo(1, "ORA-06550: line 2, column 3:\nPLS-00103: bad")),
         "Block",
         statement="begin\n  bad;\nend;",
     )
@@ -4540,20 +4689,13 @@ def test_execution_diagnostic_commands_cycle_local_locations_and_success_clears_
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["one", "two", "three", "four"], row=0, col=0)
 
-    app.handle_execution_error(
-        RuntimeError(
-            "ORA-06550: line 2, column 3: first\n"
-            "ORA-06550: line 4, column 2: second"
-        )
-    )
+    app.handle_execution_error(RuntimeError("ORA-06550: line 2, column 3: first\nORA-06550: line 4, column 2: second"))
 
     assert [(item.line, item.column) for item in app.state.active_tab.execution_diagnostics] == [
         (2, 3),
         (4, 2),
     ]
-    assert [
-        item.message for item in app.state.active_tab.execution_diagnostics
-    ] == ["first", "second"]
+    assert [item.message for item in app.state.active_tab.execution_diagnostics] == ["first", "second"]
     assert (app.state.buffer.row, app.state.buffer.col) == (1, 2)
 
     app.next_execution_diagnostic()
@@ -4584,13 +4726,12 @@ def test_structured_compile_error_navigation_preserves_each_message():
         ],
     )
 
-    app.handle_execution_error(
-        OracleExecutionError(compilation_error, "Compile", statement="create procedure")
-    )
+    app.handle_execution_error(OracleExecutionError(compilation_error, "Compile", statement="create procedure"))
 
-    assert [
-        item.message for item in app.state.active_tab.execution_diagnostics
-    ] == ["Error: first compile error", "Error: second compile error"]
+    assert [item.message for item in app.state.active_tab.execution_diagnostics] == [
+        "Error: first compile error",
+        "Error: second compile error",
+    ]
     app.next_execution_diagnostic()
     assert app.state.status.endswith(": Error: second compile error")
 
@@ -4609,13 +4750,9 @@ def test_same_location_compile_error_message_beats_warning_message():
         ],
     )
 
-    app.handle_execution_error(
-        OracleExecutionError(compilation_error, "Compile", statement="create procedure")
-    )
+    app.handle_execution_error(OracleExecutionError(compilation_error, "Compile", statement="create procedure"))
 
-    assert [
-        item.message for item in app.state.active_tab.execution_diagnostics
-    ] == ["Error: fatal compile error"]
+    assert [item.message for item in app.state.active_tab.execution_diagnostics] == ["Error: fatal compile error"]
 
 
 def test_successful_compile_diagnostics_are_rendered_and_navigable():
@@ -4637,9 +4774,7 @@ def test_successful_compile_diagnostics_are_rendered_and_navigable():
     app.finish_execution([result], source_text=source_text)
 
     assert any("Warning at line 2, column 4" in line for line in app.state.results)
-    assert [(item.line, item.column) for item in app.state.active_tab.execution_diagnostics] == [
-        (6, 4)
-    ]
+    assert [(item.line, item.column) for item in app.state.active_tab.execution_diagnostics] == [(6, 4)]
     app.next_execution_diagnostic()
     assert (app.state.buffer.row, app.state.buffer.col) == (5, 3)
 
@@ -4652,9 +4787,7 @@ def test_selected_compile_warning_keeps_same_line_statement_column_origin():
             title: str = "Statement",
         ) -> QueryResult:
             result = QueryResult(title, [], [], "compiled with warnings")
-            result.diagnostics = [
-                PlsqlCompileDiagnostic(1, 3, "PLW-06002: warning", "WARNING")
-            ]
+            result.diagnostics = [PlsqlCompileDiagnostic(1, 3, "PLW-06002: warning", "WARNING")]
             return result
 
     app = ServiceHarness()
@@ -4670,10 +4803,9 @@ def test_selected_compile_warning_keeps_same_line_statement_column_origin():
     )
     app.wait_for_db_operation(timeout=1)
 
-    assert [
-        (diagnostic.line, diagnostic.column)
-        for diagnostic in app.state.active_tab.execution_diagnostics
-    ] == [(1, 9)]
+    assert [(diagnostic.line, diagnostic.column) for diagnostic in app.state.active_tab.execution_diagnostics] == [
+        (1, 9)
+    ]
 
 
 def test_run_script_executes_selected_sql_only_with_document_line_titles():
@@ -4988,11 +5120,7 @@ def test_transform_sql_code_in_selection_carries_multiline_string_state():
     lines = ["BEGIN", "  V_TEXT := q'[HELLO", "WORLD]';", "  X := 'BYE';", "END;"]
 
     assert transform_sql_code_in_selection(lines, ((0, 0), (4, len(lines[4]))), str.lower) == (
-        "begin\n"
-        "  v_text := q'[HELLO\n"
-        "WORLD]';\n"
-        "  x := 'BYE';\n"
-        "end;"
+        "begin\n  v_text := q'[HELLO\nWORLD]';\n  x := 'BYE';\nend;"
     )
 
 
@@ -5116,7 +5244,8 @@ def test_browser_row_clamping_and_labels():
 
 
 def test_schema_object_title_and_browser_panel_width():
-    assert schema_object_title("hr", "table", "decisions") == "schema://HR/TABLE/DECISIONS.sql"
+    assert schema_object_title("hr", "table", "DECISIONS") == "schema://HR/TABLE/DECISIONS.sql"
+    assert schema_object_title("hr", "table", "Mixed/Table") == ("schema://HR/TABLE/Mixed%2FTable.sql")
     assert browser_panel_width(120) == 30
     assert browser_panel_width(200) == 38
 
@@ -5196,6 +5325,70 @@ def test_ui_state_active_tab_properties_are_isolated():
     assert (state.result_row, state.result_col) == (4, 5)
     assert (state.result_row_scroll, state.result_col_scroll, state.result_page_size) == (2, 3, 7)
     assert state.active_tab.search_query == "first"
+
+
+def test_ui_state_legacy_properties_round_trip_through_nested_slices():
+    state = UIState(config=make_config(), db=object())
+    result = QueryResult("data", ["A"], [["1"]], "1 row")
+
+    state.status = "Busy"
+    state.browser_filter = "emp"
+    state.active_result = result
+
+    assert state.application.status == "Busy"
+    assert state.browser.filter_text == "emp"
+    assert state.active_tab.result_state.active_result is result
+
+    state.application.status = "Ready"
+    state.browser.filter_text = ""
+    state.active_tab.result_state.lines = ["done"]
+
+    assert state.status == "Ready"
+    assert state.browser_filter == ""
+    assert state.results == ["done"]
+
+
+def test_browser_and_viewport_transitions_are_terminal_independent():
+    browser = BrowserState(filter_text="old", row=8, scroll=5)
+
+    filtered = replace_browser_filter(browser, "emp", selected_row=2)
+
+    assert browser == BrowserState(filter_text="old", row=8, scroll=5)
+    assert (filtered.filter_text, filtered.row, filtered.scroll) == ("emp", 2, 0)
+    assert reveal_selection(8, 0, 3, 10) == (8, 6)
+    assert reveal_selection(4, 9, 3, 0) == (0, 0)
+
+
+def test_database_activity_transitions_return_replacement_state():
+    handle = ui.DbCommandHandle(
+        command_id=1,
+        events=ui.queue.Queue(),
+        done=ui.threading.Event(),
+    )
+    operation = ui.DbOperation(
+        kind="execute",
+        label="Running",
+        started_at=1.0,
+        handle=handle,
+        tab=FileTab(),
+    )
+    activity = DatabaseActivityState(session=object())
+
+    started = begin_database_operation(activity, operation)
+    progressed = update_database_operation_progress(operation, "Executing 2/3", 2, 3)
+    cancelled = request_database_operation_cancel(progressed, progressed.label)
+    finished = finish_database_operation(started)
+
+    assert activity.operation is None
+    assert started.operation is operation
+    assert (progressed.label, progressed.progress_current, progressed.progress_total) == (
+        "Executing 2/3",
+        2,
+        3,
+    )
+    assert cancelled.cancel_requested is True
+    assert operation.cancel_requested is False
+    assert finished.operation is None
 
 
 def test_tab_source_keys_are_stable_for_files_and_templates(tmp_path):
@@ -5461,7 +5654,7 @@ class FailingScriptDb:
     def execute_statement(self, statement: str, title: str = "Statement") -> QueryResult:
         self.titles.append(title)
         if title.startswith(("Statement 2", "Selection 2")):
-            raise RuntimeError("ORA-06550: line 2, column 3:\nPLS-00103: Encountered the symbol \"BAD\"")
+            raise RuntimeError('ORA-06550: line 2, column 3:\nPLS-00103: Encountered the symbol "BAD"')
         return QueryResult(title, [], [], "1 row")
 
 

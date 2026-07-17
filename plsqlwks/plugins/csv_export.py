@@ -1,28 +1,35 @@
-"""Built-in command plugin for exporting the currently loaded result rows.
+"""Built-in command plugin and writer for CSV result export.
 
-The implementation depends only on Plugin API v1 and the neutral CSV writer.
-It never requests more result pages or interacts with a database, transaction,
-mutable result, application state, or curses object.
+The standalone handler depends only on Plugin API v1 and exports its immutable
+loaded-row snapshot.  The application may inject its private coordinator to
+select and fetch additional rows before invoking the same neutral writer; that
+integration does not expand the public plugin contract.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..exporting import write_csv
 from ._result_export import (
+    BuiltinExportHandler,
     default_result_filename,
     format_export_rows,
-    local_now as _local_now,
+    mark_private_host_export_handler,
     prepare_result_export,
-    resolve_export_path as _resolve_export_path,
     short_error,
     success_message,
 )
-from .api import Plugin, PluginCommand, PluginContext
-
+from ._result_export import (
+    local_now as _local_now,
+)
+from ._result_export import (
+    resolve_export_path as _resolve_export_path,
+)
+from .api import Plugin, PluginCommand, PluginContext, ResultSnapshot
 
 _NULL_DISPLAY_VALUE = ""
 
@@ -47,6 +54,9 @@ class CsvExportOptions:
     protect_formulas: bool = False
 
 
+_DEFAULT_CSV_EXPORT_OPTIONS = CsvExportOptions()
+
+
 def local_now() -> datetime:
     """Return the current local time used for the proposed export name."""
     return _local_now()
@@ -64,7 +74,7 @@ def resolve_export_path(value: str, results_dir: Path) -> Path:
 
 def export_loaded_rows(
     context: PluginContext,
-    options: CsvExportOptions = CsvExportOptions(),
+    options: CsvExportOptions = _DEFAULT_CSV_EXPORT_OPTIONS,
 ) -> None:
     """Prompt for and atomically export one immutable loaded-result snapshot.
 
@@ -82,17 +92,7 @@ def export_loaded_rows(
         if prepared is None:
             return
         snapshot, path = prepared
-        write_csv(
-            path,
-            snapshot.columns,
-            format_export_rows(
-                snapshot.rows,
-                null_value=options.null_value,
-                date_format=options.date_format,
-            ),
-            delimiter=options.separator,
-            protect_formulas=options.protect_formulas,
-        )
+        write_csv_snapshot(path, snapshot, options)
     except Exception as error:
         context.set_status(f"CSV export failed: {short_error(error)}")
         context.report_error("CSV export", error)
@@ -101,7 +101,36 @@ def export_loaded_rows(
     context.set_status(success_message(snapshot, path))
 
 
-def create_plugin(options: CsvExportOptions | None = None) -> Plugin:
+def write_csv_snapshot(
+    path: Path,
+    snapshot: ResultSnapshot,
+    options: CsvExportOptions,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    rows = format_export_rows(
+        snapshot.rows,
+        null_value=options.null_value,
+        date_format=options.date_format,
+        cancelled=cancelled,
+    )
+    write_csv(
+        path,
+        snapshot.columns,
+        rows,
+        delimiter=options.separator,
+        protect_formulas=options.protect_formulas,
+        on_progress=on_progress,
+        cancelled=cancelled,
+    )
+
+
+def create_plugin(
+    options: CsvExportOptions | None = None,
+    *,
+    host_export: BuiltinExportHandler | None = None,
+) -> Plugin:
     """Return plugin metadata, optionally capturing configured CSV choices.
 
     With no argument this remains the zero-argument factory required for
@@ -111,7 +140,13 @@ def create_plugin(options: CsvExportOptions | None = None) -> Plugin:
     selected_options = options if options is not None else CsvExportOptions()
 
     def configured_export(context: PluginContext) -> None:
-        export_loaded_rows(context, selected_options)
+        if host_export is None:
+            export_loaded_rows(context, selected_options)
+        else:
+            host_export("csv", context, selected_options)
+
+    if host_export is not None:
+        mark_private_host_export_handler(configured_export)
 
     return Plugin(
         id="csv-export",
@@ -120,7 +155,7 @@ def create_plugin(options: CsvExportOptions | None = None) -> Plugin:
             PluginCommand(
                 id="export-loaded-rows",
                 section="Results",
-                title="Export loaded rows to CSV",
+                title="Export result to CSV",
                 handler=configured_export,
                 keywords="export csv save result loaded rows",
             ),

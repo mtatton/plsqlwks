@@ -53,8 +53,22 @@ class ApplicationController:
         self.documents = documents
         self.database = database
         self.results = results
-        self.running = True
-        self.quit_pending = False
+
+    @property
+    def running(self) -> bool:
+        return self.state.application.running
+
+    @running.setter
+    def running(self, value: bool) -> None:
+        self.state.application.running = value
+
+    @property
+    def quit_pending(self) -> bool:
+        return self.state.application.quit_pending
+
+    @quit_pending.setter
+    def quit_pending(self, value: bool) -> None:
+        self.state.application.quit_pending = value
 
     def request_quit(self) -> None:
         if not self.documents.confirm_quit():

@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .buffer import is_word_char
-from .constants import *
-from .display import display_width
+from .constants import (
+    BRACKET_CHARS,
+    BRACKET_PAIRS,
+    CLOSING_BRACKETS,
+    PLSQL_ATTRIBUTES,
+    SQL_KEYWORDS,
+    SYNTAX_BIND,
+    SYNTAX_COMMENT,
+    SYNTAX_DEFAULT,
+    SYNTAX_KEYWORD,
+    SYNTAX_NUMBER,
+    SYNTAX_OPERATOR,
+    SYNTAX_STRING,
+)
+
 
 @dataclass(frozen=True)
 class SyntaxToken:
@@ -25,7 +38,9 @@ class SyntaxSegment:
     kind: str
     selected: bool = False
 
+
 SQL_CODE_TRANSFORM_PRESERVED_KINDS = {SYNTAX_COMMENT, SYNTAX_STRING}
+
 
 def tokenize_sql_lines(lines: list[str]) -> list[list[SyntaxToken]]:
     state = SyntaxScanState()
@@ -54,9 +69,7 @@ def transform_sql_code_in_selection(
         if bounds is None:
             continue
         start, end = bounds
-        transformed_lines.append(
-            transform_sql_code_slice(lines[row], token_lines[row], start, end, transform)
-        )
+        transformed_lines.append(transform_sql_code_slice(lines[row], token_lines[row], start, end, transform))
     return "\n".join(transformed_lines)
 
 

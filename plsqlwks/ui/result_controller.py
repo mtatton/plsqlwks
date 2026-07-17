@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import curses
-from typing import Any, Callable, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from ..db import (
-    CellUpdateResult,
     NULL_DISPLAY_TOKEN,
+    CellUpdateResult,
     ResultColumnMetadata,
     RowInsertResult,
-    oracledb,
 )
+from ..db.editing import is_date_or_timestamp_column
 from .clipboard import copy_to_system_clipboard
 from .constants import (
     CTRL_C,
@@ -18,9 +18,19 @@ from .constants import (
     FOCUS_RESULTS,
     KEY_CTRL_END,
     KEY_CTRL_HOME,
+    KEY_DOWN,
+    KEY_END,
+    KEY_HOME,
+    KEY_INSERT,
+    KEY_LEFT,
+    KEY_PAGE_DOWN,
+    KEY_PAGE_UP,
+    KEY_RIGHT,
+    KEY_UP,
     RESULT_GRID,
     RESULT_ROW_DETAIL,
     TAB,
+    curses_function_key,
 )
 from .errors import wrap_error
 from .ports import DbOperationsPort, DialogPort
@@ -44,7 +54,6 @@ from .results import (
 )
 from .state import ResultFetchMore, UIState
 
-
 CopyToClipboard = Callable[[str], str | None]
 DATE_EDIT_CHOICES = ("Enter ISO date/time", "SYSDATE")
 
@@ -56,7 +65,12 @@ class ResultDialogPort(DialogPort, Protocol):
 class ResultPresenterPort(Protocol):
     def apply_fetch_more_result(self, fetched: ResultFetchMore) -> None: ...
 
-    def handle_fetch_more_error(self, exc: Exception) -> None: ...
+    def handle_fetch_more_error(
+        self,
+        exc: Exception,
+        *,
+        interrupted: bool = False,
+    ) -> None: ...
 
 
 class ResultController:
@@ -109,9 +123,7 @@ class ResultController:
             self.state.status = insert_draft_active_status()
             return
         self.state.show_dbms_output = False
-        self.state.result_mode = (
-            RESULT_ROW_DETAIL if self.state.result_mode == RESULT_GRID else RESULT_GRID
-        )
+        self.state.result_mode = RESULT_ROW_DETAIL if self.state.result_mode == RESULT_GRID else RESULT_GRID
         self.clamp_result_selection()
         self.update_result_status()
 
@@ -148,37 +160,37 @@ class ResultController:
             return
         page = max(1, self.state.result_page_size)
         draft = self.active_insert_draft()
-        if key == curses.KEY_IC:
+        if key == KEY_INSERT:
             self.start_insert_draft_row()
             return
         if draft is not None and key in (
-            curses.KEY_UP,
-            curses.KEY_DOWN,
-            curses.KEY_PPAGE,
-            curses.KEY_NPAGE,
+            KEY_UP,
+            KEY_DOWN,
+            KEY_PAGE_UP,
+            KEY_PAGE_DOWN,
             KEY_CTRL_HOME,
             KEY_CTRL_END,
         ):
             self.state.result_row = draft.row_index
             self.state.status = insert_draft_active_status()
             return
-        if key == curses.KEY_UP:
+        if key == KEY_UP:
             self.move_result_selection(delta_row=-1)
-        elif key == curses.KEY_DOWN:
+        elif key == KEY_DOWN:
             self.move_result_selection(delta_row=1)
-        elif key == curses.KEY_LEFT:
+        elif key == KEY_LEFT:
             self.move_result_selection(delta_col=-1)
-        elif key == curses.KEY_RIGHT:
+        elif key == KEY_RIGHT:
             self.move_result_selection(delta_col=1)
-        elif key == curses.KEY_PPAGE:
+        elif key == KEY_PAGE_UP:
             self.move_result_selection(delta_row=-page)
-        elif key == curses.KEY_NPAGE:
+        elif key == KEY_PAGE_DOWN:
             if self.fetch_next_result_page_if_needed(page):
                 return
             self.move_result_selection(delta_row=page)
-        elif key == curses.KEY_HOME:
+        elif key == KEY_HOME:
             self.move_result_selection(to_col=0)
-        elif key == curses.KEY_END:
+        elif key == KEY_END:
             result = self.state.active_result
             self.move_result_selection(to_col=max(0, len(result.columns) - 1))
         elif key == KEY_CTRL_HOME:
@@ -186,10 +198,10 @@ class ResultController:
         elif key == KEY_CTRL_END:
             result = self.state.active_result
             self.move_result_selection(to_row=max(0, len(result.rows) - 1))
-        elif key == curses.KEY_F8:
+        elif key == curses_function_key(8):
             self.toggle_result_mode()
             return
-        elif key == curses.KEY_F10:
+        elif key == curses_function_key(10):
             self.view_selected_result_cell()
             return
         elif key in (10, 13):
@@ -231,9 +243,7 @@ class ResultController:
             self.state.status = "No table result is available"
             return
         if not is_database_connected(self.state.db):
-            self.state.status = (
-                "Row inserts are unavailable while disconnected; reconnect first"
-            )
+            self.state.status = "Row inserts are unavailable while disconnected; reconnect first"
             return
         if self.state.result_mode != RESULT_GRID:
             self.state.status = "Insert row is only available in result grid"
@@ -269,18 +279,14 @@ class ResultController:
             self.state.status = "No insert draft is active"
             return
         if not is_database_connected(self.state.db):
-            self.state.status = (
-                "Insert draft editing is unavailable while disconnected; reconnect first"
-            )
+            self.state.status = "Insert draft editing is unavailable while disconnected; reconnect first"
             return
         column_name = result.editable_context.editable_columns.get(self.state.result_col)
         if column_name is None:
             self.state.status = "ROWID column is read-only"
             return
         current_value = (
-            draft.row[self.state.result_col]
-            if self.state.result_col < len(draft.row)
-            else NULL_DISPLAY_TOKEN
+            draft.row[self.state.result_col] if self.state.result_col < len(draft.row) else NULL_DISPLAY_TOKEN
         )
         metadata = result.editable_context.column_metadata.get(self.state.result_col)
         new_value = self.prompt_cell_edit_value(
@@ -304,10 +310,7 @@ class ResultController:
         return True
 
     def remove_insert_draft(self, draft: ResultInsertDraft) -> None:
-        if (
-            0 <= draft.row_index < len(draft.result.rows)
-            and draft.result.rows[draft.row_index] is draft.row
-        ):
+        if 0 <= draft.row_index < len(draft.result.rows) and draft.result.rows[draft.row_index] is draft.row:
             draft.result.rows.pop(draft.row_index)
             if draft.row_index < len(draft.result.original_rows):
                 draft.result.original_rows.pop(draft.row_index)
@@ -329,19 +332,13 @@ class ResultController:
         if self.db_operations.reject_if_active():
             return True
         if not is_database_connected(self.state.db):
-            self.state.status = (
-                "Row inserts are unavailable while disconnected; reconnect first"
-            )
+            self.state.status = "Row inserts are unavailable while disconnected; reconnect first"
             return True
         if is_read_only_enabled(self.state.db):
             self.state.status = "Row inserts are disabled in read-only mode"
             return True
         values = {
-            column_index: (
-                draft.row[column_index]
-                if column_index < len(draft.row)
-                else NULL_DISPLAY_TOKEN
-            )
+            column_index: (draft.row[column_index] if column_index < len(draft.row) else NULL_DISPLAY_TOKEN)
             for column_index in result.editable_context.editable_columns
         }
         context = result.editable_context
@@ -378,11 +375,7 @@ class ResultController:
 
     def fetch_next_result_page_if_needed(self, page: int) -> bool:
         result = self.state.active_result
-        if (
-            result is None
-            or self.state.result_mode != RESULT_GRID
-            or self.state.result_row + page < len(result.rows)
-        ):
+        if result is None or self.state.result_mode != RESULT_GRID or self.state.result_row + page < len(result.rows):
             return False
         connected = is_database_connected(self.state.db)
         paging = more_rows_status(result, connected)
@@ -421,17 +414,17 @@ class ResultController:
             return
         page = max(1, self.state.explain_page_size)
         total = len(explain_plan_lines(result))
-        if key == curses.KEY_UP:
+        if key == KEY_UP:
             self.state.explain_scroll -= 1
-        elif key == curses.KEY_DOWN:
+        elif key == KEY_DOWN:
             self.state.explain_scroll += 1
-        elif key == curses.KEY_PPAGE:
+        elif key == KEY_PAGE_UP:
             self.state.explain_scroll -= page
-        elif key == curses.KEY_NPAGE:
+        elif key == KEY_PAGE_DOWN:
             self.state.explain_scroll += page
-        elif key == curses.KEY_HOME:
+        elif key == KEY_HOME:
             self.state.explain_scroll = 0
-        elif key == curses.KEY_END:
+        elif key == KEY_END:
             self.state.explain_scroll = total
         else:
             return
@@ -513,8 +506,7 @@ class ResultController:
         mode = "row detail" if self.state.result_mode == RESULT_ROW_DETAIL else "grid"
         if self.active_insert_draft() is not None:
             self.state.status = (
-                f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | "
-                f"{insert_draft_active_status()}"
+                f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | {insert_draft_active_status()}"
             )
             return
         edit = ""
@@ -523,8 +515,7 @@ class ResultController:
         elif result.editable_context is not None and not is_read_only_enabled(self.state.db):
             edit = " | Enter edits cell | INS inserts row"
         status = (
-            f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | "
-            f"F10 views cell{edit} | Ctrl-C copies cell"
+            f"Results {mode}: row {row}/{row_total}, col {col}/{col_total} | F10 views cell{edit} | Ctrl-C copies cell"
         )
         paging = more_rows_status(result, is_database_connected(self.state.db))
         self.state.status = f"{status} | {paging}" if paging else status
@@ -548,9 +539,7 @@ class ResultController:
             self.state.status = "No table result is available"
             return
         if not is_database_connected(self.state.db):
-            self.state.status = (
-                "Cell updates are unavailable while disconnected; reconnect first"
-            )
+            self.state.status = "Cell updates are unavailable while disconnected; reconnect first"
             return
         if is_read_only_enabled(self.state.db):
             self.state.status = "Cell updates are disabled in read-only mode"
@@ -615,10 +604,7 @@ class ResultController:
         default_value: str,
         metadata: ResultColumnMetadata | None,
     ) -> str | None:
-        if metadata is not None and metadata.type_code in {
-            oracledb.DB_TYPE_DATE,
-            oracledb.DB_TYPE_TIMESTAMP,
-        }:
+        if is_date_or_timestamp_column(metadata):
             choice = self.dialogs.pick(label, list(DATE_EDIT_CHOICES))
             if choice is None:
                 return None

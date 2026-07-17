@@ -3,13 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from ..db import SCHEMA_OBJECT_TYPES
-from .constants import *
+from .constants import BROWSER_GROUP_LABELS
 from .display import clip_text, display_width
 
 if TYPE_CHECKING:
     from .state import FileTab
+
 
 @dataclass(frozen=True)
 class BrowserEntry:
@@ -17,6 +19,7 @@ class BrowserEntry:
     label: str
     object_type: str
     object_name: str = ""
+
 
 def browser_panel_width(total_width: int) -> int:
     if total_width <= 40:
@@ -41,8 +44,7 @@ def flatten_browser_entries(
         entries.append(BrowserEntry(kind="group", label=f"{label} ({len(names)})", object_type=object_type))
         if query or object_type in expanded:
             entries.extend(
-                BrowserEntry(kind="object", label=name, object_type=object_type, object_name=name)
-                for name in names
+                BrowserEntry(kind="object", label=name, object_type=object_type, object_name=name) for name in names
             )
     return entries
 
@@ -117,4 +119,5 @@ def visible_tab_labels(tabs: list[FileTab], scroll: int, width: int) -> list[tup
 
 
 def schema_object_title(user: str, object_type: str, object_name: str) -> str:
-    return f"schema://{user.upper()}/{object_type.upper()}/{object_name.upper()}.sql"
+    encoded_name = quote(object_name, safe="")
+    return f"schema://{user.upper()}/{object_type.upper()}/{encoded_name}.sql"

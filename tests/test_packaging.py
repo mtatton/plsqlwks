@@ -12,10 +12,15 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from plsqlwks import __version__ as PACKAGE_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 GITLAB_REPOSITORY_URL = "https://gitlab.com/unununu/plsqlwks"
 GITLAB_PREVIEW_URL = f"{GITLAB_REPOSITORY_URL}/-/raw/main/img/preview.png"
+GITLAB_ARCHITECTURE_URL = f"{GITLAB_REPOSITORY_URL}/-/blob/main/ARCHITECTURE.md"
+GITLAB_CHANGELOG_URL = f"{GITLAB_REPOSITORY_URL}/-/blob/main/CHANGELOG.md"
+GITLAB_QUICKSTART_URL = f"{GITLAB_REPOSITORY_URL}/-/blob/main/QUICKSTART.md"
+GITLAB_COMPATIBILITY_URL = f"{GITLAB_REPOSITORY_URL}/-/blob/main/COMPATIBILITY.md"
 AUTHORIZED_PUBLIC_AUTHOR = "unu2000"
 AUTHORIZED_KOFI_URL = "https://ko-fi.com/unu2000"
 RUNTIME_PACKAGE_FILES = {
@@ -38,6 +43,7 @@ RUNTIME_PACKAGE_FILES = {
     "plsqlwks/db/execution.py",
     "plsqlwks/db/explain.py",
     "plsqlwks/db/health.py",
+    "plsqlwks/db/identifiers.py",
     "plsqlwks/db/metadata.py",
     "plsqlwks/db/models.py",
     "plsqlwks/db/session.py",
@@ -79,6 +85,7 @@ RUNTIME_PACKAGE_FILES = {
     "plsqlwks/ui/query_controller.py",
     "plsqlwks/ui/renderer.py",
     "plsqlwks/ui/result_controller.py",
+    "plsqlwks/ui/result_export.py",
     "plsqlwks/ui/result_presenter.py",
     "plsqlwks/ui/results.py",
     "plsqlwks/ui/sql.py",
@@ -87,7 +94,10 @@ RUNTIME_PACKAGE_FILES = {
     "plsqlwks/ui/viewport.py",
 }
 SDIST_ONLY_FILES = {
+    "ARCHITECTURE.md",
+    "COMPATIBILITY.md",
     "PLUGINS.md",
+    "QUICKSTART.html",
     "QUICKSTART.md",
     "plugin-requirements/csv-export/requirements.txt",
     "plugin-requirements/html-export/requirements.txt",
@@ -99,12 +109,16 @@ SDIST_ONLY_FILES = {
     "tests/fixtures/config_exports.txt",
     "tests/fixtures/ui_exports.txt",
 }
-SDIST_PROJECT_FILES = RUNTIME_PACKAGE_FILES | SDIST_ONLY_FILES | {
-    "MANIFEST.in",
-    "README.md",
-    "license.txt",
-    "pyproject.toml",
-}
+SDIST_PROJECT_FILES = (
+    RUNTIME_PACKAGE_FILES
+    | SDIST_ONLY_FILES
+    | {
+        "MANIFEST.in",
+        "README.md",
+        "license.txt",
+        "pyproject.toml",
+    }
+)
 SDIST_GENERATED_FILES = {
     "PKG-INFO",
     "setup.cfg",
@@ -184,9 +198,7 @@ def assert_no_private_text(
 def assert_only_authorized_public_author_metadata(metadata: str) -> None:
     lines = metadata.splitlines()
     headers = tuple(line.casefold() for line in lines)
-    assert [line for line in lines if line.casefold().startswith("author:")] == [
-        f"Author: {AUTHORIZED_PUBLIC_AUTHOR}"
-    ]
+    assert [line for line in lines if line.casefold().startswith("author:")] == [f"Author: {AUTHORIZED_PUBLIC_AUTHOR}"]
     assert f"Project-URL: Ko-fi, {AUTHORIZED_KOFI_URL}" in lines
     for prefix in PERSONAL_METADATA_HEADERS:
         assert not any(line.startswith(prefix) for line in headers), prefix
@@ -246,10 +258,7 @@ def built_distributions(tmp_path_factory):
         [
             sys.executable,
             "-c",
-            (
-                "from setuptools.build_meta import build_sdist; "
-                f"build_sdist({str(dist_dir)!r})"
-            ),
+            (f"from setuptools.build_meta import build_sdist; build_sdist({str(dist_dir)!r})"),
         ],
         cwd=source_tree,
         check=True,
@@ -269,10 +278,7 @@ def built_distributions(tmp_path_factory):
         [
             sys.executable,
             "-c",
-            (
-                "from setuptools.build_meta import build_wheel; "
-                f"build_wheel({str(dist_dir)!r})"
-            ),
+            (f"from setuptools.build_meta import build_wheel; build_wheel({str(dist_dir)!r})"),
         ],
         cwd=sdist_source_tree,
         check=True,
@@ -300,9 +306,7 @@ def test_pyproject_declares_runtime_package_and_console_script():
     }
     xlsx_manifest_requirements = {
         line.strip()
-        for line in (ROOT / "plugin-requirements/xlsx-export/requirements.txt")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        for line in (ROOT / "plugin-requirements/xlsx-export/requirements.txt").read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
 
@@ -312,36 +316,56 @@ def test_pyproject_declares_runtime_package_and_console_script():
     runtime_block = pyproject.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert [line.strip().strip('",') for line in runtime_block.splitlines() if line.strip()] == ["oracledb>=2.0"]
     xlsx_block = pyproject.split("xlsx = [", 1)[1].split("]", 1)[0]
-    xlsx_requirements = {
-        line.strip().strip('",')
-        for line in xlsx_block.splitlines()
-        if line.strip()
-    }
+    xlsx_requirements = {line.strip().strip('",') for line in xlsx_block.splitlines() if line.strip()}
     assert xlsx_requirements == xlsx_manifest_requirements == {"openpyxl>=3.1"}
     assert 'requires = ["setuptools>=77", "wheel"]' in pyproject
     assert 'license = "LicenseRef-plsqlwks-Donationware"' in pyproject
     assert 'license-files = ["license.txt"]' in pyproject
     assert f'Repository = "{GITLAB_REPOSITORY_URL}"' in pyproject
     assert f'Issues = "{GITLAB_REPOSITORY_URL}/-/issues"' in pyproject
-    assert f'Changelog = "{GITLAB_REPOSITORY_URL}/-/blob/main/CHANGELOG.md"' in pyproject
+    assert f'Changelog = "{GITLAB_CHANGELOG_URL}"' in pyproject
+    assert f'Architecture = "{GITLAB_ARCHITECTURE_URL}"' in pyproject
+    assert f'Quickstart = "{GITLAB_QUICKSTART_URL}"' in pyproject
+    assert f'Compatibility = "{GITLAB_COMPATIBILITY_URL}"' in pyproject
     assert f'Ko-fi = "{AUTHORIZED_KOFI_URL}"' in pyproject
     assert requirements == {"oracledb>=2.0"}
     for requirement in ("build>=1.2", "mypy>=1.10", "pytest>=8.0", "ruff>=0.8", "wheel>=0.43"):
         assert f'"{requirement}"' in pyproject
     setuptools_block = pyproject.split("[tool.setuptools]", 1)[1].split("[tool.setuptools.dynamic]", 1)[0]
     package_block = setuptools_block.split("packages = [", 1)[1].split("]", 1)[0]
-    assert {
-        line.strip().strip('",')
-        for line in package_block.splitlines()
-        if line.strip()
-    } == {"plsqlwks", "plsqlwks.config", "plsqlwks.db", "plsqlwks.plugins", "plsqlwks.ui"}
+    assert {line.strip().strip('",') for line in package_block.splitlines() if line.strip()} == {
+        "plsqlwks",
+        "plsqlwks.config",
+        "plsqlwks.db",
+        "plsqlwks.plugins",
+        "plsqlwks.ui",
+    }
     assert "py-modules = []" in setuptools_block
     assert "[tool.setuptools.packages.find]" not in pyproject
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert GITLAB_PREVIEW_URL in readme
+    assert GITLAB_QUICKSTART_URL in readme
     assert f"[unu2000 on Ko-fi]({AUTHORIZED_KOFI_URL})" in readme
     assert "raw.githubusercontent.com" not in readme
+
+
+def test_manifest_and_artifact_allowlist_cover_every_runtime_python_module():
+    package_python_files = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "plsqlwks").rglob("*.py")
+    }
+    manifest_runtime_files = {
+        line.removeprefix("include ")
+        for line in (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+        if line.startswith("include plsqlwks/") and line.endswith(".py")
+    }
+    allowlisted_runtime_python = {
+        path for path in RUNTIME_PACKAGE_FILES if path.endswith(".py")
+    }
+
+    assert manifest_runtime_files == package_python_files
+    assert allowlisted_runtime_python == package_python_files
 
 
 @pytest.mark.integration
@@ -351,9 +375,7 @@ def test_built_wheel_contains_only_allowlisted_runtime_files(built_distributions
     with zipfile.ZipFile(wheel) as archive:
         names = {name for name in archive.namelist() if not name.endswith("/")}
         dist_info_roots = {
-            PurePosixPath(name).parts[0]
-            for name in names
-            if PurePosixPath(name).parts[0].endswith(".dist-info")
+            PurePosixPath(name).parts[0] for name in names if PurePosixPath(name).parts[0].endswith(".dist-info")
         }
         assert len(dist_info_roots) == 1
         dist_info_root = next(iter(dist_info_roots))
@@ -374,8 +396,12 @@ def test_built_wheel_contains_only_allowlisted_runtime_files(built_distributions
     assert_only_authorized_public_author_metadata(metadata)
     assert "License-Expression: LicenseRef-plsqlwks-Donationware" in metadata
     assert "License-File: license.txt" in metadata
-    assert "Version: 0.1.7" in metadata
+    assert f"Version: {PACKAGE_VERSION}" in metadata
     assert f"Project-URL: Repository, {GITLAB_REPOSITORY_URL}" in metadata
+    assert f"Project-URL: Architecture, {GITLAB_ARCHITECTURE_URL}" in metadata
+    assert f"Project-URL: Changelog, {GITLAB_CHANGELOG_URL}" in metadata
+    assert f"Project-URL: Quickstart, {GITLAB_QUICKSTART_URL}" in metadata
+    assert f"Project-URL: Compatibility, {GITLAB_COMPATIBILITY_URL}" in metadata
     assert GITLAB_PREVIEW_URL in metadata
     assert "raw.githubusercontent.com" not in metadata
     assert "requires-dist: platformdirs" not in metadata.lower()
@@ -393,10 +419,7 @@ def test_built_sdist_contains_only_allowlisted_sources(built_distributions):
         assert len(archive_roots) == 1
         archive_root = next(iter(archive_roots))
         file_members = [member for member in members if member.isfile()]
-        archive_files = {
-            str(PurePosixPath(member.name).relative_to(archive_root))
-            for member in file_members
-        }
+        archive_files = {str(PurePosixPath(member.name).relative_to(archive_root)) for member in file_members}
         assert archive_files == SDIST_PROJECT_FILES | SDIST_GENERATED_FILES
         assert_safe_artifact_paths(archive_files)
         payloads: dict[str, bytes] = {}
@@ -412,8 +435,12 @@ def test_built_sdist_contains_only_allowlisted_sources(built_distributions):
     assert "License-File: license.txt" in metadata
     assert_xlsx_extra_metadata(metadata)
     assert_only_authorized_public_author_metadata(metadata)
-    assert "Version: 0.1.7" in metadata
+    assert f"Version: {PACKAGE_VERSION}" in metadata
     assert f"Project-URL: Repository, {GITLAB_REPOSITORY_URL}" in metadata
+    assert f"Project-URL: Architecture, {GITLAB_ARCHITECTURE_URL}" in metadata
+    assert f"Project-URL: Changelog, {GITLAB_CHANGELOG_URL}" in metadata
+    assert f"Project-URL: Quickstart, {GITLAB_QUICKSTART_URL}" in metadata
+    assert f"Project-URL: Compatibility, {GITLAB_COMPATIBILITY_URL}" in metadata
     assert GITLAB_PREVIEW_URL in metadata
     assert "raw.githubusercontent.com" not in metadata
 
@@ -463,9 +490,11 @@ import plsqlwks.plugins as public_plugins
 from plsqlwks.plugins import PLUGIN_API_VERSION, PLUGIN_ENTRY_POINT_GROUP
 from plsqlwks.plugins.html_export import create_plugin as create_html_export_plugin
 from plsqlwks.plugins.xlsx_export import create_plugin as create_xlsx_export_plugin
+from plsqlwks.ui import parse_args
 
 html_plugin = create_html_export_plugin()
 xlsx_plugin = create_xlsx_export_plugin()
+assert parse_args([]).workspace is None
 
 config = load_config()
 print(json.dumps({
@@ -517,7 +546,7 @@ print(json.dumps({
             "PluginHandler",
             "ResultSnapshot",
         ],
-        "package_version": "0.1.7",
+        "package_version": PACKAGE_VERSION,
     }
     assert payload["html_plugin"] == {
         "id": "html-export",

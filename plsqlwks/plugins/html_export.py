@@ -1,28 +1,32 @@
-"""Built-in command plugin for exporting loaded result rows as safe HTML.
+"""Built-in command plugin and writer for safe HTML result export.
 
-The command is implemented entirely through Plugin API v1.  It receives an
-immutable :class:`~plsqlwks.plugins.ResultSnapshot`, prompts through the host,
-and writes a standalone document without accessing curses, application state,
-Oracle, or result continuations.
+The standalone handler receives an immutable loaded-row snapshot through
+Plugin API v1.  The application may inject a private full-result coordinator
+before invoking the same standalone writer, without exposing Oracle or mutable
+application state through the public plugin contract.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TextIO
 
-from ..exporting import atomic_write_text
+from ..exporting import atomic_write_text, raise_if_export_cancelled
 from ..html_exporting import render_html_result
 from ._result_export import (
+    BuiltinExportHandler,
     default_result_filename,
     format_export_rows,
     local_now,
+    mark_private_host_export_handler,
     prepare_result_export,
     short_error,
     success_message,
 )
-from .api import Plugin, PluginCommand, PluginContext
+from .api import Plugin, PluginCommand, PluginContext, ResultSnapshot
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,9 @@ class HtmlExportOptions:
     null_value: str = ""
     theme: str = "bright"
     date_format: str = ""
+
+
+_DEFAULT_HTML_EXPORT_OPTIONS = HtmlExportOptions()
 
 
 _NULL_VALUE_ENV = "PLSQLWKS_HTML_EXPORT_NULL_VALUE"
@@ -57,7 +64,7 @@ def _environment_options() -> HtmlExportOptions:
 
 def export_loaded_rows_to_html(
     context: PluginContext,
-    options: HtmlExportOptions = HtmlExportOptions(),
+    options: HtmlExportOptions = _DEFAULT_HTML_EXPORT_OPTIONS,
 ) -> None:
     """Prompt for and atomically export the command-start result snapshot.
 
@@ -75,22 +82,7 @@ def export_loaded_rows_to_html(
         if prepared is None:
             return
         snapshot, path = prepared
-        document = render_html_result(
-            title=snapshot.title,
-            columns=snapshot.columns,
-            rows=format_export_rows(
-                snapshot.rows,
-                null_value=options.null_value,
-                date_format=options.date_format,
-            ),
-            has_more=snapshot.has_more,
-            theme=options.theme,
-        )
-
-        def write_document(stream: TextIO) -> None:
-            stream.write(document)
-
-        atomic_write_text(path, write_document)
+        write_html_snapshot(path, snapshot, options)
     except Exception as error:
         context.set_status(f"HTML export failed: {short_error(error)}")
         context.report_error("HTML export failed", error)
@@ -99,7 +91,47 @@ def export_loaded_rows_to_html(
     context.set_status(success_message(snapshot, path))
 
 
-def create_plugin(options: HtmlExportOptions | None = None) -> Plugin:
+def write_html_snapshot(
+    path: Path,
+    snapshot: ResultSnapshot,
+    options: HtmlExportOptions,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    document = render_html_result(
+        title=snapshot.title,
+        columns=snapshot.columns,
+        rows=format_export_rows(
+            snapshot.rows,
+            null_value=options.null_value,
+            date_format=options.date_format,
+            cancelled=cancelled,
+        ),
+        has_more=snapshot.has_more,
+        theme=options.theme,
+        on_progress=on_progress,
+        cancelled=cancelled,
+    )
+
+    def write_document(stream: TextIO) -> None:
+        stream.write(document)
+
+    if cancelled is None:
+        atomic_write_text(path, write_document)
+    else:
+        atomic_write_text(
+            path,
+            write_document,
+            before_replace=lambda: raise_if_export_cancelled(cancelled),
+        )
+
+
+def create_plugin(
+    options: HtmlExportOptions | None = None,
+    *,
+    host_export: BuiltinExportHandler | None = None,
+) -> Plugin:
     """Return plugin metadata, capturing explicit or environment options.
 
     Calling this factory without an argument retains the zero-argument plugin
@@ -110,7 +142,13 @@ def create_plugin(options: HtmlExportOptions | None = None) -> Plugin:
     selected_options = options if options is not None else _environment_options()
 
     def configured_export(context: PluginContext) -> None:
-        export_loaded_rows_to_html(context, selected_options)
+        if host_export is None:
+            export_loaded_rows_to_html(context, selected_options)
+        else:
+            host_export("html", context, selected_options)
+
+    if host_export is not None:
+        mark_private_host_export_handler(configured_export)
 
     return Plugin(
         id="html-export",
@@ -119,7 +157,7 @@ def create_plugin(options: HtmlExportOptions | None = None) -> Plugin:
             PluginCommand(
                 id="export-loaded-rows",
                 section="Results",
-                title="Export loaded rows to HTML",
+                title="Export result to HTML",
                 handler=configured_export,
                 shortcut="",
                 keywords="export html web browser table result loaded rows",

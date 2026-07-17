@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_VDB = ROOT / "tools" / "build_vdb.py"
@@ -97,9 +96,7 @@ def test_build_vdb_keeps_source_test_and_documentation_files_disjoint(tmp_path: 
 
     source_paths = database_file_paths(out_dir / "python_chunks.sqlite")
     test_paths = database_file_paths(out_dir / "tests" / "python_chunks.sqlite")
-    documentation_paths = database_file_paths(
-        out_dir / "docs" / "documentation_chunks.sqlite"
-    )
+    documentation_paths = database_file_paths(out_dir / "docs" / "documentation_chunks.sqlite")
 
     assert source_paths == {"app.py", "package/module.py", "package/tests/test_internal.py"}
     assert test_paths == {"tests/support/helper.py", "tests/test_app.py"}
@@ -117,9 +114,7 @@ def test_build_vdb_keeps_source_test_and_documentation_files_disjoint(tmp_path: 
         "chunks",
         "symbols",
     }
-    assert database_collections(out_dir / "docs" / "documentation_chunks.sqlite") == {
-        "documentation"
-    }
+    assert database_collections(out_dir / "docs" / "documentation_chunks.sqlite") == {"documentation"}
     assert database_journal_mode(out_dir / "python_chunks.sqlite") == "delete"
     assert database_journal_mode(out_dir / "tests" / "python_chunks.sqlite") == "delete"
     assert database_journal_mode(out_dir / "docs" / "documentation_chunks.sqlite") == "delete"
@@ -138,9 +133,7 @@ def test_build_vdb_writes_scope_specific_manifests_and_readmes(tmp_path: Path) -
 
     source_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     test_manifest = json.loads((out_dir / "tests" / "manifest.json").read_text(encoding="utf-8"))
-    documentation_manifest = json.loads(
-        (out_dir / "docs" / "manifest.json").read_text(encoding="utf-8")
-    )
+    documentation_manifest = json.loads((out_dir / "docs" / "manifest.json").read_text(encoding="utf-8"))
 
     assert source_manifest["scope"] == "source"
     assert source_manifest["root"] == str(project.resolve())
@@ -159,15 +152,11 @@ def test_build_vdb_writes_scope_specific_manifests_and_readmes(tmp_path: Path) -
     assert documentation_manifest["dimensions"] == 16
     assert documentation_manifest["files"] == 3
     assert documentation_manifest["symbols"] == 0
-    assert documentation_manifest["databases"] == {
-        "chunks": "documentation_chunks.sqlite"
-    }
+    assert documentation_manifest["databases"] == {"chunks": "documentation_chunks.sqlite"}
 
     source_readme = (out_dir / "README.md").read_text(encoding="utf-8")
     test_readme = (out_dir / "tests" / "README.md").read_text(encoding="utf-8")
-    documentation_readme = (out_dir / "docs" / "README.md").read_text(
-        encoding="utf-8"
-    )
+    documentation_readme = (out_dir / "docs" / "README.md").read_text(encoding="utf-8")
     assert "Source Code Vector Database" in source_readme
     assert "exactly three SQLite databases" in source_readme
     assert "Test code is indexed separately" in source_readme
@@ -227,9 +216,7 @@ def test_build_vdb_excludes_custom_output_and_documentation_database_is_searchab
         capture_output=True,
         text=True,
     )
-    internal_paths = database_file_paths(
-        internal_out / "docs" / "documentation_chunks.sqlite"
-    )
+    internal_paths = database_file_paths(internal_out / "docs" / "documentation_chunks.sqlite")
     assert internal_paths == {"README.md", "docs/guide.md", "docs/nested/reference.md"}
 
     completed = subprocess.run(
@@ -263,9 +250,7 @@ def test_build_vdb_removes_legacy_symbol_databases_and_filters_collections(
     for path in legacy_paths:
         with sqlite3.connect(path) as connection:
             connection.execute("create table metadata (key text primary key, value text not null)")
-            connection.execute(
-                "insert into metadata(key, value) values ('format', 'plsqlwks-local-vdb-v1')"
-            )
+            connection.execute("insert into metadata(key, value) values ('format', 'plsqlwks-local-vdb-v1')")
 
     subprocess.run(
         [

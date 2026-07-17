@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
+import curses
 import time
-from typing import Any, TYPE_CHECKING
+from contextlib import suppress
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from ..db import (
     NULL_DISPLAY_TOKEN,
@@ -13,12 +16,24 @@ from ..db import (
     TruncatedLobValue,
     edit_metadata_rejection_reason,
 )
-from .constants import *
+from .constants import (
+    PLAN_CONNECTOR,
+    PLAN_METRICS,
+    PLAN_OBJECT,
+    PLAN_OPERATION,
+    PLAN_TEXT,
+    RESULT_PANE_LAYOUTS,
+    RESULT_RATIO_EDITOR_FULLSCREEN,
+    RESULT_RATIO_EPSILON,
+    RESULT_RATIO_FULLSCREEN,
+    RESULT_ROW_DETAIL,
+)
 from .display import clip_text, display_width, fit_text, wrap_display_text
 from .sql import INSERT_ROWID_MARKER
 
 if TYPE_CHECKING:
     from .state import UIState
+
 
 @dataclass(frozen=True)
 class ResultPosition:
@@ -26,6 +41,7 @@ class ResultPosition:
     col: int = 0
     row_scroll: int = 0
     col_scroll: int = 0
+
 
 @dataclass(frozen=True)
 class ExplainPlanSegment:
@@ -40,6 +56,7 @@ class ExplainPlanLine:
     @property
     def text(self) -> str:
         return "".join(segment.text for segment in self.segments)
+
 
 @dataclass(frozen=True)
 class EditableCell:
@@ -70,6 +87,7 @@ class VisibleColumn:
     index: int
     x: int
     width: int
+
 
 def result_pane_is_fullscreen(result_ratio: float) -> bool:
     return result_ratio >= RESULT_RATIO_FULLSCREEN - RESULT_RATIO_EPSILON
@@ -173,10 +191,8 @@ def safe_window_addstr(window: curses.window, y: int, x: int, text: str, attr: i
     height, width = window.getmaxyx()
     if y < 0 or y >= height or x < 0 or x >= width:
         return
-    try:
+    with contextlib.suppress(curses.error):
         window.addstr(y, x, clip_text(text, max(0, width - x)), attr)
-    except curses.error:
-        pass
 
 
 def selected_editable_cell(result: QueryResult, row_idx: int, col_idx: int) -> tuple[EditableCell | None, str]:
@@ -242,6 +258,7 @@ def first_editable_result_column(result: QueryResult) -> int:
 def insert_draft_active_status() -> str:
     return "Insert draft active: Enter edits cell, Ctrl-Alt-C inserts, Esc cancels"
 
+
 def is_autocommit_enabled(db: object) -> bool:
     return bool(getattr(db, "autocommit", True))
 
@@ -283,8 +300,19 @@ def active_operation_status(state: UIState) -> str:
     if operation is None:
         return state.status
     elapsed = time.monotonic() - operation.started_at
-    suffix = " (interrupt requested)" if operation.cancel_requested else ""
-    return f"{operation.label}{suffix} {format_elapsed_hhmmss(elapsed)}"
+    suffix = ""
+    if operation.cancel_requested:
+        suffix = " (interrupt requested)" if operation.interrupt_database else " (cancellation requested)"
+    progress = ""
+    current = operation.progress_current
+    total = operation.progress_total
+    if current is not None and total is not None and total >= 0:
+        bounded_current = min(max(0, current), total) if total else 0
+        percent = 100 if total == 0 else int(bounded_current * 100 / total)
+        filled = int(percent * 20 / 100)
+        bar = "#" * filled + "-" * (20 - filled)
+        progress = f" [{bar}] {percent}% ({current:,}/{total:,})"
+    return f"{operation.label}{progress}{suffix} {format_elapsed_hhmmss(elapsed)}"
 
 
 def transaction_rows_changed_text(report: TransactionReport) -> str:
@@ -305,10 +333,8 @@ def set_db_autocommit(db: object, enabled: bool) -> None:
     if callable(setter):
         setter(enabled)
         return
-    try:
-        setattr(db, "autocommit", enabled)
-    except Exception:
-        pass
+    with suppress(Exception):
+        setattr(db, "autocommit", enabled)  # noqa: B010  # reason: legacy database doubles expose autocommit as a dynamic compatibility attribute
 
 
 def is_dbms_output_result(result: QueryResult) -> bool:
@@ -326,6 +352,8 @@ def more_rows_status(result: QueryResult, connected: bool) -> str:
         return ""
     if connected and result.continuation is not None:
         return "More rows available; PageDown fetches more"
+    if result.detached_reason:
+        return f"More rows were not loaded; {result.detached_reason}"
     if connected:
         return "More rows were not loaded; rerun the query"
     return "More rows were not loaded; reconnect and rerun the query"
@@ -354,7 +382,9 @@ def result_label(
     marker = ">" if focused else "-"
     mode_name = "row" if mode == RESULT_ROW_DETAIL else "grid"
     other = "grid" if mode == RESULT_ROW_DETAIL else "row"
-    if not connected:
+    if result.detached_reason:
+        edit = f" | view-only: {result.detached_reason}"
+    elif not connected:
         edit = " | disconnected: view-only"
     elif result.editable_context is not None and not read_only:
         edit = " | Enter edit | INS row"
@@ -538,9 +568,6 @@ def format_table(columns: list[str], rows: list[list[str]]) -> list[str]:
     output = [header, sep]
     for row in rows:
         output.append(
-            " | ".join(
-                fit_text(row[idx] if idx < len(row) else "", widths[idx])
-                for idx in range(len(columns))
-            )
+            " | ".join(fit_text(row[idx] if idx < len(row) else "", widths[idx]) for idx in range(len(columns)))
         )
     return output

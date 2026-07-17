@@ -8,13 +8,13 @@ import time
 
 from ..config import AppConfig, load_config, save_autocommit
 from ..db import (
+    SCHEMA_OBJECT_TYPES,
     ExplainPlanResult,
     ExplainPlanStep,
     OracleExecutionError,
     OracleWorkspace,
     QueryResult,
     QueryResultPage,
-    SCHEMA_OBJECT_TYPES,
     TransactionReport,
     empty_schema_object_groups,
     workspace_health,
@@ -22,23 +22,23 @@ from ..db import (
 from ..sqlbinds import *
 from ..sqlsplit import split_script, statement_at_cursor
 from ..workspace import ensure_workspace, list_workspace_files
-from .constants import *
-from .display import *
-from .keys import *
-from .buffer import *
-from .help import *
-from .errors import *
-from .sql import *
-from .completion import *
-from .syntax import *  # type: ignore[assignment]
-from .clipboard import *
-from .browser import *
-from .menu import *
-from .commands import *
-from .results import *
-from .db_worker import *
-from .state import *
 from .app import App, main, parse_args
+from .browser import *
+from .buffer import *
+from .clipboard import *
+from .commands import *
+from .completion import *
+from .constants import *
+from .db_worker import *
+from .display import *
+from .errors import *
+from .help import *
+from .keys import *
+from .menu import *
+from .results import *
+from .sql import *
+from .state import *
+from .syntax import *  # type: ignore[assignment]  # reason: compatibility facade re-exports overlapping syntax names
 
 __all__ = (
     "ALT_G_SEQUENCES",

@@ -1,7 +1,6 @@
 import pytest
 
 import plsqlwks.sqlsplit as sqlsplit_module
-
 from plsqlwks.sqlsplit import (
     ScriptPreflightIssue,
     is_plsql_like,
@@ -51,19 +50,14 @@ select 2 from dual;
 def test_comment_only_scripts_and_trailing_comments_are_not_statements():
     assert split_script("-- only a comment\n/* and another */\n") == []
     assert [
-        statement.text
-        for statement in split_script(
-            "select 1 from dual; -- trailing\n/* trailing block */\n"
-        )
+        statement.text for statement in split_script("select 1 from dual; -- trailing\n/* trailing block */\n")
     ] == ["select 1 from dual"]
 
 
 def test_leading_comments_remain_attached_to_a_real_statement():
     statements = split_script("-- context\n\nselect 1 from dual;\n")
 
-    assert [statement.text for statement in statements] == [
-        "-- context\n\nselect 1 from dual"
-    ]
+    assert [statement.text for statement in statements] == ["-- context\n\nselect 1 from dual"]
 
 
 def test_splitter_preserves_blank_lines_and_non_newline_control_characters():
@@ -408,11 +402,7 @@ select 2 from dual -- ; still comment
 
 
 def test_line_comment_ends_at_newline():
-    script = (
-        "select 1 -- comment\n"
-        "from dual;\n"
-        "select 2 from dual;\n"
-    )
+    script = "select 1 -- comment\nfrom dual;\nselect 2 from dual;\n"
 
     assert [statement.text for statement in split_script(script)] == [
         "select 1 -- comment\nfrom dual",
@@ -421,12 +411,12 @@ def test_line_comment_ends_at_newline():
 
 
 def test_ignores_semicolons_in_multiline_block_comments_and_quoted_identifiers():
-    script = '''select "semi;colon" from dual;
+    script = """select "semi;colon" from dual;
 select 1
 /* ; still comment
    ; still comment */
 from dual;
-'''
+"""
     statements = split_script(script)
 
     assert [statement.text for statement in statements] == [
@@ -493,7 +483,9 @@ select 9 from dual;
 
     assert len(statements) == 2
     assert preflight_script(script) == []
-    assert statements[0].text == """with
+    assert (
+        statements[0].text
+        == """with
   function normalize_value(p_value number) return number is
     function fallback_value return number is
     begin
@@ -510,6 +502,7 @@ select 9 from dual;
     null;
   end audit_value;
 select normalize_value(2) from dual"""
+    )
     assert statements[1].text == "select 9 from dual"
     assert statement_at_cursor(script, 4, 6) == statements[0]
     assert statement_at_cursor(script, 16, 8) == statements[0]
@@ -543,10 +536,7 @@ select 1 from dual;
 
 
 def test_keeps_same_line_with_function_semicolons_inside_the_sql_statement():
-    script = (
-        "with function f return number is begin return 1; end; "
-        "select f() from dual; select 2 from dual;"
-    )
+    script = "with function f return number is begin return 1; end; select f() from dual; select 2 from dual;"
 
     statements = split_script(script)
 

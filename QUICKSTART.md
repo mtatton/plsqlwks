@@ -36,6 +36,7 @@ Confirm that the console command is available:
 
 ```bash
 plsqlwks --help
+plsqlwks --version
 ```
 
 For development, replace the final install command with
@@ -147,12 +148,17 @@ order by employee_id;
 grid focused, use `Ctrl-PageDown` and `Ctrl-PageUp` to page. The status and
 result label say when more rows are available.
 
-### Export loaded rows
+### Export query rows
 
 With a table result visible, press `Alt-O`, type `export`, and choose CSV, HTML,
-or XLSX. The export contains exactly the rows currently loaded in the grid and
-defaults to the workspace `results/` directory. XLSX support requires
-`python3 -m pip install 'plsqlwks[xlsx]'`.
+or XLSX. A second picker defaults to **Loaded rows only**, which writes exactly
+the rows already in the grid without another database fetch. Choose **All
+available rows** to fetch continuation pages up to a fixed 10,000-row total.
+The status bar shows fetch and write progress; press `Ctrl-C` to cancel either
+phase without installing a partial destination file. Completed fetch pages stay
+visible but become read-only after an interrupted database fetch. Output names
+default to the workspace `results/` directory. XLSX support remains optional
+and requires `python3 -m pip install 'plsqlwks[xlsx]'`.
 
 ### Commit or roll back deliberately
 
@@ -210,7 +216,7 @@ build-backend = "setuptools.build_meta"
 name = "plsqlwks-result-tools"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["plsqlwks>=0.1.7"]
+dependencies = ["plsqlwks>=0.1.8"]
 
 [project.entry-points."plsqlwks.plugins"]
 result-tools = "result_tools.plugin:create_plugin"

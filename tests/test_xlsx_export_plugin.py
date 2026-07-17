@@ -9,10 +9,9 @@ from zipfile import ZipFile
 
 import pytest
 
-from plsqlwks.plugins import PLUGIN_API_VERSION, ResultSnapshot
-from plsqlwks.plugins import xlsx_export
 from plsqlwks import xlsx_exporting
-
+from plsqlwks.exporting import ExportCancelled
+from plsqlwks.plugins import PLUGIN_API_VERSION, ResultSnapshot, xlsx_export
 
 pytestmark = pytest.mark.plugin
 
@@ -86,9 +85,7 @@ def snapshot(
     rows: tuple[tuple[str, ...], ...] = (("one",),),
     has_more: bool = False,
     title: str = "Loaded result",
-    numeric_values: tuple[
-        tuple[Decimal | int | float | None, ...], ...
-    ] = (),
+    numeric_values: tuple[tuple[Decimal | int | float | None, ...], ...] = (),
 ) -> ResultSnapshot:
     return ResultSnapshot(
         title,
@@ -114,7 +111,7 @@ def test_plugin_metadata_options_and_api_version():
     assert plugin.api_version == 1
     assert command.id == "export-loaded-rows"
     assert command.section == "Results"
-    assert command.title == "Export loaded rows to XLSX"
+    assert command.title == "Export result to XLSX"
     assert command.shortcut == ""
     assert {"xlsx", "excel", "spreadsheet"} <= set(command.keywords.split())
     assert xlsx_export.XlsxExportOptions() == xlsx_export.XlsxExportOptions(
@@ -126,7 +123,7 @@ def test_plugin_metadata_options_and_api_version():
         freeze_top_row=True,
     )
     with pytest.raises(FrozenInstanceError):
-        plugin.id = "changed"  # type: ignore[misc]
+        plugin.id = "changed"  # type: ignore[misc]  # reason: verifies frozen plugin metadata rejects mutation
 
 
 def test_deterministic_default_filename_and_context_contract(monkeypatch, tmp_path):
@@ -182,9 +179,7 @@ def test_writes_exact_loaded_rows_as_formula_safe_strings_with_options(tmp_path)
     finally:
         workbook.close()
 
-    assert context.statuses == [
-        f"Exported 1 loaded row(s) to {destination.resolve()}; additional rows are available"
-    ]
+    assert context.statuses == [f"Exported 1 loaded row(s) to {destination.resolve()}; additional rows are available"]
     assert context.errors == []
     assert context.active is active
     assert active.rows[0][0] == "=1+1"
@@ -344,9 +339,7 @@ def test_proportional_width_uses_visual_maximum_for_header_and_data(tmp_path):
     try:
         sheet = workbook.active
         margin = 17 / 7
-        assert [
-            sheet.column_dimensions[letter].width for letter in "ABCDE"
-        ] == pytest.approx(
+        assert [sheet.column_dimensions[letter].width for letter in "ABCDE"] == pytest.approx(
             [
                 31.77408 + margin,
                 14.04 + margin,
@@ -407,9 +400,9 @@ def test_wrapping_starts_above_sixty_units_per_cell(tmp_path):
     try:
         sheet = workbook.active
         margin = 17 / 7
-        assert [
-            sheet.column_dimensions[letter].width for letter in "ABC"
-        ] == pytest.approx([52.155 + margin, 60 + margin, 51.3 + margin])
+        assert [sheet.column_dimensions[letter].width for letter in "ABC"] == pytest.approx(
+            [52.155 + margin, 60 + margin, 51.3 + margin]
+        )
         assert not sheet["A1"].alignment.wrap_text
         assert not sheet["A2"].alignment.wrap_text
         assert sheet["A3"].alignment.wrap_text is True
@@ -467,9 +460,9 @@ def test_zero_rows_produces_header_only_workbook_and_plain_success(tmp_path):
         sheet = workbook.active
         assert sheet.max_row == 1
         assert [cell.value for cell in sheet[1]] == ["A", "B"]
-        assert [
-            sheet.column_dimensions[letter].width for letter in "AB"
-        ] == pytest.approx([4.17626 + 17 / 7, 4.10519 + 17 / 7])
+        assert [sheet.column_dimensions[letter].width for letter in "AB"] == pytest.approx(
+            [4.17626 + 17 / 7, 4.10519 + 17 / 7]
+        )
         assert sheet.auto_filter.ref == "A1:B1"
         assert sheet.freeze_panes == "A2"
     finally:
@@ -734,10 +727,7 @@ def test_insert_draft_precedes_snapshot_and_prompt(tmp_path):
     xlsx_export.export_loaded_rows_to_xlsx(context)
 
     assert context.calls == ["draft", "status"]
-    assert context.statuses == [
-        "Export unavailable while an insert draft is active; "
-        "commit or cancel the draft first"
-    ]
+    assert context.statuses == ["Export unavailable while an insert draft is active; commit or cancel the draft first"]
 
 
 def test_overwrite_rejection_preserves_old_file(tmp_path):
@@ -1020,9 +1010,7 @@ def test_missing_optional_dependency_is_reported_without_damaging_destination(
     xlsx_export.export_loaded_rows_to_xlsx(context)
 
     assert destination.read_bytes() == previous
-    assert context.statuses == [
-        "XLSX export failed: XLSX export requires the optional 'openpyxl' package"
-    ]
+    assert context.statuses == ["XLSX export failed: XLSX export requires the optional 'openpyxl' package"]
     assert context.errors and context.errors[0][0] == "XLSX export failed"
 
 
@@ -1137,3 +1125,26 @@ def test_handler_does_not_catch_base_exceptions(monkeypatch, tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         xlsx_export.export_loaded_rows_to_xlsx(context)
+
+
+def test_cancellable_xlsx_writer_preserves_existing_destination(tmp_path):
+    destination = tmp_path / "cancelled.xlsx"
+    destination.write_bytes(b"old")
+    cancelled = False
+
+    def progress(current: int, total: int) -> None:
+        nonlocal cancelled
+        if current == 1:
+            cancelled = True
+
+    with pytest.raises(ExportCancelled):
+        xlsx_export.write_xlsx_snapshot(
+            destination,
+            snapshot(rows=(("one",), ("two",))),
+            xlsx_export.XlsxExportOptions(),
+            on_progress=progress,
+            cancelled=lambda: cancelled,
+        )
+
+    assert destination.read_bytes() == b"old"
+    assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []

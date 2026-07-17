@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import configparser
-from dataclasses import dataclass, field
 import os
-from pathlib import Path
 import re
 import stat
 import tempfile
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .loader import DEFAULT_DSN, load_config
 from .models import AppConfig, SessionTab
@@ -59,7 +59,6 @@ from .settings import (
     save_read_only,
     write_ini_atomic,
 )
-
 
 __all__ = (
     "APP_NAME",

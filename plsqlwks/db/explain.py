@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Mapping
 import uuid
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Any
 
 from .execution import execute_user_statement, format_value
 from .models import (

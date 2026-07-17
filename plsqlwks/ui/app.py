@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import curses
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
+from .. import __version__
 from ..config import AppConfig, load_config
 from ..db import OracleWorkspace, workspace_health
 from ..plugins.csv_export import CsvExportOptions
@@ -31,6 +33,7 @@ from .plugin_host import PluginHost, UIPluginContext, snapshot_result
 from .query_controller import QueryController
 from .renderer import Renderer
 from .result_controller import ResultController
+from .result_export import ResultExportController
 from .result_presenter import ResultPresenter
 from .state import UIState
 from .viewport import ViewportController
@@ -51,6 +54,12 @@ def main(argv: list[str] | None = None) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Start the plsqlwks terminal workspace.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"plsqlwks {__version__}",
+        help="Show the installed plsqlwks version and exit.",
+    )
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -76,8 +85,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="read_only",
         action="store_true",
         help=(
-            "Enable a client-side guardrail against statements that appear to write; "
-            "this is not a security boundary."
+            "Enable a client-side guardrail against statements that appear to write; this is not a security boundary."
         ),
     )
     access.add_argument(
@@ -111,9 +119,7 @@ class App:
             self.db_operations,
             screen_width=lambda: self.screen.getmaxyx()[1],
         )
-        self.db_operations.set_result_handler(
-            self.result_presenter.apply_db_operation_result
-        )
+        self.db_operations.set_result_handler(self.result_presenter.apply_db_operation_result)
         self.documents = DocumentController(
             self.state,
             self.dialogs,
@@ -158,14 +164,14 @@ class App:
             self.db_operations,
             self.result_presenter,
         )
-        self.viewport = ViewportController(screen, self.state, self.results)
-        self.renderer = Renderer(
-            screen,
+        self.result_export = ResultExportController(
             self.state,
-            self.documents,
-            self.browser,
-            self.results,
+            self.db_operations,
+            self.dialogs,
+            self.result_presenter,
         )
+        self.viewport = ViewportController(screen, self.state, self.results)
+        self.renderer = Renderer(screen, self.state)
         self.application = ApplicationController(
             self.state,
             self.documents,
@@ -185,8 +191,10 @@ class App:
                 csv_export_enabled=config.csv_export_enabled,
                 html_export_enabled=config.html_export_enabled,
                 xlsx_export_enabled=config.xlsx_export_enabled,
+                host_export=self.result_export,
             ),
             self._create_plugin_context,
+            lambda: self._create_plugin_context(defer_result_snapshot=True),
         )
         self.command_menu_items = self._plugin_host.command_menu_items
         self._plugin_startup_warnings = self._plugin_host.startup_warnings
@@ -213,12 +221,8 @@ class App:
         previous_session: object,
     ) -> DatabaseWorker:
         workspace = OracleWorkspace(self.state.config)
-        workspace.autocommit = bool(
-            getattr(previous_session, "autocommit", workspace.autocommit)
-        )
-        workspace.read_only = bool(
-            getattr(previous_session, "read_only", workspace.read_only)
-        )
+        workspace.autocommit = bool(getattr(previous_session, "autocommit", workspace.autocommit))
+        workspace.read_only = bool(getattr(previous_session, "read_only", workspace.read_only))
         worker = DatabaseWorker(workspace)
         self.db_worker = worker
         return worker
@@ -270,9 +274,14 @@ class App:
             "refresh_browser": self.browser.refresh_browser,
         }
 
-    def _create_plugin_context(self) -> UIPluginContext:
+    def _create_plugin_context(
+        self,
+        *,
+        defer_result_snapshot: bool = False,
+    ) -> UIPluginContext:
         insert_draft = self.results.active_insert_draft() is not None
-        result_snapshot = None if insert_draft else snapshot_result(self.state.active_result)
+        active_result = self.state.active_result
+        result_snapshot = None if insert_draft or defer_result_snapshot else snapshot_result(active_result)
         return UIPluginContext(
             self.state.config.results_dir,
             result_snapshot=result_snapshot,
@@ -287,6 +296,9 @@ class App:
                 lines,
                 clear_table=clear_table,
             ),
+            result_snapshot_factory=(
+                None if insert_draft or not defer_result_snapshot else lambda: snapshot_result(active_result)
+            ),
         )
 
     def run(self) -> None:
@@ -294,14 +306,10 @@ class App:
         self.screen.keypad(True)
         self.screen.leaveok(False)
         self.screen.timeout(200)
-        try:
+        with contextlib.suppress(curses.error):
             curses.raw()
-        except curses.error:
-            pass
-        try:
+        with contextlib.suppress(curses.error):
             curses.nonl()
-        except curses.error:
-            pass
         extended_keyboard_enabled = enable_extended_keyboard_reporting()
         try:
             self.renderer.init_colors()
@@ -317,7 +325,8 @@ class App:
             self.database.try_connect()
             while self.application.running:
                 self.db_operations.poll()
-                self.renderer.draw()
+                layout = self.viewport.prepare_frame()
+                self.renderer.draw(layout)
                 key = self.key_reader.read_key()
                 if key != -1:
                     self.input.handle_key(key)
@@ -330,9 +339,7 @@ class App:
                         try:
                             operation = self.state.db_operation
                             if operation is not None:
-                                self.db_worker.cancel_current_operation(
-                                    operation.handle.command_id
-                                )
+                                self.db_worker.cancel_current_operation(operation.handle.command_id)
                         except Exception:
                             pass
                     self.db_operations.wait(timeout=shutdown_timeout)
@@ -341,14 +348,10 @@ class App:
                         disable_extended_keyboard_reporting()
             finally:
                 try:
-                    try:
+                    with contextlib.suppress(curses.error):
                         curses.nl()
-                    except curses.error:
-                        pass
-                    try:
+                    with contextlib.suppress(curses.error):
                         curses.noraw()
-                    except curses.error:
-                        pass
                 finally:
                     try:
                         self.result_presenter.close_all_result_continuations()

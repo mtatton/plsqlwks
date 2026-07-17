@@ -7,10 +7,11 @@ untrusted text and escaped before it is inserted into the document.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from html import escape
 from io import StringIO
-from typing import Sequence
 
+from .exporting import raise_if_export_cancelled
 
 DEFAULT_HTML_TITLE = "PLSQLWKS query result"
 
@@ -62,15 +63,15 @@ _THEME_STYLESHEETS = {
 def _validate_row_widths(
     columns: Sequence[str],
     rows: Sequence[Sequence[str]],
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Reject rows that cannot be represented by the declared table shape."""
     expected = len(columns)
     for index, row in enumerate(rows, start=1):
+        raise_if_export_cancelled(cancelled)
         actual = len(row)
         if actual != expected:
-            raise ValueError(
-                f"result row {index} has {actual} value(s); expected {expected}"
-            )
+            raise ValueError(f"result row {index} has {actual} value(s); expected {expected}")
 
 
 def render_html_result(
@@ -80,8 +81,10 @@ def render_html_result(
     rows: Sequence[Sequence[str]],
     has_more: bool,
     theme: str = "bright",
+    on_progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> str:
-    """Return a complete HTML5 document for exactly the supplied loaded rows.
+    """Return a complete HTML5 document for exactly the supplied rows.
 
     The result is deterministic apart from its inputs and uses LF line endings.
     Row widths and the theme name are validated before any markup is returned.
@@ -90,22 +93,23 @@ def render_html_result(
     result title is metadata only and is not repeated as a visible page heading.
     Themes select only bundled static CSS; result values can never affect CSS.
     """
-    _validate_row_widths(columns, rows)
+    _validate_row_widths(columns, rows, cancelled)
     try:
         theme_stylesheet = _THEME_STYLESHEETS[theme]
     except KeyError:
         raise ValueError("HTML export theme must be 'bright' or 'dark'") from None
     display_title = title if title else DEFAULT_HTML_TITLE
     escaped_title = escape(display_title, quote=True)
+    raise_if_export_cancelled(cancelled)
+    if on_progress is not None:
+        on_progress(0, len(rows))
 
     output = StringIO()
     output.write("<!doctype html>\n")
     output.write('<html lang="en">\n')
     output.write("<head>\n")
     output.write('  <meta charset="utf-8">\n')
-    output.write(
-        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
-    )
+    output.write('  <meta name="viewport" content="width=device-width, initial-scale=1">\n')
     output.write(f"  <title>{escaped_title}</title>\n")
     output.write("  <style>\n")
     output.write(_COMMON_STYLESHEET)
@@ -119,24 +123,27 @@ def render_html_result(
     output.write("      <thead>\n")
     output.write("        <tr>\n")
     for column in columns:
+        raise_if_export_cancelled(cancelled)
         output.write(f'          <th scope="col">{escape(column, quote=True)}</th>\n')
     output.write("        </tr>\n")
     output.write("      </thead>\n")
     output.write("      <tbody>\n")
-    for row in rows:
+    for row_index, row in enumerate(rows, start=1):
+        raise_if_export_cancelled(cancelled)
         output.write("        <tr>\n")
         for value in row:
+            raise_if_export_cancelled(cancelled)
             output.write(f"          <td>{escape(value, quote=True)}</td>\n")
         output.write("        </tr>\n")
+        if on_progress is not None:
+            on_progress(row_index, len(rows))
     output.write("      </tbody>\n")
     output.write("    </table>\n")
     output.write("  </div>\n")
     output.write(f'  <p class="summary">{len(rows)} row(s)</p>\n')
     if has_more:
-        output.write(
-            '  <p class="notice">Additional rows are available in PLSQLWKS '
-            "and were not exported.</p>\n"
-        )
+        output.write('  <p class="notice">Additional rows are available in PLSQLWKS and were not exported.</p>\n')
     output.write("</body>\n")
     output.write("</html>\n")
+    raise_if_export_cancelled(cancelled)
     return output.getvalue()

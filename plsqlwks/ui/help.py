@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import textwrap
+from dataclasses import dataclass
 
-from .constants import *
+from .constants import (
+    HELP_BORDER,
+    HELP_BOX_WIDTH,
+    HELP_KEY,
+    HELP_SECTION,
+    HELP_SECTIONS,
+    HELP_TEXT,
+    HELP_TIP,
+    HELP_TIPS,
+    HELP_TITLE,
+)
+
 
 @dataclass(frozen=True)
 class HelpSegment:

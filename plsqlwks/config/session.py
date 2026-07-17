@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import configparser
-from pathlib import Path
 import re
-from typing import Sequence
+from collections.abc import Sequence
+from pathlib import Path
 
 from .models import AppConfig, SessionTab
 from .settings import read_ini, write_ini_atomic
-
 
 SESSION_TABS_SECTION = "session.tabs"
 SESSION_TAB_PATH_PATTERN = re.compile(r"^tab_(\d+)_path$")

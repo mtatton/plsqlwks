@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import configparser
 import os
-from pathlib import Path
 import stat
+from pathlib import Path
 
 import pytest
 
 from plsqlwks import config as config_module
-from plsqlwks.config import paths as config_paths
 from plsqlwks.config import (
     AppConfig,
     SessionTab,
@@ -19,14 +18,13 @@ from plsqlwks.config import (
     save_read_only,
     save_session_tabs,
 )
+from plsqlwks.config import paths as config_paths
 from plsqlwks.workspace import STARTER_PLSQL, STARTER_SQL, ensure_workspace, list_workspace_files, write_once
 
 
 def test_config_facade_export_contract_matches_pre_package_surface():
     expected_exports = set(
-        (Path(__file__).parent / "fixtures" / "config_exports.txt")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        (Path(__file__).parent / "fixtures" / "config_exports.txt").read_text(encoding="utf-8").splitlines()
     )
 
     assert len(expected_exports) == 56
@@ -1037,6 +1035,17 @@ def test_parse_args_describes_read_only_as_client_side_guardrail(capsys):
     help_text = capsys.readouterr().out
     assert "client-side guardrail" in help_text
     assert "not a security boundary" in help_text
+
+
+def test_parse_args_reports_the_package_version(capsys):
+    from plsqlwks import __version__
+    from plsqlwks.ui.app import parse_args
+
+    with pytest.raises(SystemExit) as error:
+        parse_args(["--version"])
+
+    assert error.value.code == 0
+    assert capsys.readouterr().out == f"plsqlwks {__version__}\n"
 
 
 def test_fresh_workspace_cli_autocommit_override_is_not_persisted(monkeypatch, tmp_path):

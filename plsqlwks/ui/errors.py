@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 import traceback
+from dataclasses import dataclass
 
 from ..db import OracleCompilationError, OracleExecutionError
 from .buffer import Buffer
 from .display import wrap_display_text
+
 
 @dataclass(frozen=True)
 class ErrorLocation:
@@ -28,6 +29,7 @@ class PlsqlDiagnostic:
     line: int
     message: str
     source: str
+
 
 LINE_COLUMN_RE = re.compile(r"\bline\s+(\d+)\s*,\s*column\s+(\d+)", re.IGNORECASE)
 ORA_06512_LINE_RE = re.compile(r"\bORA-06512:\s+at\s+line\s+(\d+)\b", re.IGNORECASE)
@@ -266,10 +268,7 @@ def first_document_error_location(
     candidates = [candidate for candidate in candidates if not candidate.external]
     if not candidates:
         return None
-    mapped = [
-        _mapped_error_location(candidate, statement_start_line, statement_start_col)
-        for candidate in candidates
-    ]
+    mapped = [_mapped_error_location(candidate, statement_start_line, statement_start_col) for candidate in candidates]
     return min(
         mapped,
         key=lambda candidate: (candidate.priority, candidate.location.line, candidate.location.column),
@@ -364,15 +363,10 @@ def document_error_diagnostics(
                         detail = ""
                 if not detail:
                     continue
-                key = mapped_key(
-                    ErrorLocation(int(match.group(1)), int(match.group(2)))
-                )
+                key = mapped_key(ErrorLocation(int(match.group(1)), int(match.group(2))))
                 messages.setdefault(key, detail)
         for parsed_diagnostic in parse_plsql_diagnostics(text):
-            if (
-                not is_local_plsql_unit(parsed_diagnostic.unit)
-                or not parsed_diagnostic.message
-            ):
+            if not is_local_plsql_unit(parsed_diagnostic.unit) or not parsed_diagnostic.message:
                 continue
             messages.setdefault(
                 mapped_key(ErrorLocation(parsed_diagnostic.line, 1)),
@@ -380,10 +374,7 @@ def document_error_diagnostics(
             )
 
     fallback = short_execution_error_message(exc)
-    return [
-        (location, messages.get((location.line, location.column), fallback))
-        for location in locations
-    ]
+    return [(location, messages.get((location.line, location.column), fallback)) for location in locations]
 
 
 def execution_error_offset_location(exc: Exception) -> ErrorLocation | None:
@@ -419,10 +410,7 @@ def statement_offset_location(statement: str, offset: int) -> ErrorLocation:
     preceding = statement[:clamped]
     line = preceding.count("\n") + 1
     last_newline = preceding.rfind("\n")
-    if last_newline < 0:
-        column = len(preceding) + 1
-    else:
-        column = len(preceding) - last_newline
+    column = len(preceding) + 1 if last_newline < 0 else len(preceding) - last_newline
     return ErrorLocation(line=line, column=column)
 
 
@@ -441,6 +429,7 @@ def move_buffer_to_error(buffer: Buffer, location: ErrorLocation) -> ErrorLocati
     if buffer.scroll > row:
         buffer.scroll = row
     return ErrorLocation(line=row + 1, column=col + 1)
+
 
 def wrap_error(exc: Exception) -> list[str]:
     detail = exception_text(exc)

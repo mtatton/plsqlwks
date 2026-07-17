@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Protocol
+
 import oracledb
 
-from .editing import normalize_identifier
 from .execution import read_lob_value
-
+from .identifiers import normalize_identifier
 
 SCHEMA_OBJECT_TYPES = (
     "TABLE",
@@ -19,9 +21,25 @@ SCHEMA_OBJECT_TYPES = (
 )
 
 
-class MetadataMixin:
+EnsureConnected = Callable[[], oracledb.Connection]
+
+
+class MetadataPort(Protocol):
+    def list_schema_objects(self) -> dict[str, list[str]]: ...
+
+    def get_object_definition(self, object_type: str, object_name: str) -> str: ...
+
+    def list_object_columns(self, object_name: str) -> list[str]: ...
+
+
+class MetadataService:
+    """Read schema metadata through a caller-owned Oracle connection."""
+
+    def __init__(self, ensure_connected: EnsureConnected) -> None:
+        self._ensure_connected = ensure_connected
+
     def list_schema_objects(self) -> dict[str, list[str]]:
-        conn = self.ensure_connected()
+        conn = self._ensure_connected()
         cursor = conn.cursor()
         groups = empty_schema_object_groups()
         try:
@@ -57,8 +75,10 @@ class MetadataMixin:
 
     def get_object_definition(self, object_type: str, object_name: str) -> str:
         normalized_type = object_type.upper()
-        normalized_name = object_name.upper()
-        conn = self.ensure_connected()
+        normalized_name = normalize_identifier(object_name)
+        if normalized_name is None:
+            raise ValueError("Invalid Oracle object identifier")
+        conn = self._ensure_connected()
         cursor = conn.cursor()
         try:
             configure_metadata_transform(cursor)
@@ -80,7 +100,7 @@ class MetadataMixin:
         normalized_name = normalize_identifier(object_name)
         if normalized_name is None:
             return []
-        conn = self.ensure_connected()
+        conn = self._ensure_connected()
         cursor = conn.cursor()
         try:
             cursor.execute(
@@ -92,9 +112,28 @@ class MetadataMixin:
                 """,
                 object_name=normalized_name,
             )
-            return [str(column_name).upper() for (column_name,) in cursor]
+            return [str(column_name) for (column_name,) in cursor]
         finally:
             cursor.close()
+
+
+class MetadataMixin:
+    """Compatibility adapter for hosts that still inherit metadata behavior."""
+
+    def ensure_connected(self) -> oracledb.Connection:
+        raise NotImplementedError
+
+    def _metadata_service(self) -> MetadataPort:
+        return MetadataService(self.ensure_connected)
+
+    def list_schema_objects(self) -> dict[str, list[str]]:
+        return self._metadata_service().list_schema_objects()
+
+    def get_object_definition(self, object_type: str, object_name: str) -> str:
+        return self._metadata_service().get_object_definition(object_type, object_name)
+
+    def list_object_columns(self, object_name: str) -> list[str]:
+        return self._metadata_service().list_object_columns(object_name)
 
 
 def empty_schema_object_groups() -> dict[str, list[str]]:

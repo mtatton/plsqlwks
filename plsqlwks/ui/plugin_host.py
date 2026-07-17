@@ -13,11 +13,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from ..db import QueryResult
+from ..exporting import raise_if_export_cancelled
 from ..plugins import PluginCommand, PluginContext, ResultSnapshot
+from ..plugins._result_export import is_private_host_export_handler
 from ..plugins.loader import PluginRegistry
 from .commands import COMMAND_MENU_ITEMS, CommandMenuItem
 from .errors import short_error, wrap_error
-
 
 _PLUGIN_HANDLER_PREFIX = "__plugin__:"
 
@@ -25,31 +26,39 @@ PromptTextCallback = Callable[[str, str, bool], str | None]
 StatusCallback = Callable[[str], None]
 ResultsCallback = Callable[[list[str], bool], None]
 PluginContextFactory = Callable[[], "UIPluginContext"]
+ResultSnapshotFactory = Callable[[], ResultSnapshot | None]
 
 
 def _snapshot_numeric_values(
     result: QueryResult,
+    *,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[tuple[Decimal | int | float | None, ...], ...]:
     """Copy only aligned immutable numeric source values into a snapshot."""
+    raise_if_export_cancelled(cancelled)
     if len(result.original_rows) != len(result.rows):
         return ()
     if any(
         len(original_row) != len(display_row)
-        for original_row, display_row in zip(result.original_rows, result.rows)
+        for original_row, display_row in zip(result.original_rows, result.rows, strict=True)
     ):
         return ()
-    return tuple(
-        tuple(
-            original
-            if type(original) in (Decimal, int, float) and str(original) == display
-            else None
-            for original, display in zip(original_row, display_row)
-        )
-        for original_row, display_row in zip(result.original_rows, result.rows)
-    )
+    copied: list[tuple[Decimal | int | float | None, ...]] = []
+    for original_row, display_row in zip(result.original_rows, result.rows, strict=True):
+        raise_if_export_cancelled(cancelled)
+        values: list[Decimal | int | float | None] = []
+        for original, display in zip(original_row, display_row, strict=True):
+            raise_if_export_cancelled(cancelled)
+            values.append(original if type(original) in (Decimal, int, float) and str(original) == display else None)
+        copied.append(tuple(values))
+    return tuple(copied)
 
 
-def snapshot_result(result: QueryResult | None) -> ResultSnapshot | None:
+def snapshot_result(
+    result: QueryResult | None,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> ResultSnapshot | None:
     """Copy a mutable query result into the tuple-based public snapshot shape.
 
     Display columns and rows plus aligned immutable numeric values cross the
@@ -58,12 +67,25 @@ def snapshot_result(result: QueryResult | None) -> ResultSnapshot | None:
     """
     if result is None:
         return None
+    raise_if_export_cancelled(cancelled)
+    rows: list[tuple[str, ...]] = []
+    for row in result.rows:
+        raise_if_export_cancelled(cancelled)
+        copied_row: list[str] = []
+        for value in row:
+            raise_if_export_cancelled(cancelled)
+            copied_row.append(value)
+        rows.append(tuple(copied_row))
+    raise_if_export_cancelled(cancelled)
     return ResultSnapshot(
         title=result.title,
         columns=tuple(result.columns),
-        rows=tuple(tuple(row) for row in result.rows),
+        rows=tuple(rows),
         has_more=result.has_more_rows,
-        numeric_values=_snapshot_numeric_values(result),
+        numeric_values=_snapshot_numeric_values(
+            result,
+            cancelled=cancelled,
+        ),
     )
 
 
@@ -78,6 +100,7 @@ class UIPluginContext(PluginContext):
     __slots__ = (
         "_results_dir",
         "_result_snapshot",
+        "_result_snapshot_factory",
         "_insert_draft",
         "_prompt",
         "_set_status",
@@ -92,9 +115,11 @@ class UIPluginContext(PluginContext):
         prompt: PromptTextCallback,
         set_status: StatusCallback,
         set_results: ResultsCallback,
+        result_snapshot_factory: ResultSnapshotFactory | None = None,
     ) -> None:
         self._results_dir = results_dir
         self._result_snapshot = result_snapshot
+        self._result_snapshot_factory = result_snapshot_factory
         self._insert_draft = insert_draft
         self._prompt = prompt
         self._set_status = set_status
@@ -105,6 +130,10 @@ class UIPluginContext(PluginContext):
         return self._results_dir
 
     def get_active_result(self) -> ResultSnapshot | None:
+        factory = self._result_snapshot_factory
+        if factory is not None:
+            self._result_snapshot = factory()
+            self._result_snapshot_factory = None
         return self._result_snapshot
 
     def has_active_insert_draft(self) -> bool:
@@ -145,14 +174,19 @@ class PluginHost:
         self,
         registry: PluginRegistry,
         context_factory: PluginContextFactory,
+        deferred_context_factory: PluginContextFactory | None = None,
     ) -> None:
         self._context_factory = context_factory
+        self._deferred_context_factory = deferred_context_factory
         self._commands: dict[str, PluginCommand] = {}
+        self._deferred_context_commands: set[str] = set()
         plugin_menu_items: list[CommandMenuItem] = []
         for plugin in registry.plugins:
             for command in plugin.commands:
                 handler_id = self._handler_id(plugin.id, command.id)
                 self._commands[handler_id] = command
+                if is_private_host_export_handler(command.handler):
+                    self._deferred_context_commands.add(handler_id)
                 plugin_menu_items.append(
                     CommandMenuItem(
                         section=command.section,
@@ -174,7 +208,12 @@ class PluginHost:
         command = self._commands.get(handler_id)
         if command is None:
             return False
-        context = self._context_factory()
+        context_factory = (
+            self._deferred_context_factory
+            if handler_id in self._deferred_context_commands and self._deferred_context_factory is not None
+            else self._context_factory
+        )
+        context = context_factory()
         try:
             command.handler(context)
         except Exception as exc:

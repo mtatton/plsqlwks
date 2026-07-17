@@ -20,6 +20,7 @@ from plsqlwks.ui.plugin_host import PluginHost
 from plsqlwks.ui.query_controller import QueryController
 from plsqlwks.ui.renderer import Renderer
 from plsqlwks.ui.result_controller import ResultController
+from plsqlwks.ui.result_export import ResultExportController
 from plsqlwks.ui.result_presenter import ResultPresenter
 from plsqlwks.ui.viewport import ViewportController
 
@@ -294,8 +295,14 @@ class ServiceHarness:
             result_presenter,
             copy_to_clipboard=lambda text: ui.copy_to_system_clipboard(text),
         )
+        result_export = ResultExportController(
+            state,
+            db_operations,
+            dialogs,
+            result_presenter,
+        )
         viewport = ViewportController(screen, state, results)
-        renderer = Renderer(screen, state, documents, browser, results)
+        renderer = Renderer(screen, state)
         renderer.draw_offset_x = self.__dict__.get("_draw_offset_x", 0)
         renderer.syntax_colors_enabled = self.__dict__.get(
             "_syntax_colors_enabled",
@@ -321,6 +328,7 @@ class ServiceHarness:
             "database": database,
             "query": query,
             "results": results,
+            "result_export": result_export,
             "viewport": viewport,
             "renderer": renderer,
             "application": application,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 from pathlib import Path
@@ -10,6 +11,8 @@ import pytest
 import plsqlwks.db as db_module
 from plsqlwks.config import AppConfig
 from plsqlwks.db import (
+    EditableResultContext,
+    OracleExecutionError,
     OracleWorkspace,
     QueryResult,
     QueryResultContinuation,
@@ -17,7 +20,6 @@ from plsqlwks.db import (
 )
 from plsqlwks.ui.app import App
 from plsqlwks.ui.db_operations import DatabaseOperations
-from plsqlwks.ui.result_presenter import ResultPresenter
 from plsqlwks.ui.db_session import DatabaseSessionController
 from plsqlwks.ui.db_worker import (
     DatabaseWorker,
@@ -27,6 +29,7 @@ from plsqlwks.ui.db_worker import (
     DbWorkerFinished,
     DbWorkerProgress,
 )
+from plsqlwks.ui.result_presenter import ResultPresenter
 from plsqlwks.ui.results import ResultInsertDraft
 from plsqlwks.ui.state import FileTab, ResultFetchMore, ScriptExecutionFailed, UIState
 
@@ -213,20 +216,36 @@ def test_base_exception_during_session_snapshot_makes_worker_terminal():
 def test_fatal_task_failure_completes_and_fails_queued_commands():
     workspace = FakeWorkspace()
     worker = DatabaseWorker(workspace)
+    fatal_entered = threading.Event()
+    release_fatal = threading.Event()
+    queued_body_ran = threading.Event()
 
-    first = worker.submit(
-        lambda db, progress: (_ for _ in ()).throw(KeyboardInterrupt())
-    )
-    second = worker.submit(lambda db, progress: "must not run")
+    def fatal_task(db, progress):
+        db.has_uncommitted_changes = True
+        fatal_entered.set()
+        assert release_fatal.wait(2)
+        raise KeyboardInterrupt("forced worker termination")
+
+    def queued_task(db, progress):
+        queued_body_ran.set()
+        return "must not run"
+
+    first = worker.submit(fatal_task)
+    assert fatal_entered.wait(2)
+    second = worker.submit(queued_task)
+    release_fatal.set()
 
     first_event = wait_for(first)[0]
     second_event = wait_for(second)[0]
 
+    assert queued_body_ran.is_set() is False
     assert isinstance(first_event, DbWorkerFinished)
     assert isinstance(first_event.error, DatabaseWorkerUnavailableError)
+    assert first_event.session_state.has_uncommitted_changes is True
     assert isinstance(second_event, DbWorkerFinished)
     assert second_event.result is None
     assert second_event.error is first_event.error
+    assert second_event.session_state.has_uncommitted_changes is True
     with pytest.raises(DatabaseWorkerUnavailableError, match="unavailable"):
         worker.submit(lambda db, progress: None)
     with pytest.raises(DatabaseWorkerUnavailableError, match="KeyboardInterrupt"):
@@ -290,6 +309,7 @@ def test_explicit_connect_replaces_terminal_worker_but_ordinary_sql_does_not(
     failures: list[Exception] = []
 
     try:
+
         def fail_terminally(db, progress):
             db.autocommit = False
             raise KeyboardInterrupt()
@@ -306,11 +326,14 @@ def test_explicit_connect_replaces_terminal_worker_but_ordinary_sql_does_not(
         assert initial_worker.terminal is True
         assert replacement_workers == []
 
-        assert operations.start(
-            "execute",
-            "Executing ordinary SQL",
-            lambda db, progress: "must not run",
-        ) is False
+        assert (
+            operations.start(
+                "execute",
+                "Executing ordinary SQL",
+                lambda db, progress: "must not run",
+            )
+            is False
+        )
         assert replacement_workers == []
 
         controller.try_connect()
@@ -321,10 +344,8 @@ def test_explicit_connect_replaces_terminal_worker_but_ordinary_sql_does_not(
         assert state.db.autocommit is False
         assert state.status == "Connected as hr"
     finally:
-        try:
+        with contextlib.suppress(DatabaseWorkerUnavailableError):
             initial_worker.shutdown()
-        except DatabaseWorkerUnavailableError:
-            pass
         operations.shutdown()
 
 
@@ -366,9 +387,7 @@ def test_completion_publication_failure_sets_done_and_fails_queued_commands():
     first = worker.submit(blocking_task)
     second = worker.submit(lambda db, progress: "must not run")
     assert started.wait(2)
-    first._emit = lambda event: (_ for _ in ()).throw(
-        RuntimeError("event sink failed")
-    )
+    first._emit = lambda event: (_ for _ in ()).throw(RuntimeError("event sink failed"))
     release.set()
 
     assert first.done.wait(2)
@@ -382,11 +401,25 @@ def test_completion_publication_failure_sets_done_and_fails_queued_commands():
     assert worker.session_state.has_uncommitted_changes is True
 
 
+@pytest.mark.parametrize(
+    ("has_uncommitted_changes", "transaction_message"),
+    [
+        (True, "transaction outcome is unknown"),
+        (False, "no pending transaction was tracked"),
+    ],
+)
 def test_dead_worker_submission_detaches_live_handles_without_running_callbacks(
     tmp_path,
+    has_uncommitted_changes,
+    transaction_message,
 ):
     class DeadWorker:
-        session_state = DbSessionState(False, False, False, True)
+        session_state = DbSessionState(
+            False,
+            False,
+            False,
+            has_uncommitted_changes,
+        )
 
         def submit(self, task, *, ignored=False, background=False):
             raise DatabaseWorkerUnavailableError("worker stopped")
@@ -403,31 +436,53 @@ def test_dead_worker_submission_detaches_live_handles_without_running_callbacks(
         password_file=tmp_path / "orapass",
         workspace_dir=tmp_path,
     )
-    state = UIState(config, DbSessionState(True, False, False, True))
+    state = UIState(
+        config,
+        DbSessionState(True, False, False, has_uncommitted_changes),
+    )
+    draft_row = [None, "draft"]
+    loaded_row = ["AAABBB", "loaded"]
     result = QueryResult(
         "data",
-        ["VALUE"],
-        [["loaded"]],
+        ["ROWID", "VALUE"],
+        [draft_row, loaded_row],
         "1 row (more available)",
+        editable_context=EditableResultContext("DECISIONS", 0, {1: "VALUE"}),
         continuation=QueryResultContinuation("dead-cursor"),
+        original_rows=[[None, None], list(loaded_row)],
     )
     state.active_result = result
     state.last_result = result
+    state.active_tab.result_insert_draft = ResultInsertDraft(result, 0, draft_row)
     callbacks: list[str] = []
     operations = DatabaseOperations(state, worker=DeadWorker())
 
-    assert operations.start(
-        "execute",
-        "Executing",
-        lambda db, progress: None,
-        on_error=lambda exc: callbacks.append(str(exc)),
-    ) is False
+    assert (
+        operations.start(
+            "execute",
+            "Executing",
+            lambda db, progress: None,
+            on_error=lambda exc: callbacks.append(str(exc)),
+        )
+        is False
+    )
 
     assert callbacks == []
-    assert state.db == DbSessionState(False, False, False, True)
+    assert state.db == DbSessionState(
+        False,
+        False,
+        False,
+        has_uncommitted_changes,
+    )
     assert state.active_result is result
+    assert result.rows == [loaded_row]
+    assert result.original_rows == [loaded_row]
     assert result.continuation is None
-    assert "transaction outcome is unknown" in state.status
+    assert result.editable_context is None
+    assert result.edit_message == "Connection lost; materialized rows are read-only"
+    assert result.detached_reason == "Connection lost; materialized rows are read-only"
+    assert state.active_tab.result_insert_draft is None
+    assert transaction_message in state.status
 
     background = operations.submit_background(lambda db, progress: None)
     assert background.done.is_set()
@@ -464,6 +519,7 @@ def test_dead_worker_submission_detaches_live_state_from_every_tab(tmp_path):
             ["VALUE"],
             [draft_row, loaded_row],
             "1 row (more available)",
+            editable_context=EditableResultContext("DECISIONS", 0, {0: "VALUE"}),
             continuation=QueryResultContinuation(f"active-{index}"),
             original_rows=[[None], list(loaded_row)],
         )
@@ -472,6 +528,7 @@ def test_dead_worker_submission_detaches_live_state_from_every_tab(tmp_path):
             ["VALUE"],
             [[f"previous-{index}"]],
             "1 row (more available)",
+            editable_context=EditableResultContext("DECISIONS", 0, {0: "VALUE"}),
             continuation=QueryResultContinuation(f"previous-{index}"),
         )
         tab = FileTab(active_result=active, last_result=previous)
@@ -481,19 +538,28 @@ def test_dead_worker_submission_detaches_live_state_from_every_tab(tmp_path):
     state.tabs = tabs
     operations = DatabaseOperations(state, worker=DeadWorker())
 
-    assert operations.start(
-        "execute",
-        "Executing",
-        lambda db, progress: None,
-    ) is False
+    assert (
+        operations.start(
+            "execute",
+            "Executing",
+            lambda db, progress: None,
+        )
+        is False
+    )
 
-    for tab, (active, previous, loaded_row) in zip(state.tabs, expected):
+    for tab, (active, previous, loaded_row) in zip(state.tabs, expected, strict=True):
         assert tab.active_result is active
         assert tab.last_result is previous
         assert active.rows == [loaded_row]
         assert active.original_rows == [loaded_row]
         assert active.continuation is None
         assert previous.continuation is None
+        assert active.editable_context is None
+        assert previous.editable_context is None
+        assert active.edit_message == "Connection lost; materialized rows are read-only"
+        assert previous.edit_message == "Connection lost; materialized rows are read-only"
+        assert active.detached_reason == "Connection lost; materialized rows are read-only"
+        assert previous.detached_reason == "Connection lost; materialized rows are read-only"
         assert tab.result_insert_draft is None
 
 
@@ -515,16 +581,12 @@ def test_completion_callback_failure_is_contained_on_ui_poll(tmp_path):
             "execute",
             "Executing",
             lambda db, progress: "done",
-            on_success=lambda result: (_ for _ in ()).throw(
-                RuntimeError("callback failed")
-            ),
+            on_success=lambda result: (_ for _ in ()).throw(RuntimeError("callback failed")),
         )
         operations.wait(timeout=2)
 
         assert state.db_operation is None
-        assert state.status == (
-            "Database operation completion failed: RuntimeError: callback failed"
-        )
+        assert state.status == ("Database operation completion failed: RuntimeError: callback failed")
         assert state.results == [
             "ERROR completing database operation:",
             "RuntimeError: callback failed",
@@ -599,6 +661,7 @@ def test_unexpected_session_loss_preserves_loaded_rows_and_clears_live_state(
         ["VALUE"],
         [draft_row, ["loaded"]],
         "1 row (more available)",
+        editable_context=EditableResultContext("DECISIONS", 0, {0: "VALUE"}),
         continuation=QueryResultContinuation("lost-cursor"),
         original_rows=[[None], ["loaded"]],
     )
@@ -629,10 +692,82 @@ def test_unexpected_session_loss_preserves_loaded_rows_and_clears_live_state(
         assert result.rows == [["loaded"]]
         assert result.original_rows == [["loaded"]]
         assert result.continuation is None
+        assert result.editable_context is None
+        assert result.edit_message == "Connection lost; materialized rows are read-only"
+        assert result.detached_reason == "Connection lost; materialized rows are read-only"
         assert state.active_tab.result_insert_draft is None
         assert "transaction outcome is unknown" in state.status
     finally:
         worker.shutdown()
+
+
+def test_oracle_cancel_error_detaches_live_state_without_local_interrupt(tmp_path):
+    class CancelledWorker:
+        terminal = False
+        session_state = DbSessionState(True, False, False, False)
+
+        def submit(self, task, *, ignored=False, background=False):
+            handle = DbCommandHandle(1, queue.Queue(), threading.Event(), background)
+            if ignored:
+                handle.ignore()
+            else:
+                handle._emit(
+                    DbWorkerFinished(
+                        1,
+                        None,
+                        OracleExecutionError(
+                            RuntimeError("ORA-01013: user requested cancel of current operation"),
+                            "Current statement",
+                        ),
+                        self.session_state,
+                    )
+                )
+            handle.done.set()
+            return handle
+
+        def cancel_current_operation(self, command_id):
+            return False
+
+        def shutdown(self, timeout=None):
+            return None
+
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, DbSessionState(True, False, False, False))
+    draft_row = [None, "draft"]
+    loaded_row = ["AAABBB", "loaded"]
+    result = QueryResult(
+        "data",
+        ["ROWID", "VALUE"],
+        [draft_row, loaded_row],
+        "1 row (more available)",
+        editable_context=EditableResultContext("DECISIONS", 0, {1: "VALUE"}),
+        continuation=QueryResultContinuation("cancelled-cursor"),
+        original_rows=[[None, None], list(loaded_row)],
+    )
+    state.active_result = result
+    state.last_result = result
+    state.active_tab.result_insert_draft = ResultInsertDraft(result, 0, draft_row)
+    operations = DatabaseOperations(state, worker=CancelledWorker())
+    presenter = ResultPresenter(state, operations)
+    operations.set_result_handler(presenter.apply_db_operation_result)
+
+    assert operations.start("execute", "Executing", lambda db, progress: None)
+    operations.poll()
+
+    assert state.active_result is result
+    assert result.rows == [loaded_row]
+    assert result.original_rows == [loaded_row]
+    assert result.continuation is None
+    assert result.editable_context is None
+    assert result.detached_reason == ("Database operation interrupted; materialized rows are read-only")
+    assert state.active_tab.result_insert_draft is None
+    assert state.status.startswith("Execution interrupted: ORA-01013")
+    assert "No pending transaction was tracked" in state.status
 
 
 @pytest.mark.parametrize("initially_connected", [True, False])
@@ -707,6 +842,150 @@ def test_session_loss_detaches_continuation_added_by_fetch_more_payload(tmp_path
     assert result.rows == [["first"], ["second"]]
     assert result.continuation is None
     assert result.has_more_rows is True
+
+
+def test_connection_loss_during_gated_paging_keeps_returned_rows_but_detaches_live_state(tmp_path):
+    class HealthConnection:
+        healthy = True
+
+        def is_healthy(self):
+            return self.healthy
+
+    entered = threading.Event()
+    release = threading.Event()
+    connection = HealthConnection()
+    workspace = FakeWorkspace()
+    workspace.connection = connection
+    workspace.autocommit = False
+    worker = DatabaseWorker(workspace)
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, worker.session_state)
+    result = QueryResult(
+        "data",
+        ["ROWID", "VALUE"],
+        [["AAABBB", "first"]],
+        "1 row (more available)",
+        editable_context=EditableResultContext("DECISIONS", 0, {1: "VALUE"}),
+        continuation=QueryResultContinuation("old-cursor"),
+    )
+    state.active_result = result
+    state.last_result = result
+    operations = DatabaseOperations(state, worker=worker)
+    presenter = ResultPresenter(state, operations)
+    operations.set_result_handler(presenter.apply_db_operation_result)
+
+    def fetch_page(db, progress):
+        entered.set()
+        assert release.wait(2)
+        db.has_uncommitted_changes = True
+        return ResultFetchMore(
+            result,
+            QueryResultPage(
+                [["CCCDDD", "second"]],
+                "2 rows (more available)",
+                continuation=QueryResultContinuation("dead-next-cursor"),
+            ),
+            1,
+        )
+
+    try:
+        assert operations.start("fetch-more", "Fetching", fetch_page)
+        assert entered.wait(2)
+        assert result.continuation == QueryResultContinuation("old-cursor")
+        assert result.editable_context is not None
+        connection.healthy = False
+        release.set()
+        operations.wait(timeout=2)
+
+        assert result.rows == [["AAABBB", "first"], ["CCCDDD", "second"]]
+        assert result.continuation is None
+        assert result.editable_context is None
+        assert result.detached_reason == "Connection lost; materialized rows are read-only"
+        assert state.db == DbSessionState(False, False, False, True)
+        assert "transaction outcome is unknown" in state.status
+    finally:
+        release.set()
+        worker.shutdown()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_connection_loss_during_gated_edit_has_deterministic_success_and_error_state(tmp_path, raises):
+    class HealthConnection:
+        healthy = True
+
+        def is_healthy(self):
+            return self.healthy
+
+    entered = threading.Event()
+    release = threading.Event()
+    connection = HealthConnection()
+    workspace = FakeWorkspace()
+    workspace.connection = connection
+    workspace.autocommit = False
+    worker = DatabaseWorker(workspace)
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, worker.session_state)
+    result = QueryResult(
+        "data",
+        ["ROWID", "VALUE"],
+        [["AAABBB", "old"]],
+        "1 row",
+        editable_context=EditableResultContext("DECISIONS", 0, {1: "VALUE"}),
+        original_rows=[["AAABBB", "old"]],
+    )
+    state.active_result = result
+    state.last_result = result
+    failures: list[Exception] = []
+    operations = DatabaseOperations(state, worker=worker)
+
+    def edit_cell(db, progress):
+        entered.set()
+        assert release.wait(2)
+        db.has_uncommitted_changes = True
+        if raises:
+            raise RuntimeError("connection lost during edit")
+        return "new"
+
+    def edited(value):
+        result.rows[0][1] = value
+        result.original_rows[0][1] = value
+        result.editable_context = EditableResultContext("DECISIONS", 0, {1: "VALUE"})
+
+    try:
+        assert operations.start(
+            "edit-cell",
+            "Editing",
+            edit_cell,
+            on_success=edited,
+            on_error=failures.append,
+        )
+        assert entered.wait(2)
+        assert result.rows[0][1] == "old"
+        assert result.editable_context is not None
+        connection.healthy = False
+        release.set()
+        operations.wait(timeout=2)
+
+        assert result.rows[0][1] == ("old" if raises else "new")
+        assert result.original_rows[0][1] == ("old" if raises else "new")
+        assert len(failures) == int(raises)
+        assert result.editable_context is None
+        assert result.detached_reason == "Connection lost; materialized rows are read-only"
+        assert state.db == DbSessionState(False, False, False, True)
+        assert "transaction outcome is unknown" in state.status
+    finally:
+        release.set()
+        worker.shutdown()
 
 
 def test_session_loss_detaches_continuation_from_script_partial_results(tmp_path):
@@ -825,11 +1104,18 @@ class CancelWorkspace(FakeWorkspace):
         super().__init__()
         self.started = threading.Event()
         self.release = threading.Event()
+        self.task_ready_to_return = threading.Event()
+        self.allow_task_return = threading.Event()
+        self.cancel_entered = threading.Event()
+        self.allow_cancel_return = threading.Event()
         self.cancel_calls: list[int] = []
 
     def cancel_current_operation(self) -> bool:
         self.cancel_calls.append(threading.get_ident())
+        self.cancel_entered.set()
         self.release.set()
+        assert self.task_ready_to_return.wait(2)
+        assert self.allow_cancel_return.wait(2)
         return True
 
 
@@ -842,6 +1128,8 @@ def test_cancel_is_out_of_band_and_guarded_by_current_command_id():
     def blocking_task(db, progress):
         db.started.set()
         assert db.release.wait(2)
+        db.task_ready_to_return.set()
+        assert db.allow_task_return.wait(2)
         return "cancelled"
 
     def second_task(db, progress):
@@ -855,7 +1143,20 @@ def test_cancel_is_out_of_band_and_guarded_by_current_command_id():
         assert workspace.started.wait(2)
 
         assert worker.cancel_current_operation(second.command_id) is False
-        assert worker.cancel_current_operation(first.command_id) is True
+        cancel_result: list[bool] = []
+        cancel_thread = threading.Thread(
+            target=lambda: cancel_result.append(worker.cancel_current_operation(first.command_id)),
+        )
+        cancel_thread.start()
+        assert workspace.cancel_entered.wait(2)
+        assert workspace.task_ready_to_return.wait(2)
+        assert first.done.is_set() is False
+        assert second_started.is_set() is False
+        workspace.allow_cancel_return.set()
+        cancel_thread.join(2)
+        assert cancel_thread.is_alive() is False
+        assert cancel_result == [True]
+        workspace.allow_task_return.set()
         assert wait_for(first)[0] == DbWorkerFinished(
             first.command_id,
             "cancelled",
@@ -864,12 +1165,14 @@ def test_cancel_is_out_of_band_and_guarded_by_current_command_id():
         )
         assert second_started.wait(2)
         assert worker.cancel_current_operation(first.command_id) is False
-        assert workspace.cancel_calls == [threading.get_ident()]
+        assert workspace.cancel_calls == [cancel_thread.ident]
         release_second.set()
         wait_for(second)
         assert worker.cancel_current_operation(first.command_id) is False
     finally:
         workspace.release.set()
+        workspace.allow_cancel_return.set()
+        workspace.allow_task_return.set()
         release_second.set()
         worker.shutdown()
 
@@ -989,9 +1292,7 @@ def test_real_workspace_keeps_paged_cursor_on_the_persistent_worker_thread(tmp_p
 
     try:
         executed = worker.submit(
-            lambda db, progress: db.execute_statement(
-                "select 1 as value from dual union all select 2 from dual"
-            )
+            lambda db, progress: db.execute_statement("select 1 as value from dual union all select 2 from dual")
         )
         executed_event = wait_for(executed)[0]
         assert isinstance(executed_event, DbWorkerFinished)
@@ -999,18 +1300,14 @@ def test_real_workspace_keeps_paged_cursor_on_the_persistent_worker_thread(tmp_p
         result = executed_event.result
         assert result.continuation is not None
 
-        first_page = worker.submit(
-            lambda db, progress: db.fetch_more_rows(result.continuation, len(result.rows))
-        )
+        first_page = worker.submit(lambda db, progress: db.fetch_more_rows(result.continuation, len(result.rows)))
         first_page_event = wait_for(first_page)[0]
         assert isinstance(first_page_event, DbWorkerFinished)
         result.rows.extend(first_page_event.result.rows)
         result.continuation = first_page_event.result.continuation
         assert result.continuation is not None
 
-        final_page = worker.submit(
-            lambda db, progress: db.fetch_more_rows(result.continuation, len(result.rows))
-        )
+        final_page = worker.submit(lambda db, progress: db.fetch_more_rows(result.continuation, len(result.rows)))
         final_page_event = wait_for(final_page)[0]
         assert isinstance(final_page_event, DbWorkerFinished)
         assert final_page_event.result.continuation is None
@@ -1051,9 +1348,7 @@ def test_reconnect_creates_connection_and_cleans_up_on_worker_thread(tmp_path, m
 
     try:
         executed = worker.submit(
-            lambda db, progress: db.execute_statement(
-                "select 1 as value from dual union all select 2 from dual"
-            )
+            lambda db, progress: db.execute_statement("select 1 as value from dual union all select 2 from dual")
         )
         executed_event = wait_for(executed)[0]
         assert isinstance(executed_event, DbWorkerFinished)
@@ -1072,9 +1367,7 @@ def test_reconnect_creates_connection_and_cleans_up_on_worker_thread(tmp_path, m
         worker.shutdown()
 
     worker_thread_id = worker.thread.ident
-    old_cursor_thread_ids = {
-        thread_id for _call, thread_id in old_connection.cursor_instance.thread_calls
-    }
+    old_cursor_thread_ids = {thread_id for _call, thread_id in old_connection.cursor_instance.thread_calls}
     assert old_connection.cursor_call_thread_ids
     assert set(old_connection.cursor_call_thread_ids) == {worker_thread_id}
     assert old_cursor_thread_ids == {worker_thread_id}

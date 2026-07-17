@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 from dataclasses import dataclass
-import re
 
 
 @dataclass(frozen=True)
@@ -342,7 +342,7 @@ def _with_plsql_main_sql_terminator(sql: str) -> int | None:
             idx += 1
     if declaration_count == 0 or idx >= len(tokens):
         return None
-    for match, token in zip(matches[idx:], tokens[idx:]):
+    for match, token in zip(matches[idx:], tokens[idx:], strict=True):
         if token == ";":
             return match.start()
     return None
@@ -357,10 +357,15 @@ def _statement_semicolon_plan(
     if is_plsql_like(sql):
         return "none", None
     keywords = leading_sql_keywords(sql, 2)
-    if len(keywords) >= 2 and keywords[0] == "with" and keywords[1] in {
-        "function",
-        "procedure",
-    }:
+    if (
+        len(keywords) >= 2
+        and keywords[0] == "with"
+        and keywords[1]
+        in {
+            "function",
+            "procedure",
+        }
+    ):
         terminator = _with_plsql_main_sql_terminator(sql)
         return (
             "exact",
@@ -470,9 +475,7 @@ def _directive_preflight_issues(script: str, line_starts: list[int]) -> list[Scr
                     statement_start,
                 )
                 plan_start = statement_start
-            terminates = plan_mode == "any" or (
-                plan_mode == "exact" and terminator == exact_terminator
-            )
+            terminates = plan_mode == "any" or (plan_mode == "exact" and terminator == exact_terminator)
             if not terminates:
                 search_start = terminator + 1
                 continue
@@ -647,9 +650,7 @@ def split_script(script: str) -> list[Statement]:
             if text.endswith(";") and not is_plsql_like(text):
                 text = text[:-1].rstrip()
             if text and strip_leading_sql_comments(text):
-                statement_end_col = (
-                    current_end_col(end_line) if end_col is None else end_col
-                )
+                statement_end_col = current_end_col(end_line) if end_col is None else end_col
                 statements.append(
                     Statement(
                         text=text,
@@ -678,15 +679,17 @@ def split_script(script: str) -> list[Statement]:
             start_col = 0
             continue
 
-        slash_line = (
-            _mask_sql_noncode(line, mask_quoted_identifiers=True).strip() == "/"
-        )
-        if slash_line and not (in_single or in_double or in_block_comment or in_q_quote):
-            if current and is_plsql_like("\n".join(current)):
-                flush(line_no - 1)
-                start_line = line_no + 1
-                start_col = 0
-                continue
+        slash_line = _mask_sql_noncode(line, mask_quoted_identifiers=True).strip() == "/"
+        if (
+            slash_line
+            and not (in_single or in_double or in_block_comment or in_q_quote)
+            and current
+            and is_plsql_like("\n".join(current))
+        ):
+            flush(line_no - 1)
+            start_line = line_no + 1
+            start_col = 0
+            continue
 
         if current and line == "":
             current.append("")
@@ -780,10 +783,7 @@ def split_script(script: str) -> list[Statement]:
                             start_offset,
                         )
                         plan_start = start_offset
-                    terminates = plan_mode == "any" or (
-                        plan_mode == "exact"
-                        and terminator_offset == exact_terminator
-                    )
+                    terminates = plan_mode == "any" or (plan_mode == "exact" and terminator_offset == exact_terminator)
                     if terminates:
                         current[-1] = segment[: idx + 1]
                         flush(line_no, offset + idx + 1)

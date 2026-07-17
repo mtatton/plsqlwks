@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import datetime
 import re
-from typing import Any
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from datetime import datetime
+
+import oracledb
 
 from ..sqlsplit import strip_leading_sql_comments
 from .models import (
@@ -13,8 +15,7 @@ from .models import (
     ReadOnlyModeError,
     TransactionReport,
 )
-from .sql_analysis import tail_sql_words
-
+from .sql_analysis import sql_code_mask, tail_sql_words
 
 DIRECT_DML_KEYWORDS = {"insert", "update", "delete", "merge"}
 PLSQL_TRANSACTION_KEYWORDS = {"begin", "declare", "call"}
@@ -36,6 +37,10 @@ DDL_KEYWORDS = {
     "truncate",
 }
 NONCOMMITTING_ALTER_TARGETS = {"session", "system"}
+FOR_UPDATE_RE = re.compile(
+    r"(?<![\w$#])FOR\s+UPDATE(?![\w$#])",
+    re.IGNORECASE,
+)
 
 
 def leading_sql_keyword(statement: str) -> str:
@@ -69,9 +74,9 @@ def transaction_statement_kind(statement: str) -> str:
     return ""
 
 
-def connection_transaction_in_progress(connection: Any) -> bool | None:
+def connection_transaction_in_progress(connection: oracledb.Connection) -> bool | None:
     try:
-        state = getattr(connection, "transaction_in_progress")
+        state = connection.transaction_in_progress
     except Exception:
         return None
     return state if isinstance(state, bool) else None
@@ -79,13 +84,13 @@ def connection_transaction_in_progress(connection: Any) -> bool | None:
 
 @contextmanager
 def edit_operation_savepoint(
-    connection: Any,
-    cursor: Any,
+    connection: oracledb.Connection,
+    cursor: oracledb.Cursor,
     *,
     autocommit: bool,
     had_pending_work: bool,
-):
-    previous_autocommit = getattr(connection, "autocommit", None)
+) -> Iterator[None]:
+    previous_autocommit = connection.autocommit
     temporarily_disabled_autocommit = autocommit and previous_autocommit is True
     transaction_before = connection_transaction_in_progress(connection)
     safe_to_full_rollback = transaction_before is False and not had_pending_work
@@ -125,10 +130,8 @@ def edit_operation_savepoint(
                 ) from original
             else:
                 if safe_to_full_rollback:
-                    try:
+                    with suppress(Exception):
                         connection.rollback()
-                    except Exception:
-                        pass
         raise
     finally:
         if temporarily_disabled_autocommit:
@@ -136,8 +139,8 @@ def edit_operation_savepoint(
 
 
 def rollback_explain_plan_savepoint(
-    connection: Any,
-    cursor: Any,
+    connection: oracledb.Connection,
+    cursor: oracledb.Cursor,
     savepoint_name: str,
     *,
     safe_to_full_rollback: bool,
@@ -182,13 +185,13 @@ def rollback_explain_plan_savepoint(
 
 @contextmanager
 def explain_plan_savepoint(
-    connection: Any,
-    cursor: Any,
+    connection: oracledb.Connection,
+    cursor: oracledb.Cursor,
     *,
     had_pending_work: bool,
     transaction_before: bool | None,
-):
-    previous_autocommit = getattr(connection, "autocommit", None)
+) -> Iterator[None]:
+    previous_autocommit = connection.autocommit
     temporarily_disabled_autocommit = previous_autocommit is True
     safe_to_full_rollback = transaction_before is False and not had_pending_work
     savepoint_name = f"PLSQLWKS_EXPLAIN_{uuid.uuid4().hex[:16].upper()}"
@@ -248,8 +251,7 @@ def read_only_rejection_reason(statement: str) -> str:
     if not keyword:
         return ""
     if keyword in {"select", "with"}:
-        words = tail_sql_words(statement)
-        if any(first == "FOR" and second == "UPDATE" for first, second in zip(words, words[1:])):
+        if FOR_UPDATE_RE.search(sql_code_mask(statement)) is not None:
             return "SELECT FOR UPDATE is disabled in read-only mode"
         return ""
     if keyword == "rollback":
@@ -268,13 +270,13 @@ def read_only_rejection_reason(statement: str) -> str:
 
 
 class TransactionMixin:
-    connection: Any | None
+    connection: oracledb.Connection | None
     autocommit: bool
     read_only: bool
     pending_rows_changed: int
     pending_unknown_changes: bool
 
-    def ensure_connected(self) -> Any:
+    def ensure_connected(self) -> oracledb.Connection:
         raise NotImplementedError
 
     @property
@@ -331,7 +333,7 @@ class TransactionMixin:
         elif kind == "plsql":
             self.record_pending_unknown()
 
-    def synchronize_pending_transaction(self, connection: Any | None = None) -> bool:
+    def synchronize_pending_transaction(self, connection: oracledb.Connection | None = None) -> bool:
         conn = self.connection if connection is None else connection
         if conn is None:
             return False
@@ -344,7 +346,7 @@ class TransactionMixin:
             self.pending_unknown_changes = True
         return True
 
-    def reconcile_uncertain_edit_failure(self, connection: Any) -> None:
+    def reconcile_uncertain_edit_failure(self, connection: oracledb.Connection) -> None:
         in_progress = connection_transaction_in_progress(connection)
         if in_progress is False:
             self.clear_pending_transaction()

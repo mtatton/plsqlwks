@@ -19,7 +19,6 @@ from plsqlwks.ui import (
     KEY_CTRL_UP,
 )
 
-
 HARNESS = r"""
 import os
 import sys

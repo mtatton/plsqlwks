@@ -1,27 +1,29 @@
 from __future__ import annotations
 
+import os
+import re
+import socket
+import time
+import uuid
 from configparser import ConfigParser
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
-import os
-import re
-import time
-import uuid
 
 import oracledb
 import pytest
 
 from plsqlwks.config import load_config
 from plsqlwks.db import (
-    CellUpdateResult,
-    ConcurrentEditError,
     LOB_DISPLAY_LIMIT,
     NULL_DISPLAY_TOKEN,
+    CellUpdateResult,
+    ConcurrentEditError,
     OracleCompilationError,
     OracleExecutionError,
     OracleWorkspace,
     TruncatedLobValue,
+    quote_identifier,
 )
 from plsqlwks.sqlsplit import split_script, statement_at_cursor
 from plsqlwks.ui import UIState
@@ -31,7 +33,6 @@ from plsqlwks.ui.db_worker import DatabaseWorker, DbWorkerFinished
 from plsqlwks.ui.result_presenter import ResultPresenter
 from plsqlwks.workspace import ensure_workspace
 from tests.oracle_matrix import version_matches_target
-
 
 pytestmark = [pytest.mark.integration, pytest.mark.oracle]
 
@@ -250,6 +251,302 @@ def test_oracle_select_and_dbms_output_utf8():
         workspace.close()
 
 
+@pytest.mark.parametrize(
+    ("numeric_characters", "date_language", "date_format", "timestamp_format", "session_time_zone"),
+    [
+        (".,", "AMERICAN", "YYYY-MM-DD", 'YYYY-MM-DD"T"HH24:MI:SS.FF6', "+02:00"),
+        (",.", "GERMAN", "DD.MM.YYYY", "DD.MM.YYYY HH24:MI:SS.FF6", "-07:00"),
+    ],
+)
+def test_oracle_typed_values_are_stable_across_nls_profiles(
+    numeric_characters: str,
+    date_language: str,
+    date_format: str,
+    timestamp_format: str,
+    session_time_zone: str,
+) -> None:
+    workspace = OracleWorkspace(replace(load_config(), autocommit=False))
+    table_name = object_name("NLS")
+    happened_at = datetime(2026, 3, 14, 15, 16, 17)
+    recorded_at = datetime(2026, 3, 14, 15, 16, 17, 123456)
+    try:
+        workspace.connect()
+        execute_ignoring_missing(workspace, f"drop table {table_name} purge")
+        workspace.execute_statement(
+            f"""
+            create table {table_name} (
+              id number primary key,
+              amount number(12, 3),
+              happened_at date,
+              recorded_at timestamp(6)
+            )
+            """
+        )
+        workspace.execute_statement(
+            f"alter session set nls_numeric_characters = '{numeric_characters}'"
+        )
+        workspace.execute_statement(f"alter session set nls_date_language = '{date_language}'")
+        workspace.execute_statement(f"alter session set nls_date_format = '{date_format}'")
+        workspace.execute_statement(
+            f"alter session set nls_timestamp_format = '{timestamp_format}'"
+        )
+        workspace.execute_statement(f"alter session set time_zone = '{session_time_zone}'")
+        workspace.execute_statement(
+            f"""
+            insert into {table_name} (id, amount, happened_at, recorded_at)
+            values (
+              1,
+              :amount,
+              to_date('2026-03-14 15:16:17', 'YYYY-MM-DD HH24:MI:SS'),
+              to_timestamp('2026-03-14 15:16:17.123456', 'YYYY-MM-DD HH24:MI:SS.FF6')
+            )
+            """,
+            bind_values={"amount": Decimal("1234.500")},
+        )
+
+        result = workspace.execute_statement(
+            f"select amount, happened_at, recorded_at from {table_name} where id = 1"
+        )
+        assert result.rows == [["1234.5", "2026-03-14 15:16:17", "2026-03-14 15:16:17.123456"]]
+        assert result.original_rows == [[Decimal("1234.5"), happened_at, recorded_at]]
+
+        settings = workspace.execute_statement(
+            """
+            select parameter, value
+            from nls_session_parameters
+            where parameter in (
+              'NLS_NUMERIC_CHARACTERS',
+              'NLS_DATE_LANGUAGE',
+              'NLS_DATE_FORMAT',
+              'NLS_TIMESTAMP_FORMAT'
+            )
+            order by parameter
+            """
+        )
+        assert dict(settings.rows) == {
+            "NLS_DATE_FORMAT": date_format,
+            "NLS_DATE_LANGUAGE": date_language,
+            "NLS_NUMERIC_CHARACTERS": numeric_characters,
+            "NLS_TIMESTAMP_FORMAT": timestamp_format,
+        }
+    finally:
+        try:
+            rollback_and_execute_ignoring_missing(workspace, f"drop table {table_name} purge")
+        finally:
+            workspace.close()
+
+
+def test_oracle_quoted_unicode_identifiers_and_date_round_trip() -> None:
+    workspace = OracleWorkspace(replace(load_config(), autocommit=False))
+    table_name = f"PŽ_{uuid.uuid4().hex[:8].upper()}"
+    id_column = "Číslo"
+    date_column = "Datum_ž"
+    note_column = "Poznámka"
+    table_sql = quote_identifier(table_name)
+    id_sql = quote_identifier(id_column)
+    date_sql = quote_identifier(date_column)
+    note_sql = quote_identifier(note_column)
+    happened_at = datetime(2026, 7, 17, 12, 13, 14)
+    assert len(table_name.encode("utf-8")) < 30
+    try:
+        workspace.connect()
+        execute_ignoring_missing(workspace, f"drop table {table_sql} purge")
+        workspace.execute_statement(
+            f"create table {table_sql} ({id_sql} number primary key, {date_sql} date, {note_sql} varchar2(100))"
+        )
+        workspace.execute_statement(
+            f"insert into {table_sql} ({id_sql}, {date_sql}, {note_sql}) values (1, :happened_at, :note)",
+            bind_values={"happened_at": happened_at, "note": "Příliš žluťoučký kůň"},
+        )
+
+        result = workspace.execute_statement(f"select rowid, t.* from {table_sql} t")
+        assert result.columns == ["ROWID", id_column, date_column, note_column]
+        assert result.original_rows[0][1:] == [Decimal("1"), happened_at, "Příliš žluťoučký kůň"]
+        assert result.editable_context is not None
+        rowid = result.rows[0][0]
+        refreshed = workspace.update_cell_by_rowid(
+            result.editable_context,
+            rowid,
+            3,
+            result.original_rows[0][3],
+            "Žluťoučká poznámka",
+        )
+        assert refreshed == CellUpdateResult("Žluťoučká poznámka", "Žluťoučká poznámka")
+
+        objects = workspace.list_schema_objects()
+        assert table_name in objects["TABLE"]
+        assert workspace.list_object_columns(table_sql) == [id_column, date_column, note_column]
+        ddl = workspace.get_object_definition("TABLE", table_sql)
+        assert table_sql in ddl
+        assert id_sql in ddl and date_sql in ddl and note_sql in ddl
+    finally:
+        try:
+            rollback_and_execute_ignoring_missing(workspace, f"drop table {table_sql} purge")
+        finally:
+            workspace.close()
+
+
+def test_oracle_zoned_timestamps_are_fail_safe_and_truth_is_explicit() -> None:
+    workspace = OracleWorkspace(replace(load_config(), autocommit=False))
+    table_name = object_name("TIMEZONE")
+    plain_date = datetime(2026, 1, 17, 10, 11, 12)
+    plain_timestamp = datetime(2026, 1, 17, 10, 11, 12, 123456)
+    zoned_marker = "<TIMESTAMP WITH TIME ZONE: lossless Thin-mode fetch unavailable; use TO_CHAR>"
+    local_marker = (
+        "<TIMESTAMP WITH LOCAL TIME ZONE: lossless Thin-mode fetch unavailable; use TO_CHAR>"
+    )
+    format_model = 'YYYY-MM-DD"T"HH24:MI:SS.FF9 TZH:TZM'
+    try:
+        workspace.connect()
+        execute_ignoring_missing(workspace, f"drop table {table_name} purge")
+        workspace.execute_statement(
+            f"""
+            create table {table_name} (
+              id number primary key,
+              plain_date date,
+              plain_timestamp timestamp(6),
+              zoned_timestamp timestamp(9) with time zone,
+              local_timestamp timestamp(9) with local time zone
+            )
+            """
+        )
+        workspace.execute_statement("alter session set time_zone = '+02:00'")
+        workspace.execute_statement(
+            f"""
+            insert into {table_name}
+              (id, plain_date, plain_timestamp, zoned_timestamp, local_timestamp)
+            values
+              (1,
+               to_date('2026-01-17 10:11:12', 'YYYY-MM-DD HH24:MI:SS'),
+               to_timestamp(
+                 '2026-01-17 10:11:12.123456',
+                 'YYYY-MM-DD HH24:MI:SS.FF6'
+               ),
+               to_timestamp_tz(
+                 '2026-01-17 10:11:12.123456789 +05:45',
+                 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM'
+               ),
+               to_timestamp_tz(
+                 '2026-01-17 10:11:12.123456789 +05:45',
+                   'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM'
+                 ))
+            """
+        )
+
+        editable = workspace.execute_statement(f"select rowid, t.* from {table_name} t")
+        assert editable.editable_context is not None
+        assert editable.rows[0][4:] == [zoned_marker, local_marker]
+        assert editable.original_rows[0][4:] == [zoned_marker, local_marker]
+        assert len(editable.warnings) == 1
+        assert "explicit TO_CHAR" in editable.warnings[0]
+        assert editable.editable_context.column_metadata[4].type_code is oracledb.DB_TYPE_TIMESTAMP_TZ
+        assert editable.editable_context.column_metadata[5].type_code is oracledb.DB_TYPE_TIMESTAMP_LTZ
+        for column_index in (4, 5):
+            with pytest.raises(ValueError, match="cannot yet be edited without losing time-zone information"):
+                workspace.update_cell_by_rowid(
+                    editable.editable_context,
+                    editable.rows[0][0],
+                    column_index,
+                    editable.original_rows[0][column_index],
+                    "2026-01-17 10:11:12+05:45",
+                )
+
+        truth_at_plus_two = workspace.execute_statement(
+            f"""
+            select
+              plain_date,
+              plain_timestamp,
+              zoned_timestamp,
+              local_timestamp,
+              to_char(zoned_timestamp, '{format_model}') as zoned_truth,
+              to_char(
+                cast(local_timestamp as timestamp(9) with time zone),
+                '{format_model}'
+              ) as local_truth
+                from {table_name}
+                """
+        )
+        assert truth_at_plus_two.original_rows[0][:2] == [plain_date, plain_timestamp]
+        assert truth_at_plus_two.rows == [
+            [
+                "2026-01-17 10:11:12",
+                "2026-01-17 10:11:12.123456",
+                zoned_marker,
+                local_marker,
+                "2026-01-17T10:11:12.123456789 +05:45",
+                "2026-01-17T06:26:12.123456789 +02:00",
+            ]
+        ]
+
+        workspace.execute_statement("alter session set time_zone = '-07:00'")
+        truth_at_minus_seven = workspace.execute_statement(
+            f"""
+            select
+              to_char(zoned_timestamp, '{format_model}'),
+              to_char(
+                cast(local_timestamp as timestamp(9) with time zone),
+                '{format_model}'
+              )
+            from {table_name}
+            """
+        )
+        assert truth_at_minus_seven.rows == [
+            [
+                "2026-01-17T10:11:12.123456789 +05:45",
+                "2026-01-16T21:26:12.123456789 -07:00",
+            ]
+        ]
+
+        with pytest.raises(OracleExecutionError, match="DPY-3022"):
+            workspace.execute_statement(
+                """
+                select to_timestamp_tz(
+                  '2026-01-17 10:11:12.123456789 Europe/Prague',
+                  'YYYY-MM-DD HH24:MI:SS.FF9 TZR'
+                )
+                from dual
+                """
+            )
+        assert workspace.execute_statement("select 1 from dual").rows == [["1"]]
+    finally:
+        try:
+            rollback_and_execute_ignoring_missing(workspace, f"drop table {table_name} purge")
+        finally:
+            workspace.close()
+
+
+def test_oracle_connection_failure_is_bounded_redacted_and_recoverable() -> None:
+    valid_config = load_config()
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    unavailable_port = int(blocker.getsockname()[1])
+    workspace = OracleWorkspace(
+        replace(
+            valid_config,
+            dsn=f"127.0.0.1:{unavailable_port}/plsqlwks_unavailable",
+        )
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(oracledb.DatabaseError) as excinfo:
+            workspace.connect()
+        assert time.monotonic() - started < 5
+        assert workspace.connection is None
+        assert workspace.has_uncommitted_changes is False
+        error_text = str(excinfo.value)
+        assert valid_config.user not in error_text
+        assert str(valid_config.password_file) not in error_text
+
+        workspace.config = valid_config
+        workspace.connect()
+        assert workspace.execute_statement("select 1 from dual").rows == [["1"]]
+    finally:
+        try:
+            workspace.close()
+        finally:
+            blocker.close()
+
+
 def test_oracle_worker_reconnect_closes_open_result_continuation():
     config = load_config()
     expected_rows = config.max_rows + 1
@@ -317,7 +614,16 @@ def test_oracle_worker_reports_plsql_compile_diagnostics_and_recovers():
         assert warning_result.diagnostics
         assert all(diagnostic.severity == "WARNING" for diagnostic in warning_result.diagnostics)
         assert all(diagnostic.line > 0 and diagnostic.position > 0 for diagnostic in warning_result.diagnostics)
-        assert any(re.match(r"PLW-\d{5}:", diagnostic.text) for diagnostic in warning_result.diagnostics)
+        assert any(
+            diagnostic.text.startswith("PLW-06002:") for diagnostic in warning_result.diagnostics
+        )
+        assert worker_result(
+            worker,
+            lambda db, progress: db.execute_statement(
+                "select status from user_objects where object_type = 'PROCEDURE' and object_name = :name",
+                bind_values={"name": procedure_name},
+            ),
+        ).rows == [["VALID"]]
 
         with pytest.raises(OracleExecutionError) as excinfo:
             worker_result(
@@ -396,9 +702,10 @@ def test_oracle_worker_pages_rows_and_dbms_output_and_closes_continuations():
         output_lines = list(result.dbms_output)
         continuation = result.continuation
         while continuation is not None:
+            loaded_row_count = len(loaded_rows)
             page = worker_result(
                 worker,
-                lambda db, progress, token=continuation, count=len(loaded_rows): db.fetch_more_rows(token, count),
+                lambda db, progress, token=continuation, count=loaded_row_count: db.fetch_more_rows(token, count),
             )
             loaded_rows.extend(page.rows)
             output_lines.extend(page.dbms_output)
@@ -406,9 +713,7 @@ def test_oracle_worker_pages_rows_and_dbms_output_and_closes_continuations():
 
         assert loaded_rows == [[str(value)] for value in range(1, total_rows + 1)]
         assert len(output_lines) == total_rows
-        assert [int(line.removeprefix("PLSQLWKS_PAGE:")) for line in output_lines] == list(
-            range(1, total_rows + 1)
-        )
+        assert [int(line.removeprefix("PLSQLWKS_PAGE:")) for line in output_lines] == list(range(1, total_rows + 1))
         with pytest.raises(RuntimeError, match="stale or no longer available"):
             worker_result(
                 worker,
@@ -444,48 +749,56 @@ def test_oracle_worker_pages_rows_and_dbms_output_and_closes_continuations():
         worker.shutdown(timeout=10)
 
 
-def test_oracle_worker_cancels_running_database_call_and_recovers():
-    table_name = object_name("CANCEL")
-    config = replace(load_config(), autocommit=False)
+def test_oracle_worker_cancels_running_query_and_recovers():
+    query_tag = f"PLSQLWKS_CANCEL_{uuid.uuid4().hex[:12].upper()}"
+    config = load_config()
     worker = DatabaseWorker(OracleWorkspace(config))
     observer = DatabaseWorker(OracleWorkspace(config))
     handle = None
     try:
-        worker_result(
-            worker,
-            lambda db, progress: db.execute_statement(
-                f"create table {table_name} (marker_id number primary key)"
-            ),
-        )
+        worker_result(worker, lambda db, progress: db.ensure_connected())
         worker_result(observer, lambda db, progress: db.ensure_connected())
 
         handle = worker.submit(
             lambda db, progress: db.execute_statement(
                 f"""
+                with function pause_for_cancel return number is
                 begin
-                  insert into {table_name} values (1);
-                  commit;
                   dbms_session.sleep(30);
+                  return 1;
                 end;
+                select /* {query_tag} */ pause_for_cancel as value
+                from dual
                 """,
-                "Cancellation probe",
+                "Long-query cancellation probe",
             )
         )
-        marker_deadline = time.monotonic() + 15
+        active_deadline = time.monotonic() + 15
         while True:
-            marker_count = worker_result(
+            active_count = worker_result(
                 observer,
                 lambda db, progress: db.execute_statement(
-                    f"select count(*) from {table_name} where marker_id = 1"
+                    """
+                    select count(*)
+                    from v$session s
+                    join v$sql q
+                      on q.sql_id = s.sql_id
+                     and q.child_number = s.sql_child_number
+                    where s.status = 'ACTIVE'
+                      and instr(q.sql_fulltext, :query_tag) > 0
+                    """,
+                    bind_values={"query_tag": query_tag},
                 ),
             )
-            if marker_count.rows == [["1"]]:
+            if active_count.rows == [["1"]]:
                 break
-            assert time.monotonic() < marker_deadline, "Oracle cancellation marker was not visible within 15s"
+            assert time.monotonic() < active_deadline, "Long Oracle query was not active within 15s"
             time.sleep(0.1)
 
+        cancel_started = time.monotonic()
         assert worker.cancel_current_operation(handle.command_id) is True
         cancelled = worker_finished(handle, timeout=15)
+        assert time.monotonic() - cancel_started < 15
         assert isinstance(cancelled.error, OracleExecutionError)
         assert "ORA-01013" in str(cancelled.error)
         assert worker_result(
@@ -497,15 +810,8 @@ def test_oracle_worker_cancels_running_database_call_and_recovers():
             worker.cancel_current_operation(handle.command_id)
             handle.done.wait(15)
         try:
-            worker_result(
-                observer,
-                lambda db, progress: rollback_and_execute_ignoring_missing(
-                    db,
-                    f"drop table {table_name} purge",
-                ),
-            )
-        finally:
             observer.shutdown(timeout=10)
+        finally:
             worker.shutdown(timeout=10)
 
 
@@ -727,23 +1033,17 @@ def test_oracle_rowid_edit_detects_concurrent_update():
         )
         worker_result(
             first,
-            lambda db, progress: db.execute_statement(
-                f"insert into {table_name} values (1, 'loaded')"
-            ),
+            lambda db, progress: db.execute_statement(f"insert into {table_name} values (1, 'loaded')"),
         )
         worker_result(first, lambda db, progress: db.set_autocommit(False))
         worker_result(
             first,
-            lambda db, progress: db.execute_statement(
-                f"insert into {table_name} values (2, 'earlier pending work')"
-            ),
+            lambda db, progress: db.execute_statement(f"insert into {table_name} values (2, 'earlier pending work')"),
         )
 
         result = worker_result(
             first,
-            lambda db, progress: db.execute_statement(
-                f"select rowid, name from {table_name} where id = 1"
-            ),
+            lambda db, progress: db.execute_statement(f"select rowid, name from {table_name} where id = 1"),
         )
         assert result.editable_context is not None
         rowid = result.rows[0][0]
@@ -751,9 +1051,7 @@ def test_oracle_rowid_edit_detects_concurrent_update():
 
         worker_result(
             second,
-            lambda db, progress: db.execute_statement(
-                f"update {table_name} set name = 'concurrent' where id = 1"
-            ),
+            lambda db, progress: db.execute_statement(f"update {table_name} set name = 'concurrent' where id = 1"),
         )
 
         with pytest.raises(ConcurrentEditError, match="changed or the row was deleted"):
@@ -777,30 +1075,22 @@ def test_oracle_rowid_edit_detects_concurrent_update():
         assert current.rows == [["concurrent"]]
         assert worker_result(
             first,
-            lambda db, progress: db.execute_statement(
-                f"select count(*) from {table_name} where id = 2"
-            ),
+            lambda db, progress: db.execute_statement(f"select count(*) from {table_name} where id = 2"),
         ).rows == [["1"]]
         assert worker_result(
             second,
-            lambda db, progress: db.execute_statement(
-                f"select count(*) from {table_name} where id = 2"
-            ),
+            lambda db, progress: db.execute_statement(f"select count(*) from {table_name} where id = 2"),
         ).rows == [["0"]]
 
         worker_result(first, lambda db, progress: db.rollback())
         assert first.session_state.has_uncommitted_changes is False
         assert worker_result(
             first,
-            lambda db, progress: db.execute_statement(
-                f"select count(*) from {table_name} where id = 2"
-            ),
+            lambda db, progress: db.execute_statement(f"select count(*) from {table_name} where id = 2"),
         ).rows == [["0"]]
         assert worker_result(
             second,
-            lambda db, progress: db.execute_statement(
-                f"select count(*) from {table_name} where id = 2"
-            ),
+            lambda db, progress: db.execute_statement(f"select count(*) from {table_name} where id = 2"),
         ).rows == [["0"]]
     finally:
         # Release any lock held by the competing session before dropping the
@@ -928,27 +1218,68 @@ def test_oracle_typed_rowid_edits_and_lob_schema_ddl_round_trip():
         assert lob_result.rows == [["Příliš žluťoučký kůň", "1020ff"]]
         assert lob_result.original_rows == [["Příliš žluťoučký kůň", b"\x10\x20\xff"]]
 
-        large_text = "x" * (LOB_DISPLAY_LIMIT + 1)
-        large_binary = b"\xab" * (LOB_DISPLAY_LIMIT + 1)
+        boundary_text = "ž" * LOB_DISPLAY_LIMIT
+        boundary_binary = b"\x00\xff" * (LOB_DISPLAY_LIMIT // 2)
         workspace.execute_statement(
             f"update {table_name} set notes = :notes, payload = :payload where id = 1",
-            bind_values={"notes": large_text, "payload": large_binary},
+            bind_values={"notes": boundary_text, "payload": boundary_binary},
         )
-        truncated = workspace.execute_statement(f"select notes, payload from {table_name}")
-        assert truncated.rows[0][0].startswith("x" * LOB_DISPLAY_LIMIT)
-        assert truncated.rows[0][0].endswith(
+        boundary = workspace.execute_statement(f"select notes, payload from {table_name}")
+        assert boundary.rows == [[boundary_text, boundary_binary.hex()]]
+        assert boundary.original_rows == [[boundary_text, boundary_binary]]
+
+        over_boundary_text = "ž" * (LOB_DISPLAY_LIMIT + 1)
+        over_boundary_binary = b"\xab" * (LOB_DISPLAY_LIMIT + 1)
+        workspace.execute_statement(
+            f"update {table_name} set notes = :notes, payload = :payload where id = 1",
+            bind_values={"notes": over_boundary_text, "payload": over_boundary_binary},
+        )
+        over_boundary = workspace.execute_statement(f"select notes, payload from {table_name}")
+        assert over_boundary.rows[0][0].startswith("ž" * LOB_DISPLAY_LIMIT)
+        assert over_boundary.rows[0][0].endswith(
             f"… <CLOB truncated: showing first {LOB_DISPLAY_LIMIT} of {LOB_DISPLAY_LIMIT + 1} characters>"
         )
-        assert truncated.rows[0][1].startswith("ab" * LOB_DISPLAY_LIMIT)
-        assert truncated.rows[0][1].endswith(
+        assert over_boundary.rows[0][1].startswith("ab" * LOB_DISPLAY_LIMIT)
+        assert over_boundary.rows[0][1].endswith(
             f"… <BLOB truncated: showing first {LOB_DISPLAY_LIMIT} of {LOB_DISPLAY_LIMIT + 1} bytes>"
         )
-        assert truncated.original_rows == [
+        assert over_boundary.original_rows == [
             [
                 TruncatedLobValue("CLOB", LOB_DISPLAY_LIMIT + 1),
                 TruncatedLobValue("BLOB", LOB_DISPLAY_LIMIT + 1),
             ]
         ]
+
+        large_size = 1024 * 1024 + 17
+        large_text = "ž" * large_size
+        binary_pattern = bytes(range(256))
+        large_binary = (binary_pattern * ((large_size + len(binary_pattern) - 1) // len(binary_pattern)))[
+            :large_size
+        ]
+        workspace.execute_statement(
+            f"update {table_name} set notes = :notes, payload = :payload where id = 1",
+            bind_values={"notes": large_text, "payload": large_binary},
+        )
+        lengths = workspace.execute_statement(
+            f"select dbms_lob.getlength(notes), dbms_lob.getlength(payload) from {table_name}"
+        )
+        assert lengths.rows == [[str(large_size), str(large_size)]]
+        large = workspace.execute_statement(f"select notes, payload from {table_name}")
+        assert large.rows[0][0].startswith("ž" * LOB_DISPLAY_LIMIT)
+        assert large.rows[0][0].endswith(
+            f"… <CLOB truncated: showing first {LOB_DISPLAY_LIMIT} of {large_size} characters>"
+        )
+        assert large.rows[0][1].startswith(large_binary[:LOB_DISPLAY_LIMIT].hex())
+        assert large.rows[0][1].endswith(
+            f"… <BLOB truncated: showing first {LOB_DISPLAY_LIMIT} of {large_size} bytes>"
+        )
+        assert large.original_rows == [
+            [
+                TruncatedLobValue("CLOB", large_size),
+                TruncatedLobValue("BLOB", large_size),
+            ]
+        ]
+        assert workspace.execute_statement("select 1 from dual").rows == [["1"]]
     finally:
         try:
             execute_ignoring_missing(workspace, f"drop table {table_name} purge")
@@ -995,9 +1326,7 @@ def test_oracle_worker_transaction_tracker_follows_session_control_and_failed_dd
         )
         worker_result(
             worker,
-            lambda db, progress: db.execute_statement(
-                f"create table {table_name} (id number primary key)"
-            ),
+            lambda db, progress: db.execute_statement(f"create table {table_name} (id number primary key)"),
         )
         worker_result(observer, lambda db, progress: db.ensure_connected())
         worker_result(worker, lambda db, progress: db.set_autocommit(False))
@@ -1010,9 +1339,7 @@ def test_oracle_worker_transaction_tracker_follows_session_control_and_failed_dd
 
         worker_result(
             worker,
-            lambda db, progress: db.execute_statement(
-                "alter session set nls_date_format = 'YYYY-MM-DD'"
-            ),
+            lambda db, progress: db.execute_statement("alter session set nls_date_format = 'YYYY-MM-DD'"),
         )
         assert worker.session_state.has_uncommitted_changes is True
         worker_result(worker, lambda db, progress: db.rollback())
@@ -1029,9 +1356,7 @@ def test_oracle_worker_transaction_tracker_follows_session_control_and_failed_dd
         with pytest.raises(OracleExecutionError, match="ORA-00955"):
             worker_result(
                 worker,
-                lambda db, progress: db.execute_statement(
-                    f"create table {table_name} (other_id number)"
-                ),
+                lambda db, progress: db.execute_statement(f"create table {table_name} (other_id number)"),
             )
 
         assert worker.session_state.has_uncommitted_changes is False
@@ -1149,9 +1474,7 @@ def test_oracle_schema_definition_loading_for_extended_types():
 
         workspace.execute_statement(f"create table {table_name} (id number)")
         workspace.execute_statement(f"create view {view_name} as select id from {table_name}")
-        workspace.execute_statement(
-            f"create or replace function {function_name} return number as begin return 1; end;"
-        )
+        workspace.execute_statement(f"create or replace function {function_name} return number as begin return 1; end;")
         workspace.execute_statement(f"create sequence {sequence_name}")
         workspace.execute_statement(f"create index {index_name} on {table_name} (id)")
         workspace.execute_statement(f"create synonym {synonym_name} for {table_name}")

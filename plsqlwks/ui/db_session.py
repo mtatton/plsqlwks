@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol
 
 from ..config import save_autocommit
 from ..db import TransactionReport
@@ -15,8 +15,13 @@ from .results import (
 )
 from .state import UIState
 
-if TYPE_CHECKING:
-    from .result_presenter import ResultPresenter
+
+class SessionResultPort(Protocol):
+    def close_all_result_continuations(self) -> None: ...
+
+    def invalidate_results_after_rollback(self) -> None: ...
+
+    def set_results(self, lines: list[str], clear_table: bool = True) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -47,7 +52,7 @@ class DatabaseSessionController:
         state: UIState,
         db_operations: DbOperationsPort,
         dialogs: DialogPort,
-        presenter: ResultPresenter,
+        presenter: SessionResultPort,
     ) -> None:
         self.state = state
         self.db_operations = db_operations
@@ -113,15 +118,12 @@ class DatabaseSessionController:
             self.state.status = f"Connected as {self.state.config.user}"
             if result.old_session_close_error is not None:
                 self.state.status += (
-                    " (warning: old session close failed: "
-                    f"{short_error(result.old_session_close_error)})"
+                    f" (warning: old session close failed: {short_error(result.old_session_close_error)})"
                 )
 
         def connect_failed(exc: Exception) -> None:
             self.state.status = "Connection failed"
-            self.presenter.set_results(
-                ["ERROR connecting to Oracle:", *wrap_error(exc)]
-            )
+            self.presenter.set_results(["ERROR connecting to Oracle:", *wrap_error(exc)])
 
         self.db_operations.start(
             "connect",
@@ -146,13 +148,8 @@ class DatabaseSessionController:
         normalized = answer.lower()
         if normalized.startswith("a"):
             resolution = None
-            if (
-                not is_autocommit_enabled(self.state.db)
-                and has_uncommitted_changes(self.state.db)
-            ):
-                resolution = self.prompt_pending_transaction(
-                    "Transaction mode unchanged"
-                )
+            if not is_autocommit_enabled(self.state.db) and has_uncommitted_changes(self.state.db):
+                resolution = self.prompt_pending_transaction("Transaction mode unchanged")
                 if resolution is None:
                     return
             self.set_transaction_mode(True, resolution)
@@ -243,16 +240,10 @@ class DatabaseSessionController:
                     else "ERROR rolling back transaction:"
                 )
                 self.state.status = f"{action} failed"
-                self.presenter.set_results(
-                    [error_header, *wrap_error(result.transaction_error)]
-                )
+                self.presenter.set_results([error_header, *wrap_error(result.transaction_error)])
                 return
             if result.mode_error is not None:
-                suffix = (
-                    f" after {result.resolution}"
-                    if result.resolution in {"commit", "rollback"}
-                    else ""
-                )
+                suffix = f" after {result.resolution}" if result.resolution in {"commit", "rollback"} else ""
                 self.state.status = f"Transaction mode change failed{suffix}"
                 self.presenter.set_results(
                     [
@@ -272,34 +263,22 @@ class DatabaseSessionController:
                 persistence_interruption = exc
             self.state.status = f"Transaction mode: {label}"
             if persistence_interruption is not None:
-                persistence_message = str(persistence_interruption) or type(
-                    persistence_interruption
-                ).__name__
+                persistence_message = str(persistence_interruption) or type(persistence_interruption).__name__
                 self.state.status += (
                     " (warning: live mode changed, preference save was "
                     f"interrupted; verify config: {persistence_message})"
                 )
             elif persistence_error is not None:
-                persistence_message = str(persistence_error) or type(
-                    persistence_error
-                ).__name__
-                self.state.status += (
-                    " (warning: live mode changed, preference was not saved: "
-                    f"{persistence_message})"
-                )
+                persistence_message = str(persistence_error) or type(persistence_error).__name__
+                self.state.status += f" (warning: live mode changed, preference was not saved: {persistence_message})"
             if result.cleanup_error is not None:
-                self.state.status += (
-                    " (warning: result cleanup failed: "
-                    f"{short_error(result.cleanup_error)})"
-                )
+                self.state.status += f" (warning: result cleanup failed: {short_error(result.cleanup_error)})"
             if persistence_interruption is not None:
                 raise persistence_interruption
 
         def mode_failed(exc: Exception) -> None:
             self.state.status = "Transaction mode change failed"
-            self.presenter.set_results(
-                ["ERROR changing transaction mode:", *wrap_error(exc)]
-            )
+            self.presenter.set_results(["ERROR changing transaction mode:", *wrap_error(exc)])
 
         return self.db_operations.start(
             "transaction-mode",
@@ -381,10 +360,7 @@ class DatabaseSessionController:
                 completion.report,
             )
             if completion.cleanup_error is not None:
-                self.state.status += (
-                    " (warning: result cleanup failed: "
-                    f"{short_error(completion.cleanup_error)})"
-                )
+                self.state.status += f" (warning: result cleanup failed: {short_error(completion.cleanup_error)})"
             if after_success is not None:
                 after_success()
 

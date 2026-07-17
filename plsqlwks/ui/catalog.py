@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import curses
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol, cast
 
+from ..db.identifiers import quote_identifier
+from ..db.metadata import MetadataPort
 from .browser import (
     BrowserEntry,
     clamp_browser_row,
@@ -11,17 +12,92 @@ from .browser import (
     schema_object_title,
 )
 from .buffer import Buffer
-from .constants import BROWSER_GROUP_LABELS, CTRL_R, FOCUS_BROWSER, FOCUS_EDITOR
-from .documents import DocumentController
+from .constants import (
+    BROWSER_GROUP_LABELS,
+    CTRL_R,
+    FOCUS_BROWSER,
+    FOCUS_EDITOR,
+    KEY_BACKSPACE,
+    KEY_DOWN,
+    KEY_PAGE_DOWN,
+    KEY_PAGE_UP,
+    KEY_UP,
+)
 from .display import is_printable_text
 from .errors import wrap_error
 from .keys import is_escape_key, key_to_text
 from .ports import DbOperationsPort
-from .state import FileTab, UIState
+from .state import FileTab, UIState, replace_browser_filter
 
 
 class CatalogResultPort(Protocol):
     def set_results(self, lines: list[str], clear_table: bool = True) -> None: ...
+
+
+class DocumentTabPort(Protocol):
+    def find_tab_by_source_key(self, source_key: str) -> int | None: ...
+
+    def switch_to_tab(self, index: int, status: str | None = None) -> None: ...
+
+    def new_tab(self, tab: FileTab | None = None, status: str = "New tab") -> None: ...
+
+
+class CatalogPort(Protocol):
+    @property
+    def schema_objects(self) -> dict[str, list[str]]: ...
+
+    def columns(self, object_name: str) -> list[str] | None: ...
+
+    def replace_schema_objects(
+        self,
+        objects: dict[str, list[str]],
+        *,
+        clear_columns: bool = False,
+    ) -> None: ...
+
+    def update_columns(self, columns: dict[str, list[str]]) -> None: ...
+
+    def load_schema_objects(
+        self,
+        kind: str,
+        label: str,
+        *,
+        clear_columns: bool = False,
+        on_success: Callable[[dict[str, list[str]]], None] | None = None,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> bool: ...
+
+    def load_columns(
+        self,
+        object_name: str,
+        kind: str,
+        label: str,
+        *,
+        on_success: Callable[[list[str]], None] | None = None,
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> bool: ...
+
+    def load_object_definition(
+        self,
+        object_type: str,
+        object_name: str,
+        *,
+        on_success: Callable[[str], None],
+        on_error: Callable[[Exception], None],
+    ) -> bool: ...
+
+    def load_completion_metadata(
+        self,
+        *,
+        need_objects: bool,
+        cached_objects: dict[str, list[str]],
+        resolve_names: Callable[[dict[str, list[str]]], list[str]],
+        cached_column_names: set[str],
+        on_success: Callable[[tuple[dict[str, list[str]] | None, dict[str, list[str]]]], None],
+        on_error: Callable[[Exception], None],
+    ) -> bool: ...
+
+    def refresh_autocomplete_cache(self) -> None: ...
 
 
 class CatalogService:
@@ -40,7 +116,7 @@ class CatalogService:
         return self.state.browser_objects
 
     def columns(self, object_name: str) -> list[str] | None:
-        return self.state.schema_columns.get(object_name.upper())
+        return self.state.schema_columns.get(object_name)
 
     def replace_schema_objects(
         self,
@@ -54,12 +130,10 @@ class CatalogService:
             self.state.schema_columns.clear()
 
     def store_columns(self, object_name: str, columns: list[str]) -> None:
-        self.state.schema_columns[object_name.upper()] = columns
+        self.state.schema_columns[object_name] = columns
 
     def update_columns(self, columns: dict[str, list[str]]) -> None:
-        self.state.schema_columns.update(
-            {object_name.upper(): names for object_name, names in columns.items()}
-        )
+        self.state.schema_columns.update(columns)
 
     def load_schema_objects(
         self,
@@ -78,10 +152,13 @@ class CatalogService:
             if on_success is not None:
                 on_success(objects)
 
+        def task(db: Any, progress: object) -> dict[str, list[str]]:
+            return cast(MetadataPort, db).list_schema_objects()
+
         return self.db_operations.start(
             kind,
             label,
-            lambda db, progress: db.list_schema_objects(),
+            task,
             on_success=loaded,
             on_error=on_error,
         )
@@ -97,17 +174,89 @@ class CatalogService:
     ) -> bool:
         if self.db_operations.reject_if_active():
             return False
-        normalized_name = object_name.upper()
 
         def loaded(columns: list[str]) -> None:
-            self.store_columns(normalized_name, columns)
+            self.store_columns(object_name, columns)
             if on_success is not None:
                 on_success(columns)
+
+        def task(db: Any, progress: object) -> list[str]:
+            return cast(MetadataPort, db).list_object_columns(quote_identifier(object_name))
 
         return self.db_operations.start(
             kind,
             label,
-            lambda db, progress: db.list_object_columns(normalized_name),
+            task,
+            on_success=loaded,
+            on_error=on_error,
+        )
+
+    def load_object_definition(
+        self,
+        object_type: str,
+        object_name: str,
+        *,
+        on_success: Callable[[str], None],
+        on_error: Callable[[Exception], None],
+    ) -> bool:
+        if self.db_operations.reject_if_active():
+            return False
+
+        def task(db: Any, progress: object) -> str:
+            return cast(MetadataPort, db).get_object_definition(
+                object_type,
+                quote_identifier(object_name),
+            )
+
+        return self.db_operations.start(
+            "load-definition",
+            f"Loading {object_type} {object_name}",
+            task,
+            on_success=on_success,
+            on_error=on_error,
+            restore_active_tab=False,
+        )
+
+    def load_completion_metadata(
+        self,
+        *,
+        need_objects: bool,
+        cached_objects: dict[str, list[str]],
+        resolve_names: Callable[[dict[str, list[str]]], list[str]],
+        cached_column_names: set[str],
+        on_success: Callable[[tuple[dict[str, list[str]] | None, dict[str, list[str]]]], None],
+        on_error: Callable[[Exception], None],
+    ) -> bool:
+        if self.db_operations.reject_if_active():
+            return False
+
+        def task(
+            db: Any,
+            progress: object,
+        ) -> tuple[dict[str, list[str]] | None, dict[str, list[str]]]:
+            metadata = cast(MetadataPort, db)
+            objects = metadata.list_schema_objects() if need_objects else None
+            names = resolve_names(objects if objects is not None else cached_objects)
+            columns = {
+                name: metadata.list_object_columns(quote_identifier(name))
+                for name in names
+                if name not in cached_column_names
+            }
+            return objects, columns
+
+        def loaded(
+            result: tuple[dict[str, list[str]] | None, dict[str, list[str]]],
+        ) -> None:
+            objects, columns = result
+            if objects is not None:
+                self.replace_schema_objects(objects)
+            self.update_columns(columns)
+            on_success(result)
+
+        return self.db_operations.start(
+            "completion-metadata",
+            "Loading completion metadata",
+            task,
             on_success=loaded,
             on_error=on_error,
         )
@@ -115,9 +264,7 @@ class CatalogService:
     def refresh_autocomplete_cache(self) -> None:
         def refresh_failed(exc: Exception) -> None:
             self.state.status = "Autocomplete cache refresh failed"
-            self.presenter.set_results(
-                ["ERROR refreshing autocomplete cache:", *wrap_error(exc)]
-            )
+            self.presenter.set_results(["ERROR refreshing autocomplete cache:", *wrap_error(exc)])
 
         def refreshed(objects: dict[str, list[str]]) -> None:
             entries = flatten_browser_entries(
@@ -142,8 +289,8 @@ class BrowserController:
     def __init__(
         self,
         state: UIState,
-        catalog: CatalogService,
-        documents: DocumentController,
+        catalog: CatalogPort,
+        documents: DocumentTabPort,
         db_operations: DbOperationsPort,
         presenter: CatalogResultPort,
     ) -> None:
@@ -188,9 +335,7 @@ class BrowserController:
 
         def refresh_failed(exc: Exception) -> None:
             self.state.status = "Schema refresh failed"
-            self.presenter.set_results(
-                ["ERROR refreshing schema browser:", *wrap_error(exc)]
-            )
+            self.presenter.set_results(["ERROR refreshing schema browser:", *wrap_error(exc)])
 
         self.catalog.load_schema_objects(
             "schema-refresh",
@@ -207,16 +352,23 @@ class BrowserController:
         )
 
     def set_browser_filter(self, filter_text: str) -> None:
-        self.state.browser_filter = filter_text
-        entries = self.browser_entries()
-        self.state.browser_scroll = 0
+        entries = flatten_browser_entries(
+            self.state.browser_objects,
+            self.state.browser_expanded,
+            filter_text,
+        )
         if filter_text:
-            self.state.browser_row = next(
+            selected_row = next(
                 (idx for idx, entry in enumerate(entries) if entry.kind == "object"),
                 0,
             )
         else:
-            self.state.browser_row = 0
+            selected_row = 0
+        self.state.browser = replace_browser_filter(
+            self.state.browser,
+            filter_text,
+            selected_row,
+        )
 
     def handle_browser_key(self, key: int | str) -> None:
         if is_escape_key(key):
@@ -230,7 +382,7 @@ class BrowserController:
         if key == CTRL_R:
             self.refresh_browser()
             return
-        if key in (curses.KEY_BACKSPACE, 127, 8):
+        if key in (KEY_BACKSPACE, 127, 8):
             if self.state.browser_filter:
                 self.set_browser_filter(self.state.browser_filter[:-1])
                 self.state.status = (
@@ -253,16 +405,16 @@ class BrowserController:
             self.state.status = f"Schema filter: {self.state.browser_filter}"
             return
         entries = self.browser_entries()
-        if key == curses.KEY_UP:
+        if key == KEY_UP:
             self.state.browser_row = clamp_browser_row(self.state.browser_row - 1, entries)
-        elif key == curses.KEY_DOWN:
+        elif key == KEY_DOWN:
             self.state.browser_row = clamp_browser_row(self.state.browser_row + 1, entries)
-        elif key == curses.KEY_PPAGE:
+        elif key == KEY_PAGE_UP:
             self.state.browser_row = clamp_browser_row(
                 self.state.browser_row - self.state.browser_page_size,
                 entries,
             )
-        elif key == curses.KEY_NPAGE:
+        elif key == KEY_PAGE_DOWN:
             self.state.browser_row = clamp_browser_row(
                 self.state.browser_row + self.state.browser_page_size,
                 entries,
@@ -315,8 +467,6 @@ class BrowserController:
         self.state.status = f"{label} {state}"
 
     def load_schema_object(self, object_type: str, object_name: str) -> None:
-        if self.db_operations.reject_if_active():
-            return
         title = schema_object_title(self.state.config.user, object_type, object_name)
         existing = self.documents.find_tab_by_source_key(title)
         if existing is not None:
@@ -338,17 +488,13 @@ class BrowserController:
 
         def load_failed(exc: Exception) -> None:
             self.state.status = "Load definition failed"
-            self.presenter.set_results(
-                [f"ERROR loading {object_type} {object_name}:", *wrap_error(exc)]
-            )
+            self.presenter.set_results([f"ERROR loading {object_type} {object_name}:", *wrap_error(exc)])
 
-        self.db_operations.start(
-            "load-definition",
-            f"Loading {object_type} {object_name}",
-            lambda db, progress: db.get_object_definition(object_type, object_name),
+        self.catalog.load_object_definition(
+            object_type,
+            object_name,
             on_success=loaded,
             on_error=load_failed,
-            restore_active_tab=False,
         )
 
     def ensure_browser_selection_visible(self, visible_rows: int) -> None:

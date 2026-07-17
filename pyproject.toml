@@ -26,6 +26,9 @@ classifiers = [
 Repository = "https://gitlab.com/unununu/plsqlwks"
 Issues = "https://gitlab.com/unununu/plsqlwks/-/issues"
 Changelog = "https://gitlab.com/unununu/plsqlwks/-/blob/main/CHANGELOG.md"
+Architecture = "https://gitlab.com/unununu/plsqlwks/-/blob/main/ARCHITECTURE.md"
+Quickstart = "https://gitlab.com/unununu/plsqlwks/-/blob/main/QUICKSTART.md"
+Compatibility = "https://gitlab.com/unununu/plsqlwks/-/blob/main/COMPATIBILITY.md"
 Ko-fi = "https://ko-fi.com/unu2000"
 
 [project.scripts]
@@ -37,6 +40,7 @@ xlsx = [
 ]
 dev = [
     "build>=1.2",
+    "coverage[toml]==7.15.1",
     "mypy>=1.10",
     "pytest>=8.0",
     "ruff>=0.8",
@@ -61,34 +65,41 @@ version = {attr = "plsqlwks.__version__"}
 target-version = "py310"
 line-length = 120
 
+[tool.coverage.run]
+branch = true
+concurrency = ["thread"]
+relative_files = true
+source = ["plsqlwks", "tests"]
+
+[tool.coverage.report]
+precision = 4
+show_missing = true
+
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = ["B", "C4", "E4", "E7", "E9", "F", "I", "PGH003", "PGH004", "RUF100", "SIM", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# The compatibility facades intentionally re-export imports.
-"plsqlwks/config/__init__.py" = ["F401"]
-"plsqlwks/ui/__init__.py" = ["F401", "F403", "F405"]
-# These helpers retain the original shared-constant and facade export pattern.
-"plsqlwks/ui/browser.py" = ["F403", "F405"]
-"plsqlwks/ui/completion.py" = ["F401"]
-"plsqlwks/ui/help.py" = ["F403", "F405"]
-"plsqlwks/ui/keys.py" = ["F403", "F405"]
-"plsqlwks/ui/results.py" = ["F403", "F405"]
-"plsqlwks/ui/sql.py" = ["F401", "F403", "F405"]
-"plsqlwks/ui/state.py" = ["F403", "F405"]
-"plsqlwks/ui/syntax.py" = ["F401", "F403", "F405"]
+"plsqlwks/config/__init__.py" = ["F401"]  # reason: stable configuration facade intentionally re-exports these names
+"plsqlwks/ui/__init__.py" = ["F403", "F405"]  # reason: contract-tested compatibility facade intentionally re-exports its public surface
 
 [tool.mypy]
 python_version = "3.10"
 check_untyped_defs = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+enable_error_code = ["ignore-without-code"]
 no_implicit_optional = true
+warn_unused_ignores = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = [
-    "plsqlwks.db.editing",
-    "plsqlwks.db.execution",
-    "plsqlwks.db.explain",
-    "plsqlwks.db.metadata",
-]
-ignore_errors = true
+module = ["plsqlwks.db.editing"]
+ignore_errors = true  # reason: editing mixin host contracts and two value assignments remain to be typed
+
+[[tool.mypy.overrides]]
+module = ["plsqlwks.db.execution"]
+ignore_errors = true  # reason: execution mixin host contracts and heterogeneous driver values remain to be typed
+
+[[tool.mypy.overrides]]
+module = ["plsqlwks.db.explain"]
+ignore_errors = true  # reason: explain mixin host contracts remain to be typed

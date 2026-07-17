@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
 import plsqlwks.plugins as public_plugins
+import plsqlwks.plugins._result_export as result_export_helpers
 import plsqlwks.plugins.loader as loader_module
+from plsqlwks.exporting import ExportCancelled
 from plsqlwks.plugins import (
     PLUGIN_API_VERSION,
     PLUGIN_ENTRY_POINT_GROUP,
@@ -19,7 +22,6 @@ from plsqlwks.plugins import (
 )
 from plsqlwks.plugins.csv_export import CsvExportOptions
 from plsqlwks.plugins.loader import load_plugin_registry
-
 
 pytestmark = pytest.mark.plugin
 
@@ -91,9 +93,32 @@ def test_public_plugin_api_exports_only_supported_names():
         "has_more",
     )
     with pytest.raises(TypeError):
-        ResultSnapshot("Result", ("ID",), (("1",),), False, ((1,),))  # type: ignore[misc]
+        ResultSnapshot("Result", ("ID",), (("1",),), False, ((1,),))  # type: ignore[misc]  # reason: verifies the private field rejects positional input
     with pytest.raises(FrozenInstanceError):
-        snapshot.title = "Changed"  # type: ignore[misc]
+        snapshot.title = "Changed"  # type: ignore[misc]  # reason: verifies immutable result snapshots reject mutation
+
+
+def test_shared_export_formatting_stops_between_cells_when_cancelled(monkeypatch):
+    formatted: list[str] = []
+    cancelled = False
+
+    def format_value(value: str, *, null_value: str, date_format: str) -> str:
+        nonlocal cancelled
+        formatted.append(value)
+        cancelled = True
+        return value
+
+    monkeypatch.setattr(result_export_helpers, "format_export_value", format_value)
+
+    with pytest.raises(ExportCancelled):
+        result_export_helpers.format_export_rows(
+            (("first", "second"),),
+            null_value="",
+            date_format="",
+            cancelled=lambda: cancelled,
+        )
+
+    assert formatted == ["first"]
 
 
 def test_builtin_plugins_are_registered_csv_then_html_then_xlsx():
@@ -111,7 +136,7 @@ def test_builtin_plugins_are_registered_csv_then_html_then_xlsx():
     command = html_plugin.commands[0]
     assert command.id == "export-loaded-rows"
     assert command.section == "Results"
-    assert command.title == "Export loaded rows to HTML"
+    assert command.title == "Export result to HTML"
     assert command.shortcut == ""
     assert "html" in command.keywords.split()
     xlsx_plugin = registry.plugins[2]
@@ -121,10 +146,31 @@ def test_builtin_plugins_are_registered_csv_then_html_then_xlsx():
     command = xlsx_plugin.commands[0]
     assert command.id == "export-loaded-rows"
     assert command.section == "Results"
-    assert command.title == "Export loaded rows to XLSX"
+    assert command.title == "Export result to XLSX"
     assert command.shortcut == ""
     assert "xlsx" in command.keywords.split()
     assert registry.warnings == ()
+
+
+def test_builtin_export_coordinator_is_private_and_not_given_to_external_plugins():
+    calls: list[tuple[str, object, object]] = []
+
+    def host_export(format_id: str, context: object, options: object) -> None:
+        calls.append((format_id, context, options))
+
+    registry = load_plugin_registry(entry_points=(), host_export=host_export)
+    context = object()
+
+    for plugin in registry.plugins:
+        plugin.commands[0].handler(context)  # type: ignore[arg-type]  # reason: verifies the host withholds its private PluginContext from external handlers
+
+    assert [format_id for format_id, _context, _options in calls] == [
+        "csv",
+        "html",
+        "xlsx",
+    ]
+    assert all(seen_context is context for _format, seen_context, _options in calls)
+    assert PLUGIN_API_VERSION == 1
 
 
 def test_external_entry_point_factories_load_in_deterministic_order():
@@ -275,9 +321,7 @@ def test_broken_external_plugin_does_not_block_valid_plugin():
 
 
 def test_noncallable_external_entry_point_is_skipped():
-    registry = load_plugin_registry(
-        entry_points=(FakeEntryPoint("value", "example:value", lambda: object()),)
-    )
+    registry = load_plugin_registry(entry_points=(FakeEntryPoint("value", "example:value", lambda: object()),))
 
     assert [plugin.id for plugin in registry.plugins] == [
         "csv-export",

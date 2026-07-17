@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .models import AppConfig
 from . import paths
+from .models import AppConfig
 from .session import read_session_tabs
 from .settings import (
     CSV_EXPORT_SECTION,
@@ -16,11 +16,10 @@ from .settings import (
     read_editor_colors,
     read_explain_colors,
     read_ini,
+    read_plugin_enabled,
     read_read_only,
     read_remember_bind_values,
-    read_plugin_enabled,
 )
-
 
 DEFAULT_DSN = """
 (DESCRIPTION =

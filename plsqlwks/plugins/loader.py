@@ -11,11 +11,13 @@ This module is an internal registry implementation, not part of the public
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from importlib import metadata
-import re
-from typing import Any, Iterable
+from typing import Any
 
+from ._result_export import BuiltinExportHandler
 from .api import (
     PLUGIN_API_VERSION,
     PLUGIN_ENTRY_POINT_GROUP,
@@ -23,10 +25,10 @@ from .api import (
     PluginCommand,
     PluginFactory,
 )
-from .csv_export import CsvExportOptions, create_plugin as create_csv_export_plugin
+from .csv_export import CsvExportOptions
+from .csv_export import create_plugin as create_csv_export_plugin
 from .html_export import create_plugin as create_html_export_plugin
 from .xlsx_export import create_plugin as create_xlsx_export_plugin
-
 
 _PLUGIN_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]*$")
 
@@ -60,10 +62,7 @@ def _validate_plugin(plugin: object) -> tuple[Plugin, tuple[tuple[str, str], ...
     if not isinstance(plugin, Plugin):
         raise TypeError("factory must return Plugin")
     if plugin.api_version != PLUGIN_API_VERSION:
-        raise ValueError(
-            f"plugin {plugin.id!r} uses API version {plugin.api_version}; "
-            f"expected {PLUGIN_API_VERSION}"
-        )
+        raise ValueError(f"plugin {plugin.id!r} uses API version {plugin.api_version}; expected {PLUGIN_API_VERSION}")
     if not isinstance(plugin.id, str) or _PLUGIN_ID_PATTERN.fullmatch(plugin.id) is None:
         raise ValueError(f"plugin id {plugin.id!r} is invalid")
     _require_nonempty(plugin.name, "plugin name")
@@ -126,6 +125,7 @@ def load_plugin_registry(
     csv_export_enabled: bool = True,
     html_export_enabled: bool = True,
     xlsx_export_enabled: bool = True,
+    host_export: BuiltinExportHandler | None = None,
 ) -> PluginRegistry:
     """Load built-in plugins, then isolate failures from installed entry points.
 
@@ -143,11 +143,16 @@ def load_plugin_registry(
     if builtin_factories is None:
         default_factories: list[PluginFactory] = []
         if csv_export_enabled:
-            default_factories.append(lambda: create_csv_export_plugin(csv_export_options))
+            default_factories.append(
+                lambda: create_csv_export_plugin(
+                    csv_export_options,
+                    host_export=host_export,
+                )
+            )
         if html_export_enabled:
-            default_factories.append(create_html_export_plugin)
+            default_factories.append(lambda: create_html_export_plugin(host_export=host_export))
         if xlsx_export_enabled:
-            default_factories.append(create_xlsx_export_plugin)
+            default_factories.append(lambda: create_xlsx_export_plugin(host_export=host_export))
         factories = tuple(default_factories)
     else:
         factories = tuple(builtin_factories)
@@ -173,9 +178,6 @@ def load_plugin_registry(
                 raise TypeError("entry point must resolve to a callable")
             _register_plugin(factory(), plugins, plugin_ids, command_keys)
         except Exception as error:
-            warnings.append(
-                f"External plugin {_entry_point_name(entry_point)!r} skipped: "
-                f"{_concise_error(error)}"
-            )
+            warnings.append(f"External plugin {_entry_point_name(entry_point)!r} skipped: {_concise_error(error)}")
 
     return PluginRegistry(tuple(plugins), tuple(warnings))

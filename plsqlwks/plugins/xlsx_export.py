@@ -1,28 +1,32 @@
-"""Built-in Plugin API v1 command for type-aware XLSX result export.
+"""Built-in command plugin and writer for type-aware XLSX result export.
 
-The command uses only the immutable result snapshot and UI-mediated operations
-from :class:`PluginContext`.  Source-number hints let the neutral writer create
-precision-safe Excel numbers without guessing from display text; every other
-value remains a formula-safe literal string.  Workbook support is loaded lazily,
-so the optional ``openpyxl`` dependency is unnecessary for core PLSQLWKS
-startup and for plugins that do not export XLSX files.
+The standalone handler uses only the immutable loaded-row snapshot supplied by
+Plugin API v1.  The application can privately coordinate a larger snapshot and
+then invoke the same writer. Source-number hints create precision-safe Excel
+numbers without guessing from display text; every other value remains a
+formula-safe literal string. Workbook support is loaded lazily, so optional
+``openpyxl`` is unnecessary for core PLSQLWKS startup.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
-from ..xlsx_exporting import write_xlsx_result
+from ..xlsx_exporting import preflight_xlsx_export, write_xlsx_result
 from ._result_export import (
+    BuiltinExportHandler,
     default_result_filename,
     format_export_rows,
     local_now,
+    mark_private_host_export_handler,
     prepare_result_export,
     short_error,
     success_message,
 )
-from .api import Plugin, PluginCommand, PluginContext
+from .api import Plugin, PluginCommand, PluginContext, ResultSnapshot
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,9 @@ class XlsxExportOptions:
     auto_filter: bool = True
     auto_width: bool = True
     freeze_top_row: bool = True
+
+
+_DEFAULT_XLSX_EXPORT_OPTIONS = XlsxExportOptions()
 
 
 _NULL_VALUE_ENV = "PLSQLWKS_XLSX_EXPORT_NULL_VALUE"
@@ -93,7 +100,7 @@ def _environment_options() -> XlsxExportOptions:
 
 def export_loaded_rows_to_xlsx(
     context: PluginContext,
-    options: XlsxExportOptions = XlsxExportOptions(),
+    options: XlsxExportOptions = _DEFAULT_XLSX_EXPORT_OPTIONS,
 ) -> None:
     """Prompt for and atomically export the command-start result snapshot."""
     try:
@@ -105,21 +112,7 @@ def export_loaded_rows_to_xlsx(
         if prepared is None:
             return
         snapshot, path = prepared
-        write_xlsx_result(
-            path,
-            title=snapshot.title,
-            columns=snapshot.columns,
-            rows=format_export_rows(
-                snapshot.rows,
-                null_value=options.null_value,
-                date_format=options.date_format,
-            ),
-            numeric_values=snapshot.numeric_values,
-            theme=options.theme,
-            auto_filter=options.auto_filter,
-            auto_width=options.auto_width,
-            freeze_top_row=options.freeze_top_row,
-        )
+        write_xlsx_snapshot(path, snapshot, options)
     except Exception as error:
         context.set_status(f"XLSX export failed: {short_error(error)}")
         context.report_error("XLSX export failed", error)
@@ -128,12 +121,54 @@ def export_loaded_rows_to_xlsx(
     context.set_status(success_message(snapshot, path))
 
 
-def create_plugin(options: XlsxExportOptions | None = None) -> Plugin:
+def preflight_xlsx_snapshot(options: XlsxExportOptions) -> None:
+    preflight_xlsx_export(options.theme)
+
+
+def write_xlsx_snapshot(
+    path: Path,
+    snapshot: ResultSnapshot,
+    options: XlsxExportOptions,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    write_xlsx_result(
+        path,
+        title=snapshot.title,
+        columns=snapshot.columns,
+        rows=format_export_rows(
+            snapshot.rows,
+            null_value=options.null_value,
+            date_format=options.date_format,
+            cancelled=cancelled,
+        ),
+        numeric_values=snapshot.numeric_values,
+        theme=options.theme,
+        auto_filter=options.auto_filter,
+        auto_width=options.auto_width,
+        freeze_top_row=options.freeze_top_row,
+        on_progress=on_progress,
+        cancelled=cancelled,
+    )
+
+
+def create_plugin(
+    options: XlsxExportOptions | None = None,
+    *,
+    host_export: BuiltinExportHandler | None = None,
+) -> Plugin:
     """Return metadata capturing explicit or environment-backed options."""
     selected_options = options if options is not None else _environment_options()
 
     def configured_export(context: PluginContext) -> None:
-        export_loaded_rows_to_xlsx(context, selected_options)
+        if host_export is None:
+            export_loaded_rows_to_xlsx(context, selected_options)
+        else:
+            host_export("xlsx", context, selected_options)
+
+    if host_export is not None:
+        mark_private_host_export_handler(configured_export)
 
     return Plugin(
         id="xlsx-export",
@@ -142,7 +177,7 @@ def create_plugin(options: XlsxExportOptions | None = None) -> Plugin:
             PluginCommand(
                 id="export-loaded-rows",
                 section="Results",
-                title="Export loaded rows to XLSX",
+                title="Export result to XLSX",
                 handler=configured_export,
                 shortcut="",
                 keywords="export xlsx excel spreadsheet table result loaded rows",

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 class TreeMenuItem(Protocol):
@@ -42,10 +43,7 @@ def tree_menu_sections(items: Sequence[TreeMenuItem]) -> tuple[TreeMenuSection, 
             order.append(item.section)
             indexes_by_section[item.section] = []
         indexes_by_section[item.section].append(idx)
-    return tuple(
-        TreeMenuSection(section, tuple(indexes_by_section[section]))
-        for section in order
-    )
+    return tuple(TreeMenuSection(section, tuple(indexes_by_section[section])) for section in order)
 
 
 def tree_menu_search_text(item: TreeMenuItem) -> str:
@@ -69,11 +67,7 @@ def filtered_tree_menu_indexes(items: Sequence[TreeMenuItem], filter_text: str) 
     terms = filter_text.casefold().split()
     if not terms:
         return list(range(len(items)))
-    return [
-        idx
-        for idx, item in enumerate(items)
-        if tree_menu_item_matches_filter(item, terms)
-    ]
+    return [idx for idx, item in enumerate(items) if tree_menu_item_matches_filter(item, terms)]
 
 
 def tree_menu_rows(
@@ -85,11 +79,7 @@ def tree_menu_rows(
     filtering = bool(terms)
     rows: list[TreeMenuRow] = []
     for section in tree_menu_sections(items):
-        visible_indexes = tuple(
-            idx
-            for idx in section.item_indexes
-            if tree_menu_item_matches_filter(items[idx], terms)
-        )
+        visible_indexes = tuple(idx for idx in section.item_indexes if tree_menu_item_matches_filter(items[idx], terms))
         if filtering and not visible_indexes:
             continue
         expanded = filtering or section.name in expanded_sections
@@ -124,9 +114,7 @@ def tree_menu_row_label(
     if row.item_index is None:
         marker = "[-]" if row.expanded else "[+]"
         count = (
-            f"{row.visible_count}/{row.total_count}"
-            if row.visible_count != row.total_count
-            else str(row.total_count)
+            f"{row.visible_count}/{row.total_count}" if row.visible_count != row.total_count else str(row.total_count)
         )
         return f"{marker} {row.section} ({count})"
 

@@ -4,7 +4,6 @@ from pathlib import Path
 
 from .config import AppConfig, ensure_config_file
 
-
 STARTER_SQL = """select user as connected_user,
        sys_context('USERENV', 'SERVICE_NAME') as service_name,
        systimestamp as server_time

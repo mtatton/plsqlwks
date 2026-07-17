@@ -1,21 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime
-from decimal import Decimal, InvalidOperation
 import math
 import re
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import oracledb
 
 from ..sqlsplit import strip_leading_sql_comments
 from .execution import decimal_output_type_handler, materialize_result_value
+from .identifiers import quote_identifier, scan_oracle_identifier
 from .models import (
+    NULL_DISPLAY_TOKEN,
     CellUpdateResult,
     ConcurrentEditError,
-    EditOperationRollbackError,
     EditableResultContext,
-    NULL_DISPLAY_TOKEN,
+    EditOperationRollbackError,
     ReadOnlyModeError,
     ResultColumnMetadata,
     RowInsertResult,
@@ -31,12 +32,11 @@ from .sql_analysis import (
 )
 from .transactions import edit_operation_savepoint
 
-
-ORACLE_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_$#]*$")
 ISO_FRACTION_RE = re.compile(r"\.(?P<digits>\d+)(?:[Zz]|[+-]\d{2}:\d{2})?$")
 TAIL_KEYWORDS = {
     "WHERE",
     "ORDER",
+    "OFFSET",
     "FETCH",
     "FOR",
     "JOIN",
@@ -48,9 +48,18 @@ TAIL_KEYWORDS = {
     "MINUS",
     "INTERSECT",
 }
+SAFE_TAIL_START_WORDS = {"WHERE", "ORDER", "OFFSET", "FETCH"}
 TAIL_SINGLE_WORD_REJECTIONS = {"JOIN", "HAVING", "UNION", "MINUS", "INTERSECT", "SELECT"}
 TAIL_PHRASE_REJECTIONS = {("GROUP", "BY"), ("CONNECT", "BY"), ("START", "WITH"), ("FOR", "UPDATE")}
-ORACLE_TABLE_CLAUSE_REJECTIONS = {"MODEL", "PARTITION", "PIVOT", "SAMPLE", "UNPIVOT", "VERSIONS"}
+ORACLE_TABLE_CLAUSE_REJECTIONS = {
+    "MATCH_RECOGNIZE",
+    "MODEL",
+    "PARTITION",
+    "PIVOT",
+    "SAMPLE",
+    "UNPIVOT",
+    "VERSIONS",
+}
 TEXT_EDIT_TYPES = (
     oracledb.DB_TYPE_CHAR,
     oracledb.DB_TYPE_VARCHAR,
@@ -65,6 +74,13 @@ BINARY_EDIT_TYPES = (oracledb.DB_TYPE_RAW, oracledb.DB_TYPE_BLOB)
 LOB_EDIT_TYPES = (oracledb.DB_TYPE_CLOB, oracledb.DB_TYPE_NCLOB, oracledb.DB_TYPE_BLOB)
 FLOAT_EDIT_TYPES = (oracledb.DB_TYPE_BINARY_FLOAT, oracledb.DB_TYPE_BINARY_DOUBLE)
 UNSUPPORTED_TIMESTAMP_TYPES = (oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ)
+
+
+def is_date_or_timestamp_column(metadata: ResultColumnMetadata | None) -> bool:
+    return metadata is not None and metadata.type_code in {
+        oracledb.DB_TYPE_DATE,
+        oracledb.DB_TYPE_TIMESTAMP,
+    }
 
 
 class EditingMixin:
@@ -85,20 +101,29 @@ class EditingMixin:
         return build_editable_result_context(statement, columns, table_columns, column_metadata)
 
     def editable_table_columns(self, table_name: str) -> tuple[list[str], str]:
-        normalized_name = normalize_identifier(table_name)
-        if normalized_name is None:
-            return [], "Only unquoted current-schema tables are editable"
+        try:
+            quote_identifier(table_name)
+        except ValueError:
+            return [], "Only valid current-schema tables are editable"
         conn = self.ensure_connected()
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "select object_type from user_objects where object_name = :object_name",
-                object_name=normalized_name,
+                """
+                select
+                  count(case when object_type = 'TABLE' then 1 end),
+                  count(*)
+                from user_objects
+                where object_name = :object_name
+                """,
+                object_name=table_name,
             )
             row = cursor.fetchone()
-            if not row:
-                return [], f"{normalized_name} was not found in the current schema"
-            if str(row[0]).upper() != "TABLE":
+            table_count = int(row[0]) if row and row[0] is not None else 0
+            object_count = int(row[1]) if row and row[1] is not None else 0
+            if object_count == 0:
+                return [], f"{quote_identifier(table_name)} was not found in the current schema"
+            if table_count == 0:
                 return [], "Only base tables are editable"
             cursor.execute(
                 """
@@ -107,11 +132,11 @@ class EditingMixin:
                 where table_name = :table_name
                 order by column_id
                 """,
-                table_name=normalized_name,
+                table_name=table_name,
             )
-            columns = [str(column_name).upper() for (column_name,) in cursor]
+            columns = [str(column_name) for (column_name,) in cursor]
             if not columns:
-                return [], f"{normalized_name} has no editable columns"
+                return [], f"{quote_identifier(table_name)} has no editable columns"
             return columns, ""
         finally:
             cursor.close()
@@ -127,6 +152,8 @@ class EditingMixin:
         if self.read_only:
             raise ReadOnlyModeError("Cell updates are disabled in read-only mode")
         table_name, column_name, metadata = self.validated_edit_target(context, column_index)
+        table_sql = quote_identifier(table_name)
+        column_sql = quote_identifier(column_name)
         ensure_editable_original(original_value, metadata)
         use_sysdate = is_sysdate_edit_expression(value_text, metadata)
         value = None if use_sysdate else convert_edit_value(value_text, metadata)
@@ -144,7 +171,7 @@ class EditingMixin:
                     had_pending_work=self.has_uncommitted_changes,
                 ):
                     predicate, original_params = optimistic_edit_predicate(
-                        column_name,
+                        column_sql,
                         original_value,
                         metadata,
                     )
@@ -159,7 +186,7 @@ class EditingMixin:
                         include_original="original_value" in original_params,
                     )
                     cursor.execute(
-                        f"update {table_name} set {column_name} = {value_sql} "
+                        f"update {table_sql} set {column_sql} = {value_sql} "
                         f"where rowid = chartorowid(:target_rowid) and {predicate}",
                         **params,
                     )
@@ -170,7 +197,7 @@ class EditingMixin:
                     if cursor.rowcount != 1:
                         raise ValueError(f"Expected to update 1 row, updated {cursor.rowcount}")
                     cursor.execute(
-                        f"select {column_name} from {table_name} where rowid = chartorowid(:target_rowid)",
+                        f"select {column_sql} from {table_sql} where rowid = chartorowid(:target_rowid)",
                         target_rowid=rowid,
                     )
                     row = cursor.fetchone()
@@ -204,12 +231,13 @@ class EditingMixin:
         if self.read_only:
             raise ReadOnlyModeError("Row inserts are disabled in read-only mode")
         table_name, insert_columns = self.validated_insert_targets(context, result_column_count)
+        table_sql = quote_identifier(table_name)
         bind_names = [f"value_{idx}" for idx in range(len(insert_columns))]
-        columns_sql = ", ".join(column_name for _, column_name, _ in insert_columns)
+        columns_sql = ", ".join(quote_identifier(column_name) for _, column_name, _ in insert_columns)
         value_expressions: list[str] = []
         insert_bindings: list[tuple[str, ResultColumnMetadata | None]] = []
         params: dict[str, object] = {}
-        for bind_name, (column_index, _, metadata) in zip(bind_names, insert_columns):
+        for bind_name, (column_index, _, metadata) in zip(bind_names, insert_columns, strict=True):
             value_text = values_by_column_index.get(column_index, NULL_DISPLAY_TOKEN)
             if is_sysdate_edit_expression(value_text, metadata):
                 value_expressions.append("sysdate")
@@ -233,7 +261,7 @@ class EditingMixin:
                     params["new_rowid"] = new_rowid_var
                     set_insert_input_sizes(cursor, insert_bindings)
                     cursor.execute(
-                        f"insert into {table_name} ({columns_sql}) values ({values_sql}) returning rowid into :new_rowid",
+                        f"insert into {table_sql} ({columns_sql}) values ({values_sql}) returning rowid into :new_rowid",
                         **params,
                     )
                     if cursor.rowcount != 1:
@@ -243,7 +271,7 @@ class EditingMixin:
                         raise ValueError("Inserted row did not return ROWID")
                     select_list = self.insert_refresh_select_list(context, result_column_count)
                     cursor.execute(
-                        f"select {select_list} from {table_name} where rowid = chartorowid(:new_rowid)",
+                        f"select {select_list} from {table_sql} where rowid = chartorowid(:new_rowid)",
                         new_rowid=str(new_rowid),
                     )
                     row = cursor.fetchone()
@@ -275,9 +303,11 @@ class EditingMixin:
         context: EditableResultContext,
         result_column_count: int,
     ) -> tuple[str, list[tuple[int, str, ResultColumnMetadata | None]]]:
-        table_name = normalize_identifier(context.table_name)
-        if table_name is None:
-            raise ValueError("Only unquoted current-schema table columns are editable")
+        table_name = context.table_name
+        try:
+            quote_identifier(table_name)
+        except ValueError as exc:
+            raise ValueError("Only valid current-schema table columns are editable") from exc
         if result_column_count <= 0 or context.rowid_column < 0 or context.rowid_column >= result_column_count:
             raise ValueError("Result columns do not match the editable insert context")
         table_columns, reason = self.editable_table_columns(table_name)
@@ -287,9 +317,7 @@ class EditingMixin:
         for column_index, raw_column_name in sorted(context.editable_columns.items()):
             if column_index < 0 or column_index >= result_column_count or column_index == context.rowid_column:
                 raise ValueError("Result columns do not match the editable insert context")
-            column_name = normalize_identifier(raw_column_name)
-            if column_name is None:
-                raise ValueError("Only unquoted current-schema table columns are editable")
+            column_name = raw_column_name
             if column_name not in table_columns:
                 raise ValueError(f"{column_name} is not an editable column on {table_name}")
             metadata = context.column_metadata.get(column_index)
@@ -307,10 +335,10 @@ class EditingMixin:
             if column_index == context.rowid_column:
                 select_items.append("rowid")
                 continue
-            column_name = normalize_identifier(context.editable_columns.get(column_index, ""))
-            if column_name is None:
+            column_name = context.editable_columns.get(column_index, "")
+            if not column_name:
                 raise ValueError("Result columns do not match the editable insert context")
-            select_items.append(column_name)
+            select_items.append(quote_identifier(column_name))
         return ", ".join(select_items)
 
     def validated_edit_target(
@@ -318,10 +346,13 @@ class EditingMixin:
         context: EditableResultContext,
         column_index: int,
     ) -> tuple[str, str, ResultColumnMetadata | None]:
-        table_name = normalize_identifier(context.table_name)
-        column_name = normalize_identifier(context.editable_columns.get(column_index, ""))
-        if table_name is None or column_name is None:
-            raise ValueError("Only unquoted current-schema table columns are editable")
+        table_name = context.table_name
+        column_name = context.editable_columns.get(column_index, "")
+        try:
+            quote_identifier(table_name)
+            quote_identifier(column_name)
+        except ValueError as exc:
+            raise ValueError("Only valid current-schema table columns are editable") from exc
         table_columns, reason = self.editable_table_columns(table_name)
         if not table_columns:
             raise ValueError(reason)
@@ -332,13 +363,6 @@ class EditingMixin:
         if rejection:
             raise ValueError(f"{column_name}: {rejection}")
         return table_name, column_name, metadata
-
-
-def normalize_identifier(identifier: str) -> str | None:
-    text = identifier.strip()
-    if not ORACLE_IDENTIFIER_RE.fullmatch(text):
-        return None
-    return text.upper()
 
 
 def normalize_edit_value(text: str) -> str | None:
@@ -428,9 +452,7 @@ def parse_iso_datetime(text: str, type_name: str) -> datetime:
     try:
         return datetime.fromisoformat(normalized)
     except ValueError as exc:
-        raise ValueError(
-            f"{type_name} values must use ISO format YYYY-MM-DD[ HH:MM:SS[.ffffff]]"
-        ) from exc
+        raise ValueError(f"{type_name} values must use ISO format YYYY-MM-DD[ HH:MM:SS[.ffffff]]") from exc
 
 
 def edit_metadata_rejection_reason(metadata: ResultColumnMetadata | None) -> str:
@@ -466,9 +488,7 @@ def edit_type_name(metadata: ResultColumnMetadata) -> str:
 
 def ensure_editable_original(original_value: Any, metadata: ResultColumnMetadata | None) -> None:
     if isinstance(original_value, TruncatedLobValue):
-        raise ValueError(
-            f"{original_value.type_name} value is truncated at display time and cannot be safely edited"
-        )
+        raise ValueError(f"{original_value.type_name} value is truncated at display time and cannot be safely edited")
     rejection = edit_metadata_rejection_reason(metadata)
     if rejection:
         raise ValueError(rejection)
@@ -483,9 +503,7 @@ def optimistic_edit_predicate(
         return f"{column_name} is null", {}
     type_code = metadata.type_code if metadata is not None else None
     if type_code in LOB_EDIT_TYPES:
-        return f"dbms_lob.compare({column_name}, :original_value) = 0", {
-            "original_value": original_value
-        }
+        return f"dbms_lob.compare({column_name}, :original_value) = 0", {"original_value": original_value}
     return f"{column_name} = :original_value", {"original_value": original_value}
 
 
@@ -538,8 +556,6 @@ def parse_simple_select(statement: str) -> tuple[SimpleSelect | None, str]:
     select_match = re.match(r"select\b", sql, re.IGNORECASE)
     if not select_match:
         return None, "Result is not editable because this is not a SELECT"
-    if '"' in sql:
-        return None, "Quoted identifiers are not editable"
     from_idx = find_top_level_sql_keyword(sql, "from", select_match.end())
     if from_idx is None:
         return None, "Result is not a simple single-table SELECT"
@@ -548,35 +564,34 @@ def parse_simple_select(statement: str) -> tuple[SimpleSelect | None, str]:
     from_clause = strip_sql_comments(sql[from_idx + len("from") :]).lstrip()
     if from_clause.startswith("("):
         return None, "Subquery results are not editable"
-    table_match = re.match(r"([A-Za-z][A-Za-z0-9_$#]*)(.*)$", from_clause, re.DOTALL)
-    if not table_match:
+    table_token = scan_oracle_identifier(from_clause)
+    if table_token is None or not table_token.name:
         return None, "Result is not a simple single-table SELECT"
-    table_name = normalize_identifier(table_match.group(1))
-    if table_name is None:
-        return None, "Only unquoted current-schema tables are editable"
-    remainder = table_match.group(2)
-    if remainder.startswith("."):
+    table_name = table_token.name
+    remainder = from_clause[table_token.end :]
+    if remainder.lstrip().startswith("."):
         return None, "Result is not a simple single-table SELECT"
 
     alias = None
     tail = ""
-    if remainder:
-        alias_match = re.match(r"\s+([A-Za-z][A-Za-z0-9_$#]*)(?P<tail>\s+.*)?\s*$", remainder, re.DOTALL)
-        if alias_match:
-            alias = alias_match.group(1)
-            tail = alias_match.group("tail") or ""
-        elif remainder.strip():
-            tail = remainder
-    if alias and alias.upper() in TAIL_KEYWORDS:
-        tail = f" {alias}{tail}"
-        alias = None
-    if alias and alias.upper() == "AS":
-        return None, "Oracle table aliases must not use AS"
-    if alias and alias.upper() in ORACLE_TABLE_CLAUSE_REJECTIONS:
-        return None, "Oracle table clauses and flashback queries are not editable"
-    normalized_alias = normalize_identifier(alias) if alias else None
-    if alias and normalized_alias is None:
-        return None, "Only unquoted table aliases are editable"
+    alias_start = table_token.end
+    while alias_start < len(from_clause) and from_clause[alias_start].isspace():
+        alias_start += 1
+    if alias_start < len(from_clause):
+        if alias_start == table_token.end:
+            return None, "Result is not a simple single-table SELECT"
+        alias_token = scan_oracle_identifier(from_clause, alias_start)
+        if alias_token is None:
+            tail = from_clause[table_token.end :]
+        elif not alias_token.quoted and alias_token.name in TAIL_KEYWORDS:
+            tail = from_clause[alias_start:]
+        elif not alias_token.quoted and alias_token.name == "AS":
+            return None, "Oracle table aliases must not use AS"
+        elif not alias_token.quoted and alias_token.name in ORACLE_TABLE_CLAUSE_REJECTIONS:
+            return None, "Oracle table clauses and flashback queries are not editable"
+        else:
+            alias = alias_token.name
+            tail = from_clause[alias_token.end :]
     if tail_has_rejected_construct(tail):
         return None, (
             "Joins, grouped queries, locking queries, Oracle table clauses, "
@@ -585,19 +600,24 @@ def parse_simple_select(statement: str) -> tuple[SimpleSelect | None, str]:
 
     if re.match(r"(?is)^distinct\b", strip_sql_comments(select_clause).strip()):
         return None, "DISTINCT results are not editable"
-    items, reason = parse_select_items(select_clause, table_name, normalized_alias)
+    items, reason = parse_select_items(select_clause, table_name, alias)
     if not items:
         return None, reason
-    return SimpleSelect(table_name=table_name, alias=normalized_alias, items=items), ""
+    return SimpleSelect(table_name=table_name, alias=alias, items=items), ""
 
 
 def tail_has_rejected_construct(tail: str) -> bool:
-    if tail.lstrip().startswith(","):
+    stripped = strip_sql_comments(tail).strip()
+    if not stripped:
+        return False
+    if stripped.startswith((",", "@")):
         return True
     words = tail_sql_words(tail)
+    if not words or words[0] not in SAFE_TAIL_START_WORDS:
+        return True
     if any(word in TAIL_SINGLE_WORD_REJECTIONS or word in ORACLE_TABLE_CLAUSE_REJECTIONS for word in words):
         return True
-    return any(pair in TAIL_PHRASE_REJECTIONS for pair in zip(words, words[1:]))
+    return any(pair in TAIL_PHRASE_REJECTIONS for pair in zip(words, words[1:], strict=False))
 
 
 def parse_select_items(
@@ -641,31 +661,59 @@ def parse_select_item(
     text = strip_sql_comments(text).strip()
     if not text:
         return None, "Empty SELECT items are not editable"
-    alias_match = re.match(r"(?is)^(.+?)\s+as\s+([A-Za-z][A-Za-z0-9_$#]*)$", text)
-    if alias_match:
-        text = alias_match.group(1).strip()
-    if re.search(r"\s", text) or "(" in text or ")" in text:
-        return None, "Expressions are not editable"
     if text == "*":
         return SelectItem("wildcard"), ""
+
+    pos = 0
+    first = scan_oracle_identifier(text, pos)
+    if first is None or not first.name:
+        return None, "Expressions are not editable"
+    pos = first.end
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+
     qualifier = ""
-    name = text
-    if "." in text:
-        parts = text.split(".")
-        if len(parts) != 2:
-            return None, "Only simple table columns are editable"
-        qualifier, name = parts
-        qualifier = normalize_identifier(qualifier) or ""
+    name_token = first
+    wildcard = False
+    if pos < len(text) and text[pos] == ".":
+        qualifier = first.name
+        pos += 1
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos < len(text) and text[pos] == "*":
+            wildcard = True
+            pos += 1
+        else:
+            name_token = scan_oracle_identifier(text, pos)
+            if name_token is None or not name_token.name:
+                return None, "Only simple table columns are editable"
+            pos = name_token.end
         if qualifier not in {table_name, alias}:
             return None, "Qualified columns must reference the selected table"
-    if name == "*":
+
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if pos < len(text):
+        as_token = scan_oracle_identifier(text, pos)
+        if as_token is None or as_token.quoted or as_token.name != "AS":
+            return None, "Expressions are not editable"
+        pos = as_token.end
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        result_alias = scan_oracle_identifier(text, pos)
+        if result_alias is None or not result_alias.name:
+            return None, "Expressions are not editable"
+        pos = result_alias.end
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos != len(text):
+            return None, "Expressions are not editable"
+
+    if wildcard:
         return SelectItem("wildcard"), ""
-    normalized_name = normalize_identifier(name)
-    if normalized_name is None:
-        return None, "Only unquoted table columns are editable"
-    if normalized_name == "ROWID":
+    if not name_token.quoted and name_token.name == "ROWID":
         return SelectItem("rowid"), ""
-    return SelectItem("column", normalized_name), ""
+    return SelectItem("column", name_token.name), ""
 
 
 def build_editable_result_context(
@@ -677,21 +725,19 @@ def build_editable_result_context(
     parsed, reason = parse_simple_select(statement)
     if parsed is None:
         return None, reason
-    normalized_result_columns = [column.upper() for column in result_columns]
-    if len(set(normalized_result_columns)) != len(normalized_result_columns):
+    if len(set(result_columns)) != len(result_columns):
         return None, "Duplicate result columns are not editable"
-    normalized_table_columns = [column.upper() for column in table_columns]
-    table_column_set = set(normalized_table_columns)
+    table_column_set = set(table_columns)
     rowid_column: int | None = None
     editable_columns: dict[int, str] = {}
     result_index = 0
 
     for item in parsed.items:
         if item.kind == "wildcard":
-            for table_column in normalized_table_columns:
+            for table_column in table_columns:
                 if result_index >= len(result_columns):
                     return None, "Result columns do not match the SELECT list"
-                if normalized_result_columns[result_index] != table_column:
+                if result_columns[result_index] != table_column:
                     return None, "Wildcard result columns do not match table metadata"
                 editable_columns[result_index] = table_column
                 result_index += 1
@@ -699,7 +745,7 @@ def build_editable_result_context(
         if result_index >= len(result_columns):
             return None, "Result columns do not match the SELECT list"
         if item.kind == "rowid":
-            if normalized_result_columns[result_index] != "ROWID":
+            if result_columns[result_index] != "ROWID":
                 return None, "ROWID must be selected as ROWID"
             if rowid_column is not None:
                 return None, "Duplicate ROWID columns are not editable"

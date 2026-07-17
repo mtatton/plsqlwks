@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -110,18 +110,12 @@ def find_sql_binds(statement: str) -> list[SqlBind]:
             continue
         if ch.isalpha():
             end = idx + 1
-            while end < length and (
-                statement[end].isalnum() or statement[end] in "_$#"
-            ):
+            while end < length and (statement[end].isalnum() or statement[end] in "_$#"):
                 end += 1
             word = statement[idx:end].lower()
             if call_frames and call_frames[-1].json_object:
                 frame = call_frames[-1]
-                if (
-                    word == "value"
-                    and frame.entry_has_expression
-                    and not frame.separator_seen
-                ):
+                if word == "value" and frame.entry_has_expression and not frame.separator_seen:
                     frame.separator_seen = True
                 else:
                     frame.entry_has_expression = True

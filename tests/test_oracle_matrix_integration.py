@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -12,7 +12,6 @@ from tests.oracle_matrix import (
     VerifiedOracleMatrix,
     verify_oracle_session,
 )
-
 
 pytestmark = [
     pytest.mark.integration,

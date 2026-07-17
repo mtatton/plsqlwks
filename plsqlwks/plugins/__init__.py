@@ -15,7 +15,6 @@ from .api import (
     ResultSnapshot,
 )
 
-
 __all__ = [
     "PLUGIN_API_VERSION",
     "PLUGIN_ENTRY_POINT_GROUP",

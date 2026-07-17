@@ -8,20 +8,28 @@ encoding implementation.
 
 from __future__ import annotations
 
+import contextlib
 import csv
-from io import StringIO
 import os
-from pathlib import Path
 import stat
 import tempfile
-from typing import BinaryIO, Callable, Iterable, Sequence, TextIO, cast
-
+from collections.abc import Callable, Iterable, Sequence, Sized
+from io import StringIO
+from pathlib import Path
+from typing import BinaryIO, TextIO, cast
 
 CSV_LINE_TERMINATOR = "\n"
 CSV_WRITER_LINE_TERMINATOR = "\r\n"
-CSV_FORMULA_PREFIXES = frozenset(
-    ("=", "+", "-", "@", "\t", "\r", "\n", "\0", "＝", "＋", "－", "＠")
-)
+CSV_FORMULA_PREFIXES = frozenset(("=", "+", "-", "@", "\t", "\r", "\n", "\0", "＝", "＋", "－", "＠"))
+
+
+class ExportCancelled(RuntimeError):
+    pass
+
+
+def raise_if_export_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise ExportCancelled("Export cancelled")
 
 
 def preserve_existing_posix_permissions(path: Path, temporary_path: Path) -> None:
@@ -35,7 +43,12 @@ def preserve_existing_posix_permissions(path: Path, temporary_path: Path) -> Non
     temporary_path.chmod(mode)
 
 
-def atomic_write_binary(path: Path, writer: Callable[[BinaryIO], None]) -> None:
+def atomic_write_binary(
+    path: Path,
+    writer: Callable[[BinaryIO], None],
+    *,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     """Write complete binary content and atomically install it at ``path``.
 
     The parent directory is created first. ``writer`` receives a temporary
@@ -57,15 +70,15 @@ def atomic_write_binary(path: Path, writer: Callable[[BinaryIO], None]) -> None:
         ) as handle:
             temporary_path = Path(handle.name)
             writer(cast(BinaryIO, handle))
+        if before_replace is not None:
+            before_replace()
         preserve_existing_posix_permissions(path, temporary_path)
         os.replace(temporary_path, path)
         temporary_path = None
     except BaseException:
         if temporary_path is not None:
-            try:
+            with contextlib.suppress(OSError):
                 temporary_path.unlink()
-            except OSError:
-                pass
         raise
 
 
@@ -107,10 +120,8 @@ def atomic_write_text(
         temporary_path = None
     except BaseException:
         if temporary_path is not None:
-            try:
+            with contextlib.suppress(OSError):
                 temporary_path.unlink()
-            except OSError:
-                pass
         raise
 
 
@@ -121,6 +132,9 @@ def write_csv(
     *,
     delimiter: str = ",",
     protect_formulas: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    total_rows: int | None = None,
 ) -> None:
     """Atomically write display-ready columns and rows as UTF-8 CSV.
 
@@ -135,8 +149,14 @@ def write_csv(
     """
     if not isinstance(delimiter, str) or len(delimiter) != 1:
         raise ValueError("CSV delimiter must be exactly one character")
+    if total_rows is None:
+        total_rows = len(rows) if isinstance(rows, Sized) else 0
+    total_rows = max(0, total_rows)
 
     def write_rows(handle: TextIO) -> None:
+        raise_if_export_cancelled(cancelled)
+        if on_progress is not None:
+            on_progress(0, total_rows)
         buffer = StringIO(newline="")
 
         def write_row(row: Sequence[str]) -> None:
@@ -158,23 +178,23 @@ def write_csv(
 
         if columns:
             write_row(_protect_csv_formulas(columns) if protect_formulas else columns)
-        output_rows = (
-            (_protect_csv_formulas(row) for row in rows)
-            if protect_formulas
-            else rows
-        )
-        for row in output_rows:
+        output_rows = (_protect_csv_formulas(row) for row in rows) if protect_formulas else rows
+        for row_index, row in enumerate(output_rows, start=1):
+            raise_if_export_cancelled(cancelled)
             write_row(row)
+            if on_progress is not None:
+                on_progress(row_index, total_rows)
 
-    atomic_write_text(path, write_rows)
+    atomic_write_text(
+        path,
+        write_rows,
+        before_replace=lambda: raise_if_export_cancelled(cancelled),
+    )
 
 
 def _protect_csv_formulas(values: Sequence[str]) -> tuple[str, ...]:
     """Neutralize spreadsheet formula prefixes without changing other text."""
-    return tuple(
-        f"\t{value}" if value and value[0] in CSV_FORMULA_PREFIXES else value
-        for value in values
-    )
+    return tuple(f"\t{value}" if value and value[0] in CSV_FORMULA_PREFIXES else value for value in values)
 
 
 def _csv_nul_workaround_escapechar(
