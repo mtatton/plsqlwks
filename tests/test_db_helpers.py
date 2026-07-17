@@ -19,6 +19,7 @@ from plsqlwks.db import (
     OracleCompilationError,
     OracleWorkspace,
     OracleExecutionError,
+    PlsqlCompileDiagnostic,
     PlsqlObject,
     QueryResult,
     ResultColumnMetadata,
@@ -157,6 +158,7 @@ def test_csv_cell_quotes_commas_quotes_and_newlines():
     assert csv_cell("a,b") == '"a,b"'
     assert csv_cell('a"b') == '"a""b"'
     assert csv_cell("a\nb") == '"a\nb"'
+    assert csv_cell("a\rb") == '"a\rb"'
 
 
 def test_csv_cell_delegates_to_shared_csv_encoder(monkeypatch):
@@ -196,6 +198,25 @@ def test_export_result_delegates_to_shared_csv_writer(monkeypatch, tmp_path):
     workspace.export_result(result, path)
 
     assert calls == [(path, result.columns, result.rows)]
+
+
+def test_execute_and_export_result_preserves_database_column_alias(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = FakeExecuteConnection(
+        description=[("DECISION_NAME",)],
+        rows=[("ship",)],
+    )
+    workspace.read_dbms_output = lambda: []
+    path = tmp_path / "results" / "aliased.csv"
+
+    result = workspace.execute_statement(
+        "select name as decision_name from decisions",
+        "Aliased select",
+    )
+    workspace.export_result(result, path)
+
+    assert result.columns == ["DECISION_NAME"]
+    assert path.read_text(encoding="utf-8") == "DECISION_NAME\nship\n"
 
 
 def test_execute_script_uses_statement_titles_and_empty_script_message(tmp_path):
@@ -692,6 +713,33 @@ def test_cancel_current_operation_without_connection_returns_false(tmp_path):
     assert workspace.cancel_current_operation() is False
 
 
+def test_unhealthy_connection_is_not_reused_or_silently_reconnected(tmp_path):
+    class UnhealthyConnection:
+        def __init__(self):
+            self.cursor_calls = 0
+
+        def is_healthy(self):
+            return False
+
+        def cursor(self):
+            self.cursor_calls += 1
+            raise AssertionError("unhealthy connection must not receive work")
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = UnhealthyConnection()
+    workspace.connection = connection
+    workspace.autocommit = False
+    workspace.record_pending_unknown()
+
+    assert workspace.connection_is_healthy() is False
+    with pytest.raises(RuntimeError, match="reconnect before retrying"):
+        workspace.execute_statement("select 1 from dual")
+
+    assert workspace.connection is connection
+    assert workspace.has_uncommitted_changes is True
+    assert connection.cursor_calls == 0
+
+
 def test_fetch_more_rows_uses_lookahead_and_closes_after_final_page(tmp_path):
     config = make_config(tmp_path)
     config = AppConfig(
@@ -709,6 +757,7 @@ def test_fetch_more_rows_uses_lookahead_and_closes_after_final_page(tmp_path):
     workspace.connection = connection
 
     result = workspace.execute_statement("select name from decisions", "Select")
+    assert result.has_more_rows is True
     assert result.continuation is not None
     continuation = result.continuation
     first_page = workspace.fetch_more_rows(continuation, len(result.rows))
@@ -725,6 +774,7 @@ def test_fetch_more_rows_uses_lookahead_and_closes_after_final_page(tmp_path):
 
     assert connection.cursor_instance.fetchmany_sizes == [3, 2, 2]
     assert first_page.rows == [["three"], ["four"]]
+    assert first_page.has_more_rows is True
     assert first_page.original_rows == [["three"], ["four"]]
     assert "limited to 4 rows" in first_page.message
     assert second_page.rows == [["five"]]
@@ -732,7 +782,143 @@ def test_fetch_more_rows_uses_lookahead_and_closes_after_final_page(tmp_path):
     assert result.original_rows == [["one"], ["two"], ["three"], ["four"], ["five"]]
     assert "limited" not in second_page.message
     assert result.continuation is None
+    assert second_page.has_more_rows is False
     assert connection.cursor_instance.closed is True
+
+
+def test_fetch_more_rows_captures_dbms_output_on_every_page(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        user=base.user,
+        dsn=base.dsn,
+        password_file=base.password_file,
+        workspace_dir=base.workspace_dir,
+        max_rows=1,
+    )
+    workspace = OracleWorkspace(config)
+    connection = FakeExecuteConnection(
+        description=[("NAME",)],
+        rows=[("one",), ("two",), ("three",)],
+    )
+    workspace.connection = connection
+    outputs = iter([["initial output"], ["second output"], ["final output"]])
+    workspace.read_dbms_output = lambda: next(outputs)
+
+    result = workspace.execute_statement("select name from decisions", "Select")
+    first_page = workspace.fetch_more_rows(result.continuation, len(result.rows))
+    final_page = workspace.fetch_more_rows(
+        first_page.continuation,
+        len(result.rows) + len(first_page.rows),
+    )
+
+    assert result.dbms_output == ["initial output"]
+    assert first_page.rows == [["two"]]
+    assert first_page.dbms_output == ["second output"]
+    assert final_page.rows == [["three"]]
+    assert final_page.dbms_output == ["final output"]
+    assert final_page.continuation is None
+
+
+def test_fetch_more_rows_elapsed_time_is_cumulative_and_monotonic(monkeypatch, tmp_path):
+    times = iter([10.0, 11.25, 20.0, 20.5])
+    monkeypatch.setattr(execution_module, "monotonic", lambda: next(times))
+    base = make_config(tmp_path)
+    config = AppConfig(
+        user=base.user,
+        dsn=base.dsn,
+        password_file=base.password_file,
+        workspace_dir=base.workspace_dir,
+        max_rows=1,
+    )
+    workspace = OracleWorkspace(config)
+    workspace.connection = FakeExecuteConnection(
+        description=[("NAME",)],
+        rows=[("one",), ("two",), ("three",)],
+    )
+    workspace.read_dbms_output = lambda: []
+
+    result = workspace.execute_statement("select name from decisions", "Select")
+    page = workspace.fetch_more_rows(result.continuation, len(result.rows))
+
+    assert result.message.startswith(
+        "1 row(s) (limited to 1 rows; more rows available) in 1.25s"
+    )
+    assert page.message.startswith(
+        "2 row(s) (limited to 2 rows; more rows available) in 1.75s"
+    )
+
+
+def test_fetch_more_rows_preserves_rows_when_output_read_fails(tmp_path):
+    base = make_config(tmp_path)
+    config = AppConfig(
+        user=base.user,
+        dsn=base.dsn,
+        password_file=base.password_file,
+        workspace_dir=base.workspace_dir,
+        max_rows=1,
+    )
+    workspace = OracleWorkspace(config)
+    workspace.connection = FakeExecuteConnection(
+        description=[("NAME",)],
+        rows=[("one",), ("two",), ("three",)],
+    )
+    reads = iter([None, RuntimeError("get_lines failed")])
+
+    def read_output():
+        outcome = next(reads)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return []
+
+    workspace.read_dbms_output = read_output
+    result = workspace.execute_statement("select name from decisions", "Select")
+
+    page = workspace.fetch_more_rows(result.continuation, len(result.rows))
+
+    assert page.rows == [["two"]]
+    assert page.continuation is result.continuation
+    assert page.has_more_rows is True
+    assert page.dbms_output_error == "get_lines failed"
+    assert page.warnings == ["DBMS_OUTPUT read failed: get_lines failed"]
+
+
+def test_fetch_more_rows_preserves_final_rows_when_cursor_cleanup_fails(tmp_path):
+    class CleanupFailingConnection(FakeExecuteConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            if len(self.cursors) == 1:
+                cursor.close = lambda: (_ for _ in ()).throw(
+                    RuntimeError("final cursor close failed")
+                )
+            return cursor
+
+    base = make_config(tmp_path)
+    config = AppConfig(
+        user=base.user,
+        dsn=base.dsn,
+        password_file=base.password_file,
+        workspace_dir=base.workspace_dir,
+        max_rows=1,
+    )
+    workspace = OracleWorkspace(config)
+    workspace.connection = CleanupFailingConnection(
+        description=[("NAME",)],
+        rows=[("one",), ("two",)],
+    )
+    workspace.read_dbms_output = lambda: []
+    result = workspace.execute_statement("select name from decisions", "Select")
+    continuation = result.continuation
+
+    page = workspace.fetch_more_rows(continuation, len(result.rows))
+
+    assert page.rows == [["two"]]
+    assert page.continuation is None
+    assert page.has_more_rows is False
+    assert page.warnings == [
+        "Statement cursor cleanup failed: final cursor close failed"
+    ]
+    assert "warning: Statement cursor cleanup failed" in page.message
+    assert workspace._result_continuations == {}
 
 
 def test_close_result_continuation_is_idempotent_and_makes_token_stale(tmp_path):
@@ -829,13 +1015,17 @@ def test_fetch_more_rows_failure_closes_and_invalidates_continuation(tmp_path):
     workspace = OracleWorkspace(config)
     connection = FakeExecuteConnection(description=[("NAME",)], rows=[("one",), ("two",), ("three",)])
     workspace.connection = connection
+    outputs = iter([[], ["output from failed page"]])
+    workspace.read_dbms_output = lambda: next(outputs)
     result = workspace.execute_statement("select name from decisions", "Select")
     assert result.continuation is not None
     connection.cursor_instance.fetch_error = RuntimeError("fetch failed")
 
-    with pytest.raises(RuntimeError, match="fetch failed"):
+    with pytest.raises(OracleExecutionError, match="fetch failed") as excinfo:
         workspace.fetch_more_rows(result.continuation, len(result.rows))
 
+    assert excinfo.value.dbms_output == ["output from failed page"]
+    assert excinfo.value.dbms_output_error == ""
     assert connection.cursor_instance.closed is True
     with pytest.raises(RuntimeError, match="stale or no longer available"):
         workspace.fetch_more_rows(result.continuation, len(result.rows))
@@ -880,10 +1070,255 @@ def test_execute_statement_dml_commits_and_returns_dbms_output(tmp_path):
     assert workspace.autocommit is True
     assert workspace.has_uncommitted_changes is False
     assert connection.commits == 1
-    assert result.columns == ["DBMS_OUTPUT"]
-    assert result.rows == [["Příliš"], ["kůň"]]
+    assert result.columns == []
+    assert result.rows == []
+    assert result.dbms_output == ["Příliš", "kůň"]
+    assert result.dbms_output_error == ""
+    assert result.warnings == []
     assert result.message.startswith("3 row(s) affected")
     assert "2 dbms_output line(s)" in result.message
+
+
+def test_autocommit_commit_failure_captures_output_and_marks_outcome_unknown(tmp_path):
+    class CommitFailingConnection(FakeExecuteConnection):
+        def __init__(self):
+            super().__init__(description=None, rowcount=1)
+            self.fail_commit = True
+            self.transaction_in_progress = False
+
+        def commit(self):
+            self.commits += 1
+            if self.fail_commit:
+                self.fail_commit = False
+                raise RuntimeError("commit failed")
+
+        def is_healthy(self):
+            return True
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = CommitFailingConnection()
+    workspace.connection = connection
+    buffered_output = ["output from failed statement"]
+
+    def drain_output():
+        output = list(buffered_output)
+        buffered_output.clear()
+        return output
+
+    workspace.read_dbms_output = drain_output
+
+    with pytest.raises(OracleExecutionError, match="commit failed") as excinfo:
+        workspace.execute_statement("begin null; end;", "Block")
+
+    assert isinstance(excinfo.value.original, RuntimeError)
+    assert excinfo.value.dbms_output == ["output from failed statement"]
+    assert excinfo.value.warnings == [
+        "Autocommit commit failed; transaction outcome is unknown: commit failed"
+    ]
+    assert workspace.pending_unknown_changes is True
+
+    result = workspace.execute_statement("begin null; end;", "Retry")
+    assert result.dbms_output == []
+    assert workspace.has_uncommitted_changes is False
+
+
+def test_fatal_transaction_execution_marks_unknown_without_wrapping_interruption(tmp_path):
+    class FatalExecuteConnection(FakeExecuteConnection):
+        def __init__(self):
+            super().__init__(description=None, rowcount=1)
+            self.healthy = True
+
+        def is_healthy(self):
+            return self.healthy
+
+        def cursor(self):
+            cursor = super().cursor()
+
+            def interrupt(*args, **kwargs):
+                self.healthy = False
+                raise KeyboardInterrupt("fatal driver interruption")
+
+            cursor.execute = interrupt
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = FatalExecuteConnection()
+
+    with pytest.raises(KeyboardInterrupt, match="fatal driver interruption"):
+        workspace.execute_statement("update decisions set name = 'done'", "Update")
+
+    assert workspace.pending_rows_changed == 0
+    assert workspace.pending_unknown_changes is True
+
+
+def test_fatal_statement_cleanup_marks_transaction_unknown_and_propagates(tmp_path):
+    class FatalCleanupConnection(FakeExecuteConnection):
+        def __init__(self):
+            super().__init__(description=None, rowcount=1)
+            self.healthy = True
+
+        def is_healthy(self):
+            return self.healthy
+
+        def cursor(self):
+            cursor = super().cursor()
+
+            def interrupt_cleanup():
+                self.healthy = False
+                raise KeyboardInterrupt("fatal cleanup interruption")
+
+            cursor.close = interrupt_cleanup
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = FatalCleanupConnection()
+    workspace.set_autocommit(False)
+    workspace.read_dbms_output = lambda: []
+
+    with pytest.raises(KeyboardInterrupt, match="fatal cleanup interruption"):
+        workspace.execute_statement("update decisions set name = 'done'", "Update")
+
+    assert workspace.pending_rows_changed == 0
+    assert workspace.pending_unknown_changes is True
+
+
+def test_execute_statement_query_keeps_real_dbms_output_column_and_captures_output(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = FakeExecuteConnection(
+        description=[("DBMS_OUTPUT",)],
+        rows=[("real query value",)],
+    )
+    workspace.connection = connection
+    workspace.read_dbms_output = lambda: ["output from query evaluation"]
+
+    result = workspace.execute_statement(
+        "select dbms_output_function() as dbms_output from dual",
+        "Select",
+    )
+
+    assert result.columns == ["DBMS_OUTPUT"]
+    assert result.rows == [["real query value"]]
+    assert result.dbms_output == ["output from query evaluation"]
+    assert result.dbms_output_error == ""
+    assert result.warnings == []
+
+
+def test_execute_statement_query_preserves_rows_when_dbms_output_read_fails(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = FakeExecuteConnection(description=[("VALUE",)], rows=[("one",)])
+    workspace.connection = connection
+    workspace.read_dbms_output = lambda: (_ for _ in ()).throw(
+        RuntimeError("get_lines failed")
+    )
+
+    result = workspace.execute_statement("select value from decisions", "Select")
+
+    assert result.columns == ["VALUE"]
+    assert result.rows == [["one"]]
+    assert result.dbms_output == []
+    assert result.dbms_output_error == "get_lines failed"
+    assert result.warnings == ["DBMS_OUTPUT read failed: get_lines failed"]
+    assert "warning: DBMS_OUTPUT read failed: get_lines failed" in result.message
+
+
+def test_initial_fetch_failure_drains_and_attaches_dbms_output(tmp_path):
+    class InitialFetchFailingConnection(FakeExecuteConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            if len(self.cursors) == 1:
+                cursor.fetch_error = RuntimeError("initial fetch failed")
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = InitialFetchFailingConnection(
+        description=[("VALUE",)],
+        rows=[("one",)],
+    )
+    workspace.connection = connection
+    outputs = iter([["output before fetch failure"], []])
+    workspace.read_dbms_output = lambda: next(outputs)
+
+    with pytest.raises(OracleExecutionError, match="initial fetch failed") as excinfo:
+        workspace.execute_statement("select value from decisions", "Select")
+
+    assert excinfo.value.dbms_output == ["output before fetch failure"]
+    assert excinfo.value.dbms_output_error == ""
+
+    result = workspace.execute_statement("select value from decisions", "Retry")
+    assert result.dbms_output == []
+
+
+def test_execute_statement_elapsed_time_includes_initial_fetch_and_output(
+    monkeypatch,
+    tmp_path,
+):
+    events: list[str] = []
+    times = iter([10.0, 12.345])
+
+    def clock():
+        events.append("clock")
+        return next(times)
+
+    monkeypatch.setattr(execution_module, "monotonic", clock)
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = FakeExecuteConnection(
+        description=[("VALUE",)],
+        rows=[("one",)],
+    )
+    workspace.read_dbms_output = lambda: events.append("output") or []
+
+    result = workspace.execute_statement("select value from decisions", "Select")
+
+    assert events == ["clock", "output", "clock"]
+    assert result.message.startswith("1 row(s) in 2.35s")
+
+
+def test_execute_statement_preserves_result_when_cursor_cleanup_fails(tmp_path):
+    class CleanupFailingConnection(FakeExecuteConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            if len(self.cursors) == 1:
+                cursor.close = lambda: (_ for _ in ()).throw(
+                    RuntimeError("cursor close failed")
+                )
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = CleanupFailingConnection(
+        description=[("VALUE",)],
+        rows=[("one",)],
+    )
+    workspace.read_dbms_output = lambda: []
+
+    result = workspace.execute_statement("select value from decisions", "Select")
+
+    assert result.rows == [["one"]]
+    assert result.warnings == ["Statement cursor cleanup failed: cursor close failed"]
+    assert "warning: Statement cursor cleanup failed: cursor close failed" in result.message
+
+
+def test_execute_statement_attaches_cursor_cleanup_warning_to_primary_error(tmp_path):
+    class CleanupFailingConnection(FakeExecuteConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            if len(self.cursors) == 1:
+                cursor.close = lambda: (_ for _ in ()).throw(
+                    RuntimeError("cursor close failed")
+                )
+            return cursor
+
+    original = RuntimeError("ORA-20000: primary failure")
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = CleanupFailingConnection(execute_error=original)
+    workspace.read_dbms_output = lambda: []
+
+    with pytest.raises(OracleExecutionError) as excinfo:
+        workspace.execute_statement("begin fail; end;", "Block")
+
+    assert excinfo.value.original is original
+    assert excinfo.value.warnings == [
+        "Statement cursor cleanup failed: cursor close failed"
+    ]
 
 
 def test_execute_statement_returns_success_warning_when_dbms_output_read_fails(tmp_path):
@@ -901,6 +1336,9 @@ def test_execute_statement_returns_success_warning_when_dbms_output_read_fails(t
     assert connection.commits == 1
     assert result.columns == []
     assert result.rows == []
+    assert result.dbms_output == []
+    assert result.dbms_output_error == "get_lines failed"
+    assert result.warnings == ["DBMS_OUTPUT read failed: get_lines failed"]
     assert "1 row(s) affected" in result.message
     assert "warning: DBMS_OUTPUT read failed: get_lines failed" in result.message
 
@@ -976,6 +1414,193 @@ def test_execute_statement_raises_plsql_compilation_errors(tmp_path):
         "object_name": "MATHOP",
         "object_type": "PACKAGE",
     }
+
+
+def test_commit_failure_does_not_mask_compilation_error_or_output(tmp_path):
+    class CommitFailingConnection(FakeExecuteConnection):
+        def commit(self):
+            self.commits += 1
+            raise RuntimeError("commit after compile failed")
+
+        def is_healthy(self):
+            return True
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = CommitFailingConnection(
+        compile_errors=[
+            (2, 4, "PLS-00103: Invalid declaration", "ERROR"),
+        ]
+    )
+    workspace.connection = connection
+    workspace.read_dbms_output = lambda: ["compile output"]
+
+    with pytest.raises(OracleExecutionError) as excinfo:
+        workspace.execute_statement(
+            "create or replace procedure broken as\nbegin invalid; end;",
+            "Compile failure",
+        )
+
+    assert isinstance(excinfo.value.original, OracleCompilationError)
+    assert "Invalid declaration" in str(excinfo.value.original)
+    assert excinfo.value.dbms_output == ["compile output"]
+    assert excinfo.value.warnings == [
+        "Autocommit commit failed; transaction outcome is unknown: "
+        "commit after compile failed"
+    ]
+    assert excinfo.value.__cause__ is excinfo.value.original
+    assert workspace.pending_unknown_changes is True
+
+
+def test_compile_error_survives_diagnostic_cursor_cleanup_failure(tmp_path):
+    class DiagnosticCleanupFailingConnection(FakeExecuteConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            if len(self.cursors) == 2:
+                cursor.close = lambda: (_ for _ in ()).throw(
+                    RuntimeError("diagnostic cursor close failed")
+                )
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = DiagnosticCleanupFailingConnection(
+        compile_errors=[
+            (2, 4, "PLS-00103: Invalid declaration", "ERROR"),
+        ],
+    )
+    workspace.read_dbms_output = lambda: []
+
+    with pytest.raises(OracleExecutionError) as excinfo:
+        workspace.execute_statement(
+            "create or replace procedure broken as\nbegin invalid; end;",
+            "Compile failure",
+        )
+
+    assert isinstance(excinfo.value.original, OracleCompilationError)
+    assert "Invalid declaration" in str(excinfo.value.original)
+    assert excinfo.value.warnings == [
+        "PL/SQL diagnostic cursor cleanup failed: diagnostic cursor close failed"
+    ]
+
+
+def test_execute_statement_returns_plsql_compile_warnings_on_success(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = FakeExecuteConnection(
+        compile_errors=[
+            (2, 5, "PLW-06002: Unreachable code", "WARNING"),
+        ],
+    )
+    workspace.connection = connection
+    workspace.read_dbms_output = lambda: []
+
+    result = workspace.execute_statement(
+        "create or replace procedure warn_me as\n"
+        "begin null; return; null; end;",
+        "Compile warning",
+    )
+
+    assert result.columns == []
+    assert result.diagnostics == [
+        PlsqlCompileDiagnostic(2, 5, "PLW-06002: Unreachable code", "WARNING")
+    ]
+    assert result.warnings == [
+        "PL/SQL line 2, column 5 [WARNING]: PLW-06002: Unreachable code"
+    ]
+    assert "warning: PL/SQL line 2, column 5 [WARNING]" in result.message
+    assert connection.commits == 1
+    compile_query = " ".join(connection.cursors[1].calls[0][0].lower().split())
+    assert "text, attribute" in compile_query
+    assert "attribute = 'error'" not in compile_query
+
+
+def test_compile_warning_survives_diagnostic_cursor_cleanup_failure(tmp_path):
+    class DiagnosticCleanupFailingConnection(FakeExecuteConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            if len(self.cursors) == 2:
+                cursor.close = lambda: (_ for _ in ()).throw(
+                    RuntimeError("diagnostic cursor close failed")
+                )
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path))
+    workspace.connection = DiagnosticCleanupFailingConnection(
+        compile_errors=[
+            (2, 5, "PLW-06002: Unreachable code", "WARNING"),
+        ],
+    )
+    workspace.read_dbms_output = lambda: []
+
+    result = workspace.execute_statement(
+        "create or replace procedure warn_me as\nbegin null; end;",
+        "Compile warning",
+    )
+
+    assert result.diagnostics == [
+        PlsqlCompileDiagnostic(2, 5, "PLW-06002: Unreachable code", "WARNING")
+    ]
+    assert result.warnings == [
+        "PL/SQL line 2, column 5 [WARNING]: PLW-06002: Unreachable code",
+        "PL/SQL diagnostic cursor cleanup failed: diagnostic cursor close failed",
+    ]
+
+
+def test_plsql_compile_errors_include_warning_diagnostics_and_severity(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = FakeExecuteConnection(
+        compile_errors=[
+            (2, 5, "PLW-06002: Unreachable code", "WARNING"),
+            (3, 7, "PLS-00103: Encountered the symbol", "ERROR"),
+        ],
+    )
+    workspace.connection = connection
+    workspace.read_dbms_output = lambda: []
+
+    with pytest.raises(OracleExecutionError) as excinfo:
+        workspace.execute_statement(
+            "create or replace procedure broken as\n"
+            "begin null;\n"
+            "broken syntax; end;",
+            "Compile failure",
+        )
+
+    compilation_error = excinfo.value.original
+    assert isinstance(compilation_error, OracleCompilationError)
+    assert [item.severity for item in compilation_error.diagnostics] == [
+        "WARNING",
+        "ERROR",
+    ]
+    assert "line 2, column 5 [WARNING]" in str(compilation_error)
+    assert "line 3, column 7 [ERROR]" in str(compilation_error)
+
+
+def test_plsql_compile_diagnostics_are_anchored_after_leading_comments(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = FakeExecuteConnection(
+        compile_errors=[
+            (1, 4, "PLS-00103: Invalid declaration", "ERROR"),
+            (2, 3, "PLS-00103: Invalid body", "ERROR"),
+        ],
+    )
+    workspace.connection = connection
+    workspace.read_dbms_output = lambda: []
+
+    with pytest.raises(OracleExecutionError) as excinfo:
+        workspace.execute_statement(
+            "-- generated file\n"
+            "/* package header */\n"
+            "  create or replace procedure broken as\n"
+            "  invalid body;",
+            "Commented compile failure",
+        )
+
+    compilation_error = excinfo.value.original
+    assert isinstance(compilation_error, OracleCompilationError)
+    assert compilation_error.diagnostics == [
+        PlsqlCompileDiagnostic(3, 6, "PLS-00103: Invalid declaration", "ERROR"),
+        PlsqlCompileDiagnostic(4, 3, "PLS-00103: Invalid body", "ERROR"),
+    ]
+    assert "line 3, column 6 [ERROR]" in str(compilation_error)
+    assert "line 4, column 3 [ERROR]" in str(compilation_error)
 
 
 def test_plsql_object_from_create_statement_parses_schema_and_quoted_names():
@@ -1208,6 +1833,55 @@ def test_driver_transaction_state_preserves_pending_work_after_failed_dml(tmp_pa
     assert workspace.pending_unknown_changes is False
 
 
+@pytest.mark.parametrize(
+    ("statement", "expected_unknown"),
+    [
+        ("update decisions set name = 'new'", True),
+        ("select name from decisions", False),
+    ],
+)
+def test_unhealthy_connection_marks_only_transaction_capable_failure_unknown(
+    tmp_path,
+    statement,
+    expected_unknown,
+):
+    class UnhealthyConnection(FakeExecuteConnection):
+        healthy = True
+
+        def is_healthy(self):
+            return self.healthy
+
+        def cursor(self):
+            cursor = super().cursor()
+            execute = cursor.execute
+
+            def fail_and_disconnect(sql, params=None):
+                try:
+                    return execute(sql, params)
+                except Exception:
+                    self.healthy = False
+                    raise
+
+            cursor.execute = fail_and_disconnect
+            return cursor
+
+    workspace = OracleWorkspace(make_config(tmp_path, autocommit=False))
+    workspace.connection = UnhealthyConnection(
+        execute_error=RuntimeError("connection lost during statement")
+    )
+    workspace.record_pending_rows(3)
+    workspace.read_dbms_output = lambda: []
+
+    with pytest.raises(OracleExecutionError):
+        workspace.execute_statement(statement, "Failure")
+
+    assert workspace.pending_unknown_changes is expected_unknown
+    if expected_unknown:
+        assert workspace.pending_rows_changed == 0
+    else:
+        assert workspace.pending_rows_changed == 3
+
+
 def test_transaction_state_property_failure_uses_statement_fallback(tmp_path):
     workspace = OracleWorkspace(make_config(tmp_path))
     connection = TransactionStateExecuteConnection(RuntimeError("driver state unavailable"), rowcount=2)
@@ -1326,6 +2000,23 @@ def test_read_dbms_output_drains_multiple_full_batches(tmp_path):
     assert connection.cursor_instance.count_var.set_values == [
         (0, DBMS_OUTPUT_FETCH_LINES),
         (0, DBMS_OUTPUT_FETCH_LINES),
+    ]
+
+
+def test_dbms_output_cursor_cleanup_failure_preserves_drained_lines(tmp_path):
+    workspace = OracleWorkspace(make_config(tmp_path))
+    connection = FakeOutputConnection([["one", "two"]])
+    connection.cursor_instance.close = lambda: (_ for _ in ()).throw(
+        RuntimeError("output cursor close failed")
+    )
+    workspace.connection = connection
+
+    output, output_error, warnings = workspace._read_dbms_output_safely()
+
+    assert output == ["one", "two"]
+    assert output_error == ""
+    assert warnings == [
+        "DBMS_OUTPUT cursor cleanup failed: output cursor close failed"
     ]
 
 

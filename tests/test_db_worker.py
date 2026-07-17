@@ -3,18 +3,32 @@ from __future__ import annotations
 import queue
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import plsqlwks.db as db_module
 from plsqlwks.config import AppConfig
-from plsqlwks.db import OracleWorkspace, QueryResult
+from plsqlwks.db import (
+    OracleWorkspace,
+    QueryResult,
+    QueryResultContinuation,
+    QueryResultPage,
+)
+from plsqlwks.ui.app import App
+from plsqlwks.ui.db_operations import DatabaseOperations
+from plsqlwks.ui.result_presenter import ResultPresenter
+from plsqlwks.ui.db_session import DatabaseSessionController
 from plsqlwks.ui.db_worker import (
     DatabaseWorker,
+    DatabaseWorkerUnavailableError,
+    DbCommandHandle,
     DbSessionState,
     DbWorkerFinished,
     DbWorkerProgress,
 )
+from plsqlwks.ui.results import ResultInsertDraft
+from plsqlwks.ui.state import FileTab, ResultFetchMore, ScriptExecutionFailed, UIState
 
 
 def wait_for(handle) -> list[object]:
@@ -25,6 +39,34 @@ def wait_for(handle) -> list[object]:
             events.append(handle.events.get_nowait())
         except queue.Empty:
             return events
+
+
+class ImmediateFinishedWorker:
+    terminal = False
+
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.session_state = DbSessionState(True, False, False, False)
+
+    def submit(self, task, *, ignored=False, background=False):
+        handle = DbCommandHandle(1, queue.Queue(), threading.Event(), background)
+        handle._emit(
+            DbWorkerFinished(
+                1,
+                self.result,
+                self.error,
+                DbSessionState(False, False, False, False),
+            )
+        )
+        handle.done.set()
+        return handle
+
+    def cancel_current_operation(self, command_id):
+        return False
+
+    def shutdown(self, timeout=None):
+        return None
 
 
 class FakeWorkspace:
@@ -118,6 +160,591 @@ def test_worker_reports_task_failure_and_keeps_processing_commands():
         worker.shutdown()
 
 
+def test_snapshot_failure_still_completes_handle_and_keeps_last_state():
+    workspace = FakeWorkspace()
+    worker = DatabaseWorker(workspace)
+
+    def fail_snapshot():
+        raise RuntimeError("snapshot failed")
+
+    worker._snapshot_workspace = fail_snapshot
+    try:
+        handle = worker.submit(lambda db, progress: "executed")
+        event = wait_for(handle)[0]
+
+        assert isinstance(event, DbWorkerFinished)
+        assert event.result == "executed"
+        assert isinstance(event.error, DatabaseWorkerUnavailableError)
+        assert "snapshot failed" in str(event.error)
+        assert event.session_state == DbSessionState(False, True, False, False)
+    finally:
+        worker.shutdown()
+
+
+def test_base_exception_during_session_snapshot_makes_worker_terminal():
+    workspace = FakeWorkspace()
+    workspace.connection = object()
+    worker = DatabaseWorker(workspace)
+    original_snapshot = worker._snapshot_workspace
+    interrupted = False
+
+    def interrupt_snapshot_once():
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("snapshot interrupted")
+        return original_snapshot()
+
+    worker._snapshot_workspace = interrupt_snapshot_once
+    handle = worker.submit(lambda db, progress: "executed")
+    event = wait_for(handle)[0]
+
+    assert isinstance(event, DbWorkerFinished)
+    assert isinstance(event.error, DatabaseWorkerUnavailableError)
+    assert "snapshot interrupted" in str(event.error)
+    assert event.session_state.connected is False
+    assert worker.terminal is True
+    with pytest.raises(DatabaseWorkerUnavailableError, match="snapshot interrupted"):
+        worker.submit(lambda db, progress: "must not run")
+    with pytest.raises(DatabaseWorkerUnavailableError, match="snapshot interrupted"):
+        worker.shutdown()
+
+
+def test_fatal_task_failure_completes_and_fails_queued_commands():
+    workspace = FakeWorkspace()
+    worker = DatabaseWorker(workspace)
+
+    first = worker.submit(
+        lambda db, progress: (_ for _ in ()).throw(KeyboardInterrupt())
+    )
+    second = worker.submit(lambda db, progress: "must not run")
+
+    first_event = wait_for(first)[0]
+    second_event = wait_for(second)[0]
+
+    assert isinstance(first_event, DbWorkerFinished)
+    assert isinstance(first_event.error, DatabaseWorkerUnavailableError)
+    assert isinstance(second_event, DbWorkerFinished)
+    assert second_event.result is None
+    assert second_event.error is first_event.error
+    with pytest.raises(DatabaseWorkerUnavailableError, match="unavailable"):
+        worker.submit(lambda db, progress: None)
+    with pytest.raises(DatabaseWorkerUnavailableError, match="KeyboardInterrupt"):
+        worker.shutdown()
+
+
+def test_explicit_connect_replaces_terminal_worker_but_ordinary_sql_does_not(
+    tmp_path,
+):
+    class ReconnectWorkspace(FakeWorkspace):
+        def ensure_connected(self):
+            self.connection = object()
+
+    class Dialogs:
+        def prompt(self, label, default="", strip=True):
+            raise AssertionError(f"unexpected prompt: {label}")
+
+    class Presenter:
+        def __init__(self):
+            self.results: list[list[str]] = []
+
+        def set_results(self, lines, clear_table=True):
+            self.results.append(list(lines))
+
+        def close_all_result_continuations(self):
+            return None
+
+        def invalidate_results_after_rollback(self):
+            return None
+
+    initial_workspace = ReconnectWorkspace()
+    initial_worker = DatabaseWorker(initial_workspace)
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, initial_worker.session_state)
+    replacement_workers: list[DatabaseWorker] = []
+
+    def create_replacement(previous_session):
+        assert previous_session == DbSessionState(False, False, False, False)
+        workspace = ReconnectWorkspace()
+        workspace.autocommit = previous_session.autocommit
+        worker = DatabaseWorker(workspace)
+        replacement_workers.append(worker)
+        return worker
+
+    operations = DatabaseOperations(
+        state,
+        worker=initial_worker,
+        worker_factory=create_replacement,
+    )
+    controller = DatabaseSessionController(
+        state,
+        operations,
+        Dialogs(),
+        Presenter(),
+    )
+    failures: list[Exception] = []
+
+    try:
+        def fail_terminally(db, progress):
+            db.autocommit = False
+            raise KeyboardInterrupt()
+
+        assert operations.start(
+            "execute",
+            "Executing",
+            fail_terminally,
+            on_error=failures.append,
+        )
+        operations.wait(timeout=2)
+
+        assert len(failures) == 1
+        assert initial_worker.terminal is True
+        assert replacement_workers == []
+
+        assert operations.start(
+            "execute",
+            "Executing ordinary SQL",
+            lambda db, progress: "must not run",
+        ) is False
+        assert replacement_workers == []
+
+        controller.try_connect()
+        assert len(replacement_workers) == 1
+        operations.wait(timeout=2)
+
+        assert state.db.connected is True
+        assert state.db.autocommit is False
+        assert state.status == "Connected as hr"
+    finally:
+        try:
+            initial_worker.shutdown()
+        except DatabaseWorkerUnavailableError:
+            pass
+        operations.shutdown()
+
+
+def test_app_replacement_worker_preserves_runtime_modes_not_pending_work(tmp_path):
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+        autocommit=True,
+        read_only=False,
+    )
+    app = SimpleNamespace(state=SimpleNamespace(config=config), db_worker=None)
+
+    worker = App._create_replacement_database_worker(
+        app,
+        DbSessionState(False, False, True, True),
+    )
+    try:
+        assert worker.session_state == DbSessionState(False, False, True, False)
+        assert app.db_worker is worker
+    finally:
+        worker.shutdown()
+
+
+def test_completion_publication_failure_sets_done_and_fails_queued_commands():
+    workspace = FakeWorkspace()
+    workspace.connection = object()
+    workspace.has_uncommitted_changes = True
+    started = threading.Event()
+    release = threading.Event()
+    worker = DatabaseWorker(workspace)
+
+    def blocking_task(db, progress):
+        started.set()
+        assert release.wait(2)
+        return "first"
+
+    first = worker.submit(blocking_task)
+    second = worker.submit(lambda db, progress: "must not run")
+    assert started.wait(2)
+    first._emit = lambda event: (_ for _ in ()).throw(
+        RuntimeError("event sink failed")
+    )
+    release.set()
+
+    assert first.done.wait(2)
+    second_event = wait_for(second)[0]
+    assert isinstance(second_event, DbWorkerFinished)
+    assert isinstance(second_event.error, DatabaseWorkerUnavailableError)
+    assert second_event.session_state.connected is False
+    assert second_event.session_state.has_uncommitted_changes is True
+    with pytest.raises(DatabaseWorkerUnavailableError, match="event sink failed"):
+        worker.shutdown()
+    assert worker.session_state.has_uncommitted_changes is True
+
+
+def test_dead_worker_submission_detaches_live_handles_without_running_callbacks(
+    tmp_path,
+):
+    class DeadWorker:
+        session_state = DbSessionState(False, False, False, True)
+
+        def submit(self, task, *, ignored=False, background=False):
+            raise DatabaseWorkerUnavailableError("worker stopped")
+
+        def cancel_current_operation(self, command_id):
+            return False
+
+        def shutdown(self, timeout=None):
+            return None
+
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, DbSessionState(True, False, False, True))
+    result = QueryResult(
+        "data",
+        ["VALUE"],
+        [["loaded"]],
+        "1 row (more available)",
+        continuation=QueryResultContinuation("dead-cursor"),
+    )
+    state.active_result = result
+    state.last_result = result
+    callbacks: list[str] = []
+    operations = DatabaseOperations(state, worker=DeadWorker())
+
+    assert operations.start(
+        "execute",
+        "Executing",
+        lambda db, progress: None,
+        on_error=lambda exc: callbacks.append(str(exc)),
+    ) is False
+
+    assert callbacks == []
+    assert state.db == DbSessionState(False, False, False, True)
+    assert state.active_result is result
+    assert result.continuation is None
+    assert "transaction outcome is unknown" in state.status
+
+    background = operations.submit_background(lambda db, progress: None)
+    assert background.done.is_set()
+    assert background.ignored is True
+
+
+def test_dead_worker_submission_detaches_live_state_from_every_tab(tmp_path):
+    class DeadWorker:
+        session_state = DbSessionState(False, False, False, False)
+
+        def submit(self, task, *, ignored=False, background=False):
+            raise DatabaseWorkerUnavailableError("worker stopped")
+
+        def cancel_current_operation(self, command_id):
+            return False
+
+        def shutdown(self, timeout=None):
+            return None
+
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, DbSessionState(True, False, False, False))
+    expected: list[tuple[QueryResult, QueryResult, list[str]]] = []
+    tabs: list[FileTab] = []
+    for index in range(2):
+        draft_row = [f"draft-{index}"]
+        loaded_row = [f"loaded-{index}"]
+        active = QueryResult(
+            "data",
+            ["VALUE"],
+            [draft_row, loaded_row],
+            "1 row (more available)",
+            continuation=QueryResultContinuation(f"active-{index}"),
+            original_rows=[[None], list(loaded_row)],
+        )
+        previous = QueryResult(
+            "data",
+            ["VALUE"],
+            [[f"previous-{index}"]],
+            "1 row (more available)",
+            continuation=QueryResultContinuation(f"previous-{index}"),
+        )
+        tab = FileTab(active_result=active, last_result=previous)
+        tab.result_insert_draft = ResultInsertDraft(active, 0, draft_row)
+        tabs.append(tab)
+        expected.append((active, previous, loaded_row))
+    state.tabs = tabs
+    operations = DatabaseOperations(state, worker=DeadWorker())
+
+    assert operations.start(
+        "execute",
+        "Executing",
+        lambda db, progress: None,
+    ) is False
+
+    for tab, (active, previous, loaded_row) in zip(state.tabs, expected):
+        assert tab.active_result is active
+        assert tab.last_result is previous
+        assert active.rows == [loaded_row]
+        assert active.original_rows == [loaded_row]
+        assert active.continuation is None
+        assert previous.continuation is None
+        assert tab.result_insert_draft is None
+
+
+def test_completion_callback_failure_is_contained_on_ui_poll(tmp_path):
+    workspace = FakeWorkspace()
+    workspace.connection = object()
+    worker = DatabaseWorker(workspace)
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, worker.session_state)
+    operations = DatabaseOperations(state, worker=worker)
+
+    try:
+        assert operations.start(
+            "execute",
+            "Executing",
+            lambda db, progress: "done",
+            on_success=lambda result: (_ for _ in ()).throw(
+                RuntimeError("callback failed")
+            ),
+        )
+        operations.wait(timeout=2)
+
+        assert state.db_operation is None
+        assert state.status == (
+            "Database operation completion failed: RuntimeError: callback failed"
+        )
+        assert state.results == [
+            "ERROR completing database operation:",
+            "RuntimeError: callback failed",
+        ]
+    finally:
+        worker.shutdown()
+
+
+def test_done_handle_without_completion_event_cannot_strand_ui_operation(tmp_path):
+    class NoCompletionWorker:
+        session_state = DbSessionState(False, False, False, True)
+
+        def submit(self, task, *, ignored=False, background=False):
+            handle = DbCommandHandle(7, queue.Queue(), threading.Event())
+            handle.done.set()
+            return handle
+
+        def cancel_current_operation(self, command_id):
+            return False
+
+        def shutdown(self, timeout=None):
+            return None
+
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, DbSessionState(True, False, False, True))
+    failures: list[Exception] = []
+    operations = DatabaseOperations(state, worker=NoCompletionWorker())
+
+    assert operations.start(
+        "execute",
+        "Executing",
+        lambda db, progress: None,
+        on_error=failures.append,
+    )
+    operations.poll()
+
+    assert state.db_operation is None
+    assert len(failures) == 1
+    assert isinstance(failures[0], DatabaseWorkerUnavailableError)
+    assert "transaction outcome is unknown" in state.status
+
+
+def test_unexpected_session_loss_preserves_loaded_rows_and_clears_live_state(
+    tmp_path,
+):
+    class HealthyConnection:
+        def is_healthy(self):
+            return True
+
+    class UnhealthyConnection:
+        def is_healthy(self):
+            return False
+
+    workspace = FakeWorkspace()
+    workspace.connection = HealthyConnection()
+    worker = DatabaseWorker(workspace)
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, worker.session_state)
+    draft_row = ["draft"]
+    result = QueryResult(
+        "data",
+        ["VALUE"],
+        [draft_row, ["loaded"]],
+        "1 row (more available)",
+        continuation=QueryResultContinuation("lost-cursor"),
+        original_rows=[[None], ["loaded"]],
+    )
+    state.active_result = result
+    state.last_result = result
+    state.active_tab.result_insert_draft = ResultInsertDraft(result, 0, draft_row)
+    failures: list[Exception] = []
+    operations = DatabaseOperations(state, worker=worker)
+
+    def lose_session(db, progress):
+        db.has_uncommitted_changes = True
+        db.connection = UnhealthyConnection()
+        raise RuntimeError("connection lost")
+
+    try:
+        assert operations.start(
+            "execute",
+            "Executing",
+            lose_session,
+            on_error=failures.append,
+        )
+        operations.wait(timeout=2)
+
+        assert len(failures) == 1
+        assert state.db == DbSessionState(False, True, False, True)
+        assert state.active_result is result
+        assert state.last_result is result
+        assert result.rows == [["loaded"]]
+        assert result.original_rows == [["loaded"]]
+        assert result.continuation is None
+        assert state.active_tab.result_insert_draft is None
+        assert "transaction outcome is unknown" in state.status
+    finally:
+        worker.shutdown()
+
+
+@pytest.mark.parametrize("initially_connected", [True, False])
+def test_disconnected_completion_detaches_success_result_payload(
+    tmp_path,
+    initially_connected,
+):
+    result = QueryResult(
+        "data",
+        ["VALUE"],
+        [["loaded"]],
+        "1 row (more available)",
+        continuation=QueryResultContinuation("dead-success-cursor"),
+    )
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(
+        config,
+        DbSessionState(initially_connected, False, False, False),
+    )
+    operations = DatabaseOperations(state, worker=ImmediateFinishedWorker([result]))
+    presenter = ResultPresenter(state, operations)
+    operations.set_result_handler(presenter.apply_db_operation_result)
+
+    assert operations.start("execute", "Executing", lambda db, progress: None)
+    operations.poll()
+
+    assert state.active_result is result
+    assert result.rows == [["loaded"]]
+    assert result.continuation is None
+    assert result.has_more_rows is True
+
+
+def test_session_loss_detaches_continuation_added_by_fetch_more_payload(tmp_path):
+    result = QueryResult(
+        "data",
+        ["VALUE"],
+        [["first"]],
+        "1 row (more available)",
+        continuation=QueryResultContinuation("old-cursor"),
+    )
+    fetched = ResultFetchMore(
+        result,
+        QueryResultPage(
+            [["second"]],
+            "2 rows (more available)",
+            continuation=QueryResultContinuation("dead-next-cursor"),
+        ),
+        1,
+    )
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, DbSessionState(True, False, False, False))
+    state.active_result = result
+    state.last_result = result
+    operations = DatabaseOperations(state, worker=ImmediateFinishedWorker(fetched))
+    presenter = ResultPresenter(state, operations)
+    operations.set_result_handler(presenter.apply_db_operation_result)
+
+    assert operations.start("fetch-more", "Fetching", lambda db, progress: None)
+    operations.poll()
+
+    assert state.active_result is result
+    assert result.rows == [["first"], ["second"]]
+    assert result.continuation is None
+    assert result.has_more_rows is True
+
+
+def test_session_loss_detaches_continuation_from_script_partial_results(tmp_path):
+    partial = QueryResult(
+        "Statement 1",
+        ["VALUE"],
+        [["loaded"]],
+        "1 row (more available)",
+        continuation=QueryResultContinuation("dead-partial-cursor"),
+    )
+    failure = ScriptExecutionFailed(
+        RuntimeError("connection lost"),
+        2,
+        0,
+        [partial],
+        statement_index=2,
+        statement_count=2,
+    )
+    config = AppConfig(
+        user="hr",
+        dsn="db",
+        password_file=tmp_path / "orapass",
+        workspace_dir=tmp_path,
+    )
+    state = UIState(config, DbSessionState(True, False, False, False))
+    operations = DatabaseOperations(state, worker=ImmediateFinishedWorker(error=failure))
+    presenter = ResultPresenter(state, operations)
+    operations.set_result_handler(presenter.apply_db_operation_result)
+
+    assert operations.start("execute", "Executing script", lambda db, progress: None)
+    operations.poll()
+
+    assert state.active_result is partial
+    assert partial.rows == [["loaded"]]
+    assert partial.continuation is None
+    assert partial.has_more_rows is True
+
+
 def test_initial_session_snapshot_is_captured_before_first_command():
     workspace = FakeWorkspace()
     workspace.connection = object()
@@ -128,6 +755,22 @@ def test_initial_session_snapshot_is_captured_before_first_command():
     worker = DatabaseWorker(workspace)
     try:
         assert worker.session_state == DbSessionState(True, False, True, True)
+    finally:
+        worker.shutdown()
+
+
+def test_session_snapshot_uses_local_connection_health():
+    class UnhealthyConnection:
+        def is_healthy(self):
+            return False
+
+    workspace = FakeWorkspace()
+    workspace.connection = UnhealthyConnection()
+    workspace.has_uncommitted_changes = True
+
+    worker = DatabaseWorker(workspace)
+    try:
+        assert worker.session_state == DbSessionState(False, True, False, True)
     finally:
         worker.shutdown()
 
@@ -375,7 +1018,8 @@ def test_real_workspace_keeps_paged_cursor_on_the_persistent_worker_thread(tmp_p
         worker.shutdown()
 
     cursor_thread_ids = {thread_id for _call, thread_id in connection.cursor_instance.thread_calls}
-    assert connection.cursor_call_thread_ids == [worker.thread.ident]
+    assert connection.cursor_call_thread_ids
+    assert set(connection.cursor_call_thread_ids) == {worker.thread.ident}
     assert cursor_thread_ids == {worker.thread.ident}
     assert caller_thread_id not in cursor_thread_ids
     assert connection.close_thread_id == worker.thread.ident
@@ -431,7 +1075,8 @@ def test_reconnect_creates_connection_and_cleans_up_on_worker_thread(tmp_path, m
     old_cursor_thread_ids = {
         thread_id for _call, thread_id in old_connection.cursor_instance.thread_calls
     }
-    assert old_connection.cursor_call_thread_ids == [worker_thread_id]
+    assert old_connection.cursor_call_thread_ids
+    assert set(old_connection.cursor_call_thread_ids) == {worker_thread_id}
     assert old_cursor_thread_ids == {worker_thread_id}
     assert old_connection.close_thread_id == worker_thread_id
     assert connect_thread_ids == [worker_thread_id]

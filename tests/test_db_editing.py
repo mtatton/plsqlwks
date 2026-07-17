@@ -425,6 +425,87 @@ def test_update_cell_by_rowid_binds_typed_number_and_original_value():
     assert refreshed == CellUpdateResult(Decimal("10.50"), "10.50")
 
 
+@pytest.mark.parametrize(
+    "type_code",
+    [oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_TIMESTAMP],
+)
+def test_update_cell_by_rowid_uses_fixed_sysdate_expression_for_datetime_types(type_code):
+    workspace = OracleWorkspace(make_config())
+    original_value = datetime(2026, 7, 11, 14, 30, 5)
+    connection = FakeConnection(refreshed_value=original_value)
+    workspace.connection = connection
+    metadata = ResultColumnMetadata(type_code, scale=6)
+    context = EditableResultContext("DECISIONS", 0, {1: "NAME"}, {1: metadata})
+
+    workspace.update_cell_by_rowid(
+        context,
+        "AAABBBCCC",
+        1,
+        original_value,
+        "  SySdAtE\t",
+    )
+
+    update_sql, update_params = next(
+        (sql, params) for sql, params in connection.statements if sql.startswith("update DECISIONS")
+    )
+    assert update_sql == (
+        "update DECISIONS set NAME = sysdate "
+        "where rowid = chartorowid(:target_rowid) and NAME = :original_value"
+    )
+    assert update_params == {
+        "target_rowid": "AAABBBCCC",
+        "original_value": original_value,
+    }
+    assert connection.input_sizes == [
+        {
+            "target_rowid": oracledb.DB_TYPE_VARCHAR,
+            "original_value": type_code,
+        }
+    ]
+
+
+def test_update_cell_by_rowid_keeps_sysdate_literal_for_text_columns():
+    workspace = OracleWorkspace(make_config())
+    connection = FakeConnection(refreshed_value="  SySdAtE  ")
+    workspace.connection = connection
+    metadata = ResultColumnMetadata(oracledb.DB_TYPE_VARCHAR)
+    context = EditableResultContext("DECISIONS", 0, {1: "NAME"}, {1: metadata})
+
+    workspace.update_cell_by_rowid(context, "AAABBBCCC", 1, "old", "  SySdAtE  ")
+
+    update_sql, update_params = next(
+        (sql, params) for sql, params in connection.statements if sql.startswith("update DECISIONS")
+    )
+    assert "set NAME = :new_value" in update_sql
+    assert update_params["new_value"] == "  SySdAtE  "
+    assert connection.input_sizes == [
+        {
+            "target_rowid": oracledb.DB_TYPE_VARCHAR,
+            "new_value": oracledb.DB_TYPE_VARCHAR,
+            "original_value": oracledb.DB_TYPE_VARCHAR,
+        }
+    ]
+
+
+def test_update_cell_by_rowid_never_interpolates_non_exact_sysdate_input():
+    workspace = OracleWorkspace(make_config())
+    connection = FakeConnection()
+    workspace.connection = connection
+    metadata = ResultColumnMetadata(oracledb.DB_TYPE_DATE)
+    context = EditableResultContext("DECISIONS", 0, {1: "NAME"}, {1: metadata})
+
+    with pytest.raises(ValueError, match="ISO format"):
+        workspace.update_cell_by_rowid(
+            context,
+            "AAABBBCCC",
+            1,
+            datetime(2026, 7, 11),
+            "sysdate + 1",
+        )
+
+    assert not any(sql.startswith("update ") for sql, _ in connection.statements)
+
+
 def test_update_cell_by_rowid_uses_null_and_lob_optimistic_predicates():
     workspace = OracleWorkspace(make_config())
     null_connection = FakeConnection(refreshed_value="new")
@@ -703,6 +784,40 @@ def test_insert_row_for_result_binds_typed_number_and_date_values():
     )
 
 
+@pytest.mark.parametrize(
+    "type_code",
+    [oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_TIMESTAMP],
+)
+def test_insert_row_for_result_uses_fixed_sysdate_expression_for_datetime_types(type_code):
+    workspace = OracleWorkspace(make_config())
+    inserted_at = datetime(2026, 7, 11, 14, 30, 5)
+    connection = FakeConnection(inserted_row=("AAANEW", Decimal("7"), inserted_at))
+    workspace.connection = connection
+    context = EditableResultContext(
+        "DECISIONS",
+        0,
+        {1: "ID", 2: "NAME"},
+        {
+            1: ResultColumnMetadata(oracledb.DB_TYPE_NUMBER),
+            2: ResultColumnMetadata(type_code, scale=6),
+        },
+    )
+
+    workspace.insert_row_for_result(context, {1: "7", 2: "  SySdAtE  "}, 3)
+
+    insert_sql, insert_params = next(
+        (sql, params) for sql, params in connection.statements if sql.startswith("insert into DECISIONS")
+    )
+    assert insert_sql == (
+        "insert into DECISIONS (ID, NAME) values (:value_0, sysdate) "
+        "returning rowid into :new_rowid"
+    )
+    assert insert_params["value_0"] == Decimal("7")
+    assert "value_1" not in insert_params
+    assert "new_rowid" in insert_params
+    assert connection.input_sizes == [{"value_0": oracledb.DB_TYPE_NUMBER}]
+
+
 def test_insert_row_for_result_manual_mode_leaves_insert_uncommitted():
     workspace = OracleWorkspace(make_config())
     connection = FakeConnection(inserted_row=("AAANEW", 7, "manual"))
@@ -827,6 +942,7 @@ def make_config() -> AppConfig:
         dsn="db",
         password_file=Path("/tmp/orapass"),
         workspace_dir=Path("/tmp/plsqlwks-tests"),
+        autocommit=True,
     )
 
 

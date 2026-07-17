@@ -26,10 +26,12 @@ from plsqlwks.plugins.html_export import create_plugin as create_html_export_plu
 from plsqlwks.plugins.loader import PluginRegistry, load_plugin_registry
 from plsqlwks.plugins.xlsx_export import create_plugin as create_xlsx_export_plugin
 from plsqlwks.ui.app import App
+from plsqlwks.ui.command_dispatcher import CommandDispatcher
 from plsqlwks.ui.commands import COMMAND_MENU_ITEMS, filtered_command_indexes
 from plsqlwks.ui.constants import FOCUS_RESULTS
 from plsqlwks.ui.plugin_host import PluginHost, UIPluginContext, snapshot_result
 from plsqlwks.ui.state import UIState
+from tests.ui_harness import ServiceHarness
 
 
 pytestmark = pytest.mark.plugin
@@ -84,6 +86,32 @@ def make_context(
     )
 
 
+def make_service_harness(config: AppConfig, db: object) -> ServiceHarness:
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.state = UIState(config=config, db=db)
+    app._wire()
+    return app
+
+
+def open_plugin_command(
+    app: ServiceHarness,
+    host: PluginHost,
+    handler: str,
+) -> None:
+    selected = next(
+        command for command in host.command_menu_items if command.handler == handler
+    )
+    app.input.command_menu_items = host.command_menu_items
+    app.input.dispatcher = CommandDispatcher(
+        {command.handler: lambda: None for command in COMMAND_MENU_ITEMS},
+        host,
+    )
+    app.dialogs.pick_command_menu = lambda commands: selected
+    app.dialogs.refresh_modal_background = lambda: None
+    app.input.open_commands_menu()
+
+
 def test_context_returns_an_immutable_copy_of_the_loaded_result(tmp_path):
     result = QueryResult(
         "Current statement",
@@ -115,6 +143,9 @@ def test_context_returns_an_immutable_copy_of_the_loaded_result(tmp_path):
     assert snapshot.columns == ("A", "B")
     assert snapshot.rows == (("one", "two"),)
     assert snapshot.has_more is True
+    detached_snapshot = snapshot_result(result)
+    assert detached_snapshot is not None
+    assert detached_snapshot.has_more is True
 
 
 def test_snapshot_copies_only_aligned_numeric_source_values():
@@ -231,9 +262,7 @@ def test_context_delegates_modal_prompts_and_overwrite_confirmation(tmp_path):
 
 
 def test_context_report_error_preserves_active_result_and_continuation(tmp_path):
-    app = object.__new__(App)
-    app.screen = FakeScreen()
-    app.state = UIState(config=make_config(tmp_path), db=object())
+    app = make_service_harness(make_config(tmp_path), object())
     continuation = QueryResultContinuation("opaque-token")
     result = QueryResult(
         "data",
@@ -249,7 +278,7 @@ def test_context_report_error_preserves_active_result_and_continuation(tmp_path)
         insert_draft=False,
         prompt=lambda label, default, strip: None,
         set_status=lambda message: setattr(app.state, "status", message),
-        set_results=lambda lines, clear_table: app.set_results(
+        set_results=lambda lines, clear_table: app.result_presenter.set_results(
             lines,
             clear_table=clear_table,
         ),
@@ -307,15 +336,10 @@ def test_open_commands_menu_dispatches_html_through_plugin_mapping(tmp_path):
         PluginRegistry((create_html_export_plugin(),), ()),
         lambda: context,
     )
-    app = object.__new__(App)
-    app.state = UIState(config=make_config(tmp_path), db=object())
-    app._plugin_host = host
-    app.command_menu_items = host.command_menu_items
+    app = make_service_harness(make_config(tmp_path), object())
     html_command = host.command_menu_items[-1]
-    app.pick_command_menu = lambda commands: html_command
-    app.refresh_modal_background = lambda: None
 
-    App.open_commands_menu(app)
+    open_plugin_command(app, host, html_command.handler)
 
     assert statuses == ["No table result is available for export"]
 
@@ -327,15 +351,10 @@ def test_open_commands_menu_dispatches_xlsx_through_plugin_mapping(tmp_path):
         PluginRegistry((create_xlsx_export_plugin(),), ()),
         lambda: context,
     )
-    app = object.__new__(App)
-    app.state = UIState(config=make_config(tmp_path), db=object())
-    app._plugin_host = host
-    app.command_menu_items = host.command_menu_items
+    app = make_service_harness(make_config(tmp_path), object())
     xlsx_command = host.command_menu_items[-1]
-    app.pick_command_menu = lambda commands: xlsx_command
-    app.refresh_modal_background = lambda: None
 
-    App.open_commands_menu(app)
+    open_plugin_command(app, host, xlsx_command.handler)
 
     assert statuses == ["No table result is available for export"]
 
@@ -356,15 +375,10 @@ def test_open_commands_menu_dispatches_plugin_without_app_getattr(tmp_path):
     )
     context = make_context(tmp_path)
     host = PluginHost(PluginRegistry((plugin,), ()), lambda: context)
-    app = object.__new__(App)
-    app.state = UIState(config=make_config(tmp_path), db=object())
-    app._plugin_host = host
-    app.command_menu_items = host.command_menu_items
+    app = make_service_harness(make_config(tmp_path), object())
     selected = host.command_menu_items[-1]
-    app.pick_command_menu = lambda commands: selected
-    app.refresh_modal_background = lambda: None
 
-    App.open_commands_menu(app)
+    open_plugin_command(app, host, selected.handler)
 
     assert calls == [context]
 
@@ -380,9 +394,7 @@ def test_plugin_handler_exception_is_reported_without_changing_grid(tmp_path):
             PluginCommand("explode", "Results", "Explode", fail),
         ),
     )
-    app = object.__new__(App)
-    app.screen = FakeScreen()
-    app.state = UIState(config=make_config(tmp_path), db=object())
+    app = make_service_harness(make_config(tmp_path), object())
     continuation = QueryResultContinuation("opaque-token")
     result = QueryResult("data", ["A"], [["1"]], "1 row", continuation=continuation)
     app.state.active_result = result
@@ -394,7 +406,7 @@ def test_plugin_handler_exception_is_reported_without_changing_grid(tmp_path):
         insert_draft=False,
         prompt=lambda label, default, strip: None,
         set_status=lambda message: setattr(app.state, "status", message),
-        set_results=lambda lines, clear_table: app.set_results(
+        set_results=lambda lines, clear_table: app.result_presenter.set_results(
             lines,
             clear_table=clear_table,
         ),
@@ -437,17 +449,12 @@ def test_plugin_command_remains_available_in_read_only_mode(tmp_path):
         ),
     )
     config = make_config(tmp_path, read_only=True)
-    app = object.__new__(App)
-    app.state = UIState(config=config, db=SimpleNamespace(read_only=True))
+    app = make_service_harness(config, SimpleNamespace(read_only=True))
     context = make_context(tmp_path)
     host = PluginHost(PluginRegistry((plugin,), ()), lambda: context)
-    app._plugin_host = host
-    app.command_menu_items = host.command_menu_items
     selected = host.command_menu_items[-1]
-    app.pick_command_menu = lambda commands: selected
-    app.refresh_modal_background = lambda: None
 
-    App.open_commands_menu(app)
+    open_plugin_command(app, host, selected.handler)
 
     assert calls == [context]
 
@@ -463,9 +470,7 @@ def test_csv_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp_
         has_uncommitted_changes=True,
         read_only=True,
     )
-    app = object.__new__(App)
-    app.screen = FakeScreen()
-    app.state = UIState(config=config, db=database_state)
+    app = make_service_harness(config, database_state)
     app.db_worker = NoDatabaseWorkerAccess()
     continuation = QueryResultContinuation("opaque-token")
     original_rows = [[1, "original"]]
@@ -485,11 +490,11 @@ def test_csv_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp_
     app.state.buffer.col = 7
     active_tab = app.state.active_tab
     destination = tmp_path / "results" / "current.csv"
-    app.active_insert_draft = lambda: None
-    app.prompt_text_box = lambda label, default="", strip=True: str(destination)
+    app.results.active_insert_draft = lambda: None
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: str(destination)
     app._plugin_host = PluginHost(
         PluginRegistry((create_csv_export_plugin(),), ()),
-        app._create_plugin_context,
+        lambda: App._create_plugin_context(app),
     )
 
     assert app._plugin_host.execute(app._plugin_host.command_menu_items[-1].handler) is True
@@ -520,9 +525,7 @@ def test_html_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp
         has_uncommitted_changes=True,
         read_only=True,
     )
-    app = object.__new__(App)
-    app.screen = FakeScreen()
-    app.state = UIState(config=config, db=database_state)
+    app = make_service_harness(config, database_state)
     app.db_worker = NoDatabaseWorkerAccess()
     continuation = QueryResultContinuation("opaque-token")
     original_rows = [[1, "original"]]
@@ -546,11 +549,11 @@ def test_html_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp
     app.state.buffer.col = 7
     active_tab = app.state.active_tab
     destination = tmp_path / "results" / "current.html"
-    app.active_insert_draft = lambda: None
-    app.prompt_text_box = lambda label, default="", strip=True: str(destination)
+    app.results.active_insert_draft = lambda: None
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: str(destination)
     app._plugin_host = PluginHost(
         PluginRegistry((create_html_export_plugin(),), ()),
-        app._create_plugin_context,
+        lambda: App._create_plugin_context(app),
     )
 
     assert app._plugin_host.execute(app._plugin_host.command_menu_items[-1].handler) is True
@@ -587,9 +590,7 @@ def test_xlsx_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp
         has_uncommitted_changes=True,
         read_only=True,
     )
-    app = object.__new__(App)
-    app.screen = FakeScreen()
-    app.state = UIState(config=config, db=database_state)
+    app = make_service_harness(config, database_state)
     app.db_worker = NoDatabaseWorkerAccess()
     continuation = QueryResultContinuation("opaque-token")
     original_rows = [[1, "original"]]
@@ -613,11 +614,11 @@ def test_xlsx_plugin_through_app_preserves_ui_and_never_uses_database_worker(tmp
     app.state.buffer.col = 7
     active_tab = app.state.active_tab
     destination = tmp_path / "results" / "current.xlsx"
-    app.active_insert_draft = lambda: None
-    app.prompt_text_box = lambda label, default="", strip=True: str(destination)
+    app.results.active_insert_draft = lambda: None
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: str(destination)
     app._plugin_host = PluginHost(
         PluginRegistry((create_xlsx_export_plugin(),), ()),
-        app._create_plugin_context,
+        lambda: App._create_plugin_context(app),
     )
 
     assert app._plugin_host.execute(app._plugin_host.command_menu_items[-1].handler) is True
@@ -796,8 +797,8 @@ def test_app_configures_the_builtin_csv_handler(
         [["<NULL>", "2026-07-12"]],
         "1 row",
     )
-    app.active_insert_draft = lambda: None
-    app.prompt_text_box = lambda label, default="", strip=True: str(destination)
+    app.results.active_insert_draft = lambda: None
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: str(destination)
 
     csv_command = next(
         command
@@ -822,7 +823,7 @@ def test_app_context_factory_checks_draft_before_snapshot(monkeypatch, tmp_path)
     monkeypatch.setattr(app_module, "list_workspace_files", lambda config: [])
     app = App(FakeScreen(), make_config(tmp_path))
     app.state.active_result = QueryResult("data", ["A"], [["draft"]], "1 row")
-    app.active_insert_draft = lambda: object()
+    app.results.active_insert_draft = lambda: object()
     monkeypatch.setattr(
         app_module,
         "snapshot_result",
@@ -866,7 +867,7 @@ def test_app_snapshots_result_immediately_before_plugin_handler(monkeypatch, tmp
     monkeypatch.setattr(app_module, "list_workspace_files", lambda config: [])
     app = App(FakeScreen(), make_config(tmp_path))
     app.state.active_result = result
-    app.active_insert_draft = lambda: None
+    app.results.active_insert_draft = lambda: None
 
     assert app._plugin_host.execute(app.command_menu_items[-1].handler) is True
 
@@ -877,20 +878,18 @@ def test_app_snapshots_result_immediately_before_plugin_handler(monkeypatch, tmp
 
 def test_run_includes_plugin_warnings_in_startup_help(monkeypatch, tmp_path):
     config = make_config(tmp_path)
-    app = object.__new__(App)
-    app.screen = FakeScreen()
-    app.state = UIState(config=config, db=object())
-    app.running = False
+    app = make_service_harness(config, object())
+    app.application.running = False
     app._plugin_startup_warnings = ("External plugin skipped",)
-    app.show_cursor = lambda: None
-    app.init_colors = lambda: None
-    app.restore_session_tabs = lambda: None
-    app.try_connect = lambda: None
-    app.wait_for_db_operation = lambda timeout=None: None
-    app.close_all_result_continuations = lambda: None
-    app.shutdown_database_worker = lambda timeout=None: None
+    app.renderer.show_cursor = lambda: None
+    app.renderer.init_colors = lambda: None
+    app.documents.restore_session_tabs = lambda: None
+    app.database.try_connect = lambda: None
+    app.db_operations.wait = lambda timeout=None: None
+    app.result_presenter.close_all_result_continuations = lambda: None
+    app.db_operations.shutdown = lambda timeout=None: None
     seen: list[tuple[list[str], bool]] = []
-    app.show_help = lambda messages, focus_results=True: seen.append(
+    app.result_presenter.show_help = lambda messages, focus_results=True: seen.append(
         (messages, focus_results)
     )
     monkeypatch.setattr(app_module, "workspace_health", lambda config: ["Workspace health"])
@@ -900,7 +899,7 @@ def test_run_includes_plugin_warnings_in_startup_help(monkeypatch, tmp_path):
     monkeypatch.setattr(curses, "nl", lambda: None)
     monkeypatch.setattr(curses, "noraw", lambda: None)
 
-    App.run(app)
+    app.run()
 
     assert seen == [
         (["External plugin skipped", "Workspace health"], False),

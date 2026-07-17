@@ -1,6 +1,14 @@
 import pytest
 
-from plsqlwks.sqlsplit import is_plsql_like, split_script, statement_at_cursor
+import plsqlwks.sqlsplit as sqlsplit_module
+
+from plsqlwks.sqlsplit import (
+    ScriptPreflightIssue,
+    is_plsql_like,
+    preflight_script,
+    split_script,
+    statement_at_cursor,
+)
 
 
 def test_splits_simple_sql_statements():
@@ -24,6 +32,243 @@ select 1 from dual;
     assert statements[0].text.startswith("create or replace procedure p")
     assert statements[0].text.endswith("end;")
     assert statements[1].text == "select 1 from dual"
+
+
+def test_plsql_slash_delimiter_allows_trailing_comments():
+    script = """begin
+  null;
+end;
+/ -- execute the block
+select 2 from dual;
+"""
+
+    assert [statement.text for statement in split_script(script)] == [
+        "begin\n  null;\nend;",
+        "select 2 from dual",
+    ]
+
+
+def test_comment_only_scripts_and_trailing_comments_are_not_statements():
+    assert split_script("-- only a comment\n/* and another */\n") == []
+    assert [
+        statement.text
+        for statement in split_script(
+            "select 1 from dual; -- trailing\n/* trailing block */\n"
+        )
+    ] == ["select 1 from dual"]
+
+
+def test_leading_comments_remain_attached_to_a_real_statement():
+    statements = split_script("-- context\n\nselect 1 from dual;\n")
+
+    assert [statement.text for statement in statements] == [
+        "-- context\n\nselect 1 from dual"
+    ]
+
+
+def test_splitter_preserves_blank_lines_and_non_newline_control_characters():
+    payload = "first\u2028second\u0085third\vfourth\ffifth"
+    script = f"select q'[line one\n\n{payload}]' from dual;\n"
+
+    statements = split_script(script)
+
+    assert statements[0].text == script.removesuffix(";\n")
+
+
+def test_keeps_labeled_anonymous_plsql_until_slash():
+    script = """<<outer_block>>
+/* between labels */
+<<inner_block>>
+begin
+  null;
+end;
+/
+select 1 from dual;
+"""
+
+    statements = split_script(script)
+
+    assert is_plsql_like(statements[0].text) is True
+    assert [statement.text for statement in statements] == [
+        "<<outer_block>>\n/* between labels */\n<<inner_block>>\nbegin\n  null;\nend;",
+        "select 1 from dual",
+    ]
+
+
+def test_preflight_reports_client_directives_and_substitutions_with_document_locations():
+    script = """prompt Deploying
+select &owner.table_name, &&column_name from dual;
+  set serveroutput on
+@@next_script.sql
+"""
+
+    assert preflight_script(script) == [
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive 'prompt'.",
+            1,
+            1,
+        ),
+        ScriptPreflightIssue(
+            "substitution",
+            "SQL*Plus substitution variable '&owner' is not supported.",
+            2,
+            8,
+        ),
+        ScriptPreflightIssue(
+            "substitution",
+            "SQL*Plus substitution variable '&&column_name' is not supported.",
+            2,
+            27,
+        ),
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive 'set'.",
+            3,
+            3,
+        ),
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive '@@'.",
+            4,
+            1,
+        ),
+    ]
+
+
+def test_preflight_accepts_oracle_set_statements_and_ignores_literals_and_comments():
+    script = """set transaction read only;
+set role reporting;
+set constraint decisions_fk immediate;
+set constraints all deferred;
+select '&literal', q'[&&q_literal]', "&quoted_identifier" from dual;
+-- prompt &commented
+/* spool &&also_commented */
+"""
+
+    assert preflight_script(script) == [
+        ScriptPreflightIssue(
+            "substitution",
+            "SQL*Plus substitution variable '&quoted_identifier' is not supported.",
+            5,
+            39,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "set\n  transaction read only;",
+        "set\n  role reporting;",
+        "set\n  constraint decisions_fk immediate;",
+        "set\n  constraints all deferred;",
+        "set /* native SQL */\n  transaction read write;",
+    ],
+)
+def test_preflight_accepts_multiline_native_set_statements(statement):
+    assert preflight_script(statement) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "prom deploying",
+        "promp deploying",
+        "spoo deployment.log",
+        "colu status format a20",
+        "apex export 100",
+        "repeat 3 1",
+        "soda list",
+        "datapump export schema",
+        "dp export schema",
+        "connmgr list",
+        "cm list",
+        "diff schema one schema two",
+        "di schema one schema two",
+        "objectstorage list",
+        "lb status",
+        "proj init",
+        "? history",
+    ],
+)
+def test_preflight_reports_intermediate_abbreviations_and_current_sqlcl_commands(command):
+    issue = preflight_script(command)[0]
+
+    assert issue.kind == "directive"
+    assert (issue.line, issue.column) == (1, 1)
+
+
+def test_preflight_does_not_treat_command_words_inside_sql_as_directives():
+    script = """select
+  apex,
+  repeat,
+  soda
+from command_log;
+with project as (select 1 as id from dual)
+select project.id from project;
+"""
+
+    assert preflight_script(script) == []
+
+
+def test_preflight_reports_slash_reexecution_but_accepts_plsql_delimiter():
+    script = """/
+select 1 from dual;
+  / -- rerun the SQL buffer
+begin
+  null;
+end;
+/ -- terminate the PL/SQL block
+"""
+
+    assert preflight_script(script) == [
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive '/'.",
+            1,
+            1,
+        ),
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive '/'.",
+            3,
+            3,
+        ),
+    ]
+
+
+def test_preflight_reports_standalone_semicolon_buffer_command():
+    assert preflight_script("  ; -- list the SQLcl buffer\n") == [
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive ';'.",
+            1,
+            3,
+        )
+    ]
+
+
+def test_preflight_does_not_treat_plsql_identifiers_as_directives():
+    script = """<<run_block>>
+declare
+  prompt varchar2(20) := 'spool &ignored';
+begin
+  prompt := q'[set &&ignored]';
+  execute_work(prompt);
+end;
+/
+show errors
+"""
+
+    assert preflight_script(script) == [
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive 'show'.",
+            9,
+            1,
+        )
+    ]
 
 
 @pytest.mark.parametrize("editioning", ["editionable", "noneditionable"])
@@ -221,6 +466,136 @@ select 2 from dual;
         "begin\n  dbms_output.put_line(q'[a'b;c]');\nend;",
         "select 2 from dual",
     ]
+
+
+def test_keeps_with_plsql_declarations_and_main_sql_as_one_sql_statement():
+    script = """with
+  function normalize_value(p_value number) return number is
+    function fallback_value return number is
+    begin
+      return 1;
+    end fallback_value;
+  begin
+    if p_value is null then
+      return case when fallback_value() = 1 then 0 else 2 end;
+    end if;
+    return p_value;
+  end normalize_value;
+  procedure audit_value is
+  begin
+    null;
+  end audit_value;
+select normalize_value(2) from dual;
+select 9 from dual;
+"""
+
+    statements = split_script(script)
+
+    assert len(statements) == 2
+    assert preflight_script(script) == []
+    assert statements[0].text == """with
+  function normalize_value(p_value number) return number is
+    function fallback_value return number is
+    begin
+      return 1;
+    end fallback_value;
+  begin
+    if p_value is null then
+      return case when fallback_value() = 1 then 0 else 2 end;
+    end if;
+    return p_value;
+  end normalize_value;
+  procedure audit_value is
+  begin
+    null;
+  end audit_value;
+select normalize_value(2) from dual"""
+    assert statements[1].text == "select 9 from dual"
+    assert statement_at_cursor(script, 4, 6) == statements[0]
+    assert statement_at_cursor(script, 16, 8) == statements[0]
+    assert statement_at_cursor(script, 17, 8) == statements[1]
+
+
+@pytest.mark.parametrize("declaration", ["function", "procedure"])
+def test_keeps_single_with_plsql_declaration_until_main_sql_terminator(declaration):
+    if declaration == "function":
+        source = """with
+function local_value return number is
+begin
+  return 1;
+end;
+select local_value from dual;
+"""
+    else:
+        source = """with
+procedure local_action is
+begin
+  null;
+end;
+select 1 from dual;
+"""
+
+    statements = split_script(source)
+
+    assert len(statements) == 1
+    assert statements[0].text.endswith("from dual")
+    assert "end;\nselect" in statements[0].text
+
+
+def test_keeps_same_line_with_function_semicolons_inside_the_sql_statement():
+    script = (
+        "with function f return number is begin return 1; end; "
+        "select f() from dual; select 2 from dual;"
+    )
+
+    statements = split_script(script)
+
+    assert [statement.text for statement in statements] == [
+        "with function f return number is begin return 1; end; select f() from dual",
+        "select 2 from dual",
+    ]
+    assert statement_at_cursor(script, 0, 20) == statements[0]
+    assert statement_at_cursor(script, 0, 80) == statements[1]
+    assert preflight_script(f"{script}\nprompt done") == [
+        ScriptPreflightIssue(
+            "directive",
+            "Unsupported SQL*Plus/SQLcl directive 'prompt'.",
+            2,
+            1,
+        )
+    ]
+
+
+def test_large_with_function_is_parsed_once_per_operation(monkeypatch):
+    assignments = "\n".join("    value := value + 1;" for _ in range(500))
+    script = f"""with function f return number is
+  value number := 0;
+begin
+{assignments}
+  return value;
+end;
+select f() from dual;
+"""
+    original = sqlsplit_module._with_plsql_main_sql_terminator
+    calls = 0
+
+    def counted(source):
+        nonlocal calls
+        calls += 1
+        return original(source)
+
+    monkeypatch.setattr(
+        sqlsplit_module,
+        "_with_plsql_main_sql_terminator",
+        counted,
+    )
+
+    statements = split_script(script)
+    assert len(statements) == 1
+    assert calls == 1
+
+    assert preflight_script(script) == []
+    assert calls == 2
 
 
 def test_splits_long_special_sql_case(long_special_sql_case):

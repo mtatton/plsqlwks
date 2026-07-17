@@ -1,3 +1,5 @@
+import pytest
+
 from plsqlwks.sqlbinds import (
     SqlBind,
     bind_name_key,
@@ -86,6 +88,28 @@ def test_find_unique_binds_returns_first_quoted_aware_occurrence():
     ]
 
 
+def test_json_object_colon_separators_are_not_bind_variables():
+    statement = """select json_object(
+      'name' : first_name,
+      'email' : email,
+      :dynamic_key : :dynamic_value,
+      'legacy' value :legacy_value,
+      'nested' : json_object('id' : employee_id, 'filter' : :filter_id)
+    ) from employees where department_id = :department_id"""
+
+    assert find_bind_names(statement) == [
+        "dynamic_key",
+        "dynamic_value",
+        "legacy_value",
+        "filter_id",
+        "department_id",
+    ]
+
+
+def test_bind_only_json_object_argument_remains_a_bind():
+    assert find_bind_names("select json_object(:payload) from dual") == ["payload"]
+
+
 def test_find_bind_names_ignores_trigger_new_old_pseudorecords():
     statement = """
     create or replace trigger decisions_biu
@@ -115,6 +139,35 @@ def test_find_bind_names_ignores_trigger_pseudorecords_with_qualifier_comments()
     assert find_bind_names(statement) == []
 
 
+def test_find_bind_names_ignores_parent_and_comments_before_trigger_qualifier_dot():
+    statement = """
+    create trigger decisions_biu before update on decisions for each row
+    begin
+      :new /* generated */ .updated_by := :old -- keep prior value
+        .updated_by;
+      :parent /* nested table owner */ .id := :actual_bind;
+    end;
+    """
+
+    assert find_bind_names(statement) == ["actual_bind"]
+
+
+def test_find_bind_names_ignores_custom_trigger_referencing_aliases():
+    statement = """
+    create trigger decisions_biu
+    before update on decisions
+    referencing new /* gap */ as newest old as oldest parent as parent_row
+    for each row
+    begin
+      :newest.updated_by := :oldest /* qualifier gap */ .updated_by;
+      :parent_row.id := :actual_bind;
+      :"newest".quoted_value := 1;
+    end;
+    """
+
+    assert find_bind_names(statement) == ["actual_bind", '"newest"']
+
+
 def test_find_bind_names_keeps_quoted_new_in_trigger_source():
     statement = """
     create trigger decisions_biu before update on decisions for each row
@@ -131,3 +184,23 @@ def test_find_bind_names_keeps_new_old_outside_trigger_ddl():
         "new",
         "old",
     ]
+
+
+@pytest.mark.parametrize(
+    "decoy",
+    [
+        "-- create trigger appears in generated documentation",
+        "/* create trigger appears in generated documentation */",
+        "message := 'create trigger';",
+        "message := q'[create trigger]';",
+        "message := nq'{create trigger}';",
+        'message := "create trigger";',
+    ],
+)
+def test_find_bind_names_keeps_new_old_when_trigger_phrase_is_noncode(decoy):
+    statement = f"""begin
+      {decoy}
+      consume(:new.value, :old.value, :actual_bind);
+    end;"""
+
+    assert find_bind_names(statement) == ["new", "old", "actual_bind"]

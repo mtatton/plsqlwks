@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 from io import StringIO
+import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -18,6 +20,30 @@ def test_atomic_write_binary_creates_parent_and_writes_exact_bytes(tmp_path):
 
     assert path.read_bytes() == content
     assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+@pytest.mark.parametrize("kind", ["text", "binary"])
+def test_atomic_writes_preserve_existing_destination_permissions(tmp_path, kind):
+    path = tmp_path / f"result.{kind}"
+    path.write_bytes(b"old")
+    path.chmod(0o640)
+
+    if kind == "text":
+        atomic_write_text(path, lambda stream: stream.write("new"))
+    else:
+        atomic_write_binary(path, lambda stream: stream.write(b"new"))
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_atomic_write_keeps_new_destination_private(tmp_path):
+    path = tmp_path / "new.txt"
+
+    atomic_write_text(path, lambda stream: stream.write("private"))
+
+    assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
 
 
 def test_atomic_write_binary_closes_temporary_file_before_replace(tmp_path, monkeypatch):
@@ -118,6 +144,29 @@ def test_atomic_write_text_cleans_temp_and_preserves_destination_on_base_excepti
     assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
 
 
+def test_atomic_write_text_guard_runs_before_replace_and_preserves_destination(
+    tmp_path,
+):
+    path = tmp_path / "result.txt"
+    path.write_text("external", encoding="utf-8")
+    checks: list[str] = []
+
+    def reject_replace():
+        checks.append(path.read_text(encoding="utf-8"))
+        raise RuntimeError("target changed")
+
+    with pytest.raises(RuntimeError, match="target changed"):
+        atomic_write_text(
+            path,
+            lambda stream: stream.write("local"),
+            before_replace=reject_replace,
+        )
+
+    assert checks == ["external"]
+    assert path.read_text(encoding="utf-8") == "external"
+    assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
+
+
 def test_write_csv_uses_standard_escaping_utf8_and_deterministic_newlines(tmp_path):
     path = tmp_path / "nested" / "values.csv"
 
@@ -204,6 +253,12 @@ def test_write_csv_formula_protection_covers_spreadsheet_prefixes(tmp_path, pref
         protect_formulas=True,
     )
 
+    if prefix == "\0":
+        assert path.read_bytes() == (
+            '"\t\0HEADER","SAFE"\n'
+            '"\t\0VALUE","ordinary"\n'
+        ).encode("utf-8")
+        return
     with path.open(encoding="utf-8", newline="") as handle:
         exported = list(csv.reader(handle))
     assert exported == [

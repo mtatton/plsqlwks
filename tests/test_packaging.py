@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,8 +16,79 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 GITLAB_REPOSITORY_URL = "https://gitlab.com/unununu/plsqlwks"
 GITLAB_PREVIEW_URL = f"{GITLAB_REPOSITORY_URL}/-/raw/main/img/preview.png"
+AUTHORIZED_PUBLIC_AUTHOR = "unu2000"
+AUTHORIZED_KOFI_URL = "https://ko-fi.com/unu2000"
+RUNTIME_PACKAGE_FILES = {
+    "plsqlwks/__init__.py",
+    "plsqlwks/__main__.py",
+    "plsqlwks/exporting.py",
+    "plsqlwks/html_exporting.py",
+    "plsqlwks/sqlbinds.py",
+    "plsqlwks/sqlsplit.py",
+    "plsqlwks/workspace.py",
+    "plsqlwks/xlsx_exporting.py",
+    "plsqlwks/config/__init__.py",
+    "plsqlwks/config/loader.py",
+    "plsqlwks/config/models.py",
+    "plsqlwks/config/paths.py",
+    "plsqlwks/config/session.py",
+    "plsqlwks/config/settings.py",
+    "plsqlwks/db/__init__.py",
+    "plsqlwks/db/editing.py",
+    "plsqlwks/db/execution.py",
+    "plsqlwks/db/explain.py",
+    "plsqlwks/db/health.py",
+    "plsqlwks/db/metadata.py",
+    "plsqlwks/db/models.py",
+    "plsqlwks/db/session.py",
+    "plsqlwks/db/sql_analysis.py",
+    "plsqlwks/db/transactions.py",
+    "plsqlwks/plugins/__init__.py",
+    "plsqlwks/plugins/_result_export.py",
+    "plsqlwks/plugins/api.py",
+    "plsqlwks/plugins/csv_export.py",
+    "plsqlwks/plugins/html_export.py",
+    "plsqlwks/plugins/loader.py",
+    "plsqlwks/plugins/xlsx_export.py",
+    "plsqlwks/ui/__init__.py",
+    "plsqlwks/ui/app.py",
+    "plsqlwks/ui/application_controller.py",
+    "plsqlwks/ui/browser.py",
+    "plsqlwks/ui/buffer.py",
+    "plsqlwks/ui/catalog.py",
+    "plsqlwks/ui/clipboard.py",
+    "plsqlwks/ui/command_dispatcher.py",
+    "plsqlwks/ui/commands.py",
+    "plsqlwks/ui/completion.py",
+    "plsqlwks/ui/constants.py",
+    "plsqlwks/ui/db_operations.py",
+    "plsqlwks/ui/db_session.py",
+    "plsqlwks/ui/db_worker.py",
+    "plsqlwks/ui/dialogs.py",
+    "plsqlwks/ui/display.py",
+    "plsqlwks/ui/documents.py",
+    "plsqlwks/ui/editor_controller.py",
+    "plsqlwks/ui/errors.py",
+    "plsqlwks/ui/help.py",
+    "plsqlwks/ui/input_controller.py",
+    "plsqlwks/ui/key_reader.py",
+    "plsqlwks/ui/keys.py",
+    "plsqlwks/ui/menu.py",
+    "plsqlwks/ui/plugin_host.py",
+    "plsqlwks/ui/ports.py",
+    "plsqlwks/ui/query_controller.py",
+    "plsqlwks/ui/renderer.py",
+    "plsqlwks/ui/result_controller.py",
+    "plsqlwks/ui/result_presenter.py",
+    "plsqlwks/ui/results.py",
+    "plsqlwks/ui/sql.py",
+    "plsqlwks/ui/state.py",
+    "plsqlwks/ui/syntax.py",
+    "plsqlwks/ui/viewport.py",
+}
 SDIST_ONLY_FILES = {
     "PLUGINS.md",
+    "QUICKSTART.md",
     "plugin-requirements/csv-export/requirements.txt",
     "plugin-requirements/html-export/requirements.txt",
     "plugin-requirements/xlsx-export/requirements.txt",
@@ -27,6 +99,186 @@ SDIST_ONLY_FILES = {
     "tests/fixtures/config_exports.txt",
     "tests/fixtures/ui_exports.txt",
 }
+SDIST_PROJECT_FILES = RUNTIME_PACKAGE_FILES | SDIST_ONLY_FILES | {
+    "MANIFEST.in",
+    "README.md",
+    "license.txt",
+    "pyproject.toml",
+}
+SDIST_GENERATED_FILES = {
+    "PKG-INFO",
+    "setup.cfg",
+    "plsqlwks.egg-info/SOURCES.txt",
+}
+WHEEL_DIST_INFO_FILES = {
+    "METADATA",
+    "RECORD",
+    "WHEEL",
+    "entry_points.txt",
+    "licenses/license.txt",
+    "top_level.txt",
+}
+FORBIDDEN_ARTIFACT_DIRECTORIES = {
+    ".agents",
+    ".codex",
+    ".git",
+    "pub.wks",
+    "vdb",
+    "workspace",
+    "workspace010",
+}
+FORBIDDEN_EXACT_FILENAMES = {".env", "config.ini"}
+FORBIDDEN_FILENAME_SUFFIXES = (".key", ".p12", ".pem", ".pfx", ".un~")
+PRIVATE_SENTINEL = "PLSQLWKS-PRIVATE-ARTIFACT-SENTINEL-7F4D4A42949B"
+PRIVATE_TEXT_PATTERNS = (
+    (re.compile(rb"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE), "email address"),
+    (re.compile(rb"/(?:home|Users)/[^/\x00\r\n]+/"), "personal home path"),
+    (re.compile(rb"[A-Z]:\\Users\\[^\\\x00\r\n]+\\", re.IGNORECASE), "Windows user path"),
+    (re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"), "private key"),
+    (re.compile(rb"AKIA[0-9A-Z]{16}"), "AWS access key"),
+    (re.compile(rb"(?:gh[pousr]_|glpat-)[A-Za-z0-9_-]{20,}"), "hosted-service token"),
+)
+PERSONAL_METADATA_HEADERS = (
+    "author-email:",
+    "maintainer:",
+    "maintainer-email:",
+)
+
+
+def assert_safe_artifact_paths(names: set[str]) -> None:
+    for name in names:
+        assert "\\" not in name, name
+        path = PurePosixPath(name)
+        assert not path.is_absolute(), name
+        assert ".." not in path.parts, name
+        lowered_parts = {part.casefold() for part in path.parts}
+        assert lowered_parts.isdisjoint(FORBIDDEN_ARTIFACT_DIRECTORIES), name
+        filename = path.name.casefold()
+        assert filename not in FORBIDDEN_EXACT_FILENAMES, name
+        assert not filename.startswith(".env."), name
+        assert not filename.endswith(FORBIDDEN_FILENAME_SUFFIXES), name
+        assert not any(word in filename for word in ("password", "private-key", "secret-token")), name
+
+
+def assert_no_private_text(
+    members: dict[str, bytes],
+    *,
+    source_trees: tuple[Path, ...],
+) -> None:
+    sensitive_paths = {*source_trees, ROOT, Path.home()}
+    for variable in ("HOME", "USERPROFILE"):
+        value = os.environ.get(variable)
+        if value:
+            sensitive_paths.add(Path(value))
+    forbidden_values = {PRIVATE_SENTINEL.encode("ascii")}
+    for source_tree in sensitive_paths:
+        for value in (str(source_tree), source_tree.as_posix()):
+            if len(value) > 3:
+                forbidden_values.add(value.encode())
+    for name, payload in members.items():
+        assert all(value not in payload for value in forbidden_values), name
+        for pattern, description in PRIVATE_TEXT_PATTERNS:
+            assert pattern.search(payload) is None, f"{name}: {description}"
+
+
+def assert_only_authorized_public_author_metadata(metadata: str) -> None:
+    lines = metadata.splitlines()
+    headers = tuple(line.casefold() for line in lines)
+    assert [line for line in lines if line.casefold().startswith("author:")] == [
+        f"Author: {AUTHORIZED_PUBLIC_AUTHOR}"
+    ]
+    assert f"Project-URL: Ko-fi, {AUTHORIZED_KOFI_URL}" in lines
+    for prefix in PERSONAL_METADATA_HEADERS:
+        assert not any(line.startswith(prefix) for line in headers), prefix
+
+
+@pytest.fixture(scope="module")
+def built_distributions(tmp_path_factory):
+    build_root = tmp_path_factory.mktemp("privacy-build")
+    source_tree = build_root / "source"
+    shutil.copytree(
+        ROOT,
+        source_tree,
+        ignore=shutil.ignore_patterns(
+            ".agents",
+            ".cache",
+            ".codex",
+            ".git",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            "*.egg-info",
+            "__pycache__",
+            "build",
+            "dist",
+            "pub.wks",
+            "sdist",
+            "vdb",
+            "workspace",
+            "workspace010",
+        ),
+    )
+    private_paths = (
+        ".agents/private.txt",
+        ".codex/private.txt",
+        ".env",
+        ".git/config",
+        "ci-secret.tmp",
+        "config.ini",
+        "local-artifact.bin",
+        "local_private.py",
+        "plsqlwks/local-private.dat",
+        "pub.wks/config.ini",
+        "tests/test_local_private.py",
+        "temporary.un~",
+        "vdb/private.sqlite",
+        "workspace/config.ini",
+        "workspace010/config.ini",
+    )
+    for relative_path in private_paths:
+        path = source_tree / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(PRIVATE_SENTINEL, encoding="utf-8")
+
+    dist_dir = build_root / "dist"
+    dist_dir.mkdir()
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from setuptools.build_meta import build_sdist; "
+                f"build_sdist({str(dist_dir)!r})"
+            ),
+        ],
+        cwd=source_tree,
+        check=True,
+    )
+    source_archive = next(dist_dir.glob("plsqlwks-*.tar.gz"))
+    unpacked_dir = build_root / "from-sdist"
+    with tarfile.open(source_archive) as archive:
+        members = archive.getmembers()
+        assert all(member.isdir() or member.isfile() for member in members)
+        assert_safe_artifact_paths({member.name for member in members})
+        if hasattr(tarfile, "data_filter"):
+            archive.extractall(unpacked_dir, filter="data")
+        else:
+            archive.extractall(unpacked_dir)
+    sdist_source_tree = next(path for path in unpacked_dir.iterdir() if path.is_dir())
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from setuptools.build_meta import build_wheel; "
+                f"build_wheel({str(dist_dir)!r})"
+            ),
+        ],
+        cwd=sdist_source_tree,
+        check=True,
+    )
+    wheel = next(dist_dir.glob("plsqlwks-*.whl"))
+    return wheel, source_archive, (source_tree, sdist_source_tree)
 
 
 def assert_xlsx_extra_metadata(metadata: str) -> None:
@@ -55,6 +307,7 @@ def test_pyproject_declares_runtime_package_and_console_script():
     }
 
     assert 'name = "plsqlwks"' in pyproject
+    assert '{name = "unu2000"}' in pyproject
     assert 'plsqlwks = "plsqlwks.ui:main"' in pyproject
     runtime_block = pyproject.split("dependencies = [", 1)[1].split("]", 1)[0]
     assert [line.strip().strip('",') for line in runtime_block.splitlines() if line.strip()] == ["oracledb>=2.0"]
@@ -71,176 +324,95 @@ def test_pyproject_declares_runtime_package_and_console_script():
     assert f'Repository = "{GITLAB_REPOSITORY_URL}"' in pyproject
     assert f'Issues = "{GITLAB_REPOSITORY_URL}/-/issues"' in pyproject
     assert f'Changelog = "{GITLAB_REPOSITORY_URL}/-/blob/main/CHANGELOG.md"' in pyproject
+    assert f'Ko-fi = "{AUTHORIZED_KOFI_URL}"' in pyproject
     assert requirements == {"oracledb>=2.0"}
     for requirement in ("build>=1.2", "mypy>=1.10", "pytest>=8.0", "ruff>=0.8", "wheel>=0.43"):
         assert f'"{requirement}"' in pyproject
-    assert 'include = ["plsqlwks*"]' in pyproject
-    assert 'exclude = ["tests*", "tools*", "workspace*", "vdb*"]' in pyproject
+    setuptools_block = pyproject.split("[tool.setuptools]", 1)[1].split("[tool.setuptools.dynamic]", 1)[0]
+    package_block = setuptools_block.split("packages = [", 1)[1].split("]", 1)[0]
+    assert {
+        line.strip().strip('",')
+        for line in package_block.splitlines()
+        if line.strip()
+    } == {"plsqlwks", "plsqlwks.config", "plsqlwks.db", "plsqlwks.plugins", "plsqlwks.ui"}
+    assert "py-modules = []" in setuptools_block
+    assert "[tool.setuptools.packages.find]" not in pyproject
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert GITLAB_PREVIEW_URL in readme
+    assert f"[unu2000 on Ko-fi]({AUTHORIZED_KOFI_URL})" in readme
     assert "raw.githubusercontent.com" not in readme
 
 
 @pytest.mark.integration
 @pytest.mark.slow
-def test_built_wheel_contains_runtime_package_only(tmp_path):
-    wheelhouse = tmp_path / "wheelhouse"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            ".",
-            "--no-deps",
-            "--no-build-isolation",
-            "-w",
-            str(wheelhouse),
-        ],
-        cwd=ROOT,
-        check=True,
-    )
-    wheel = next(wheelhouse.glob("plsqlwks-*.whl"))
-
+def test_built_wheel_contains_only_allowlisted_runtime_files(built_distributions):
+    wheel, _, source_trees = built_distributions
     with zipfile.ZipFile(wheel) as archive:
-        names = archive.namelist()
-        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
-        metadata = archive.read(metadata_name).decode("utf-8")
+        names = {name for name in archive.namelist() if not name.endswith("/")}
+        dist_info_roots = {
+            PurePosixPath(name).parts[0]
+            for name in names
+            if PurePosixPath(name).parts[0].endswith(".dist-info")
+        }
+        assert len(dist_info_roots) == 1
+        dist_info_root = next(iter(dist_info_roots))
+        runtime_files = {name for name in names if not name.startswith(f"{dist_info_root}/")}
+        dist_info_files = {
+            str(PurePosixPath(name).relative_to(dist_info_root))
+            for name in names
+            if name.startswith(f"{dist_info_root}/")
+        }
+        assert runtime_files == RUNTIME_PACKAGE_FILES
+        assert dist_info_files == WHEEL_DIST_INFO_FILES
+        assert_safe_artifact_paths(names)
+        members = {name: archive.read(name) for name in names}
+        assert_no_private_text(members, source_trees=source_trees)
+        metadata = members[f"{dist_info_root}/METADATA"].decode("utf-8")
 
-    expected_ui_modules = {
-        "__init__.py",
-        "app.py",
-        "app_db.py",
-        "app_editor.py",
-        "app_files.py",
-        "app_input.py",
-        "app_render.py",
-        "app_results.py",
-        "app_tabs_browser.py",
-        "browser.py",
-        "buffer.py",
-        "clipboard.py",
-        "commands.py",
-        "completion.py",
-        "constants.py",
-        "display.py",
-        "errors.py",
-        "help.py",
-        "keys.py",
-        "menu.py",
-        "plugin_host.py",
-        "results.py",
-        "sql.py",
-        "state.py",
-        "syntax.py",
-    }
-    assert expected_ui_modules <= {
-        name.removeprefix("plsqlwks/ui/")
-        for name in names
-        if name.startswith("plsqlwks/ui/")
-    }
-    assert "plsqlwks/ui.py" not in names
-    assert not any(name.startswith("plsqlwks/ui_") and name.endswith(".py") for name in names)
-    assert "plsqlwks/exporting.py" in names
-    assert "plsqlwks/html_exporting.py" in names
-    assert "plsqlwks/xlsx_exporting.py" in names
-    expected_plugin_modules = {
-        "__init__.py",
-        "_result_export.py",
-        "api.py",
-        "csv_export.py",
-        "html_export.py",
-        "loader.py",
-        "xlsx_export.py",
-    }
-    assert expected_plugin_modules <= {
-        name.removeprefix("plsqlwks/plugins/")
-        for name in names
-        if name.startswith("plsqlwks/plugins/")
-    }
-    expected_config_modules = {
-        "__init__.py",
-        "loader.py",
-        "models.py",
-        "paths.py",
-        "session.py",
-        "settings.py",
-    }
-    assert expected_config_modules <= {
-        name.removeprefix("plsqlwks/config/")
-        for name in names
-        if name.startswith("plsqlwks/config/")
-    }
-    assert "plsqlwks/config.py" not in names
-    assert any(name == "plsqlwks/db/__init__.py" for name in names)
-    assert "plsqlwks/db.py" not in names
-    assert any(name.endswith(".dist-info/METADATA") for name in names)
-    assert any(name.endswith(".dist-info/licenses/license.txt") for name in names)
     assert_xlsx_extra_metadata(metadata)
+    assert_only_authorized_public_author_metadata(metadata)
     assert "License-Expression: LicenseRef-plsqlwks-Donationware" in metadata
     assert "License-File: license.txt" in metadata
-    assert "Version: 0.1.6" in metadata
+    assert "Version: 0.1.7" in metadata
     assert f"Project-URL: Repository, {GITLAB_REPOSITORY_URL}" in metadata
     assert GITLAB_PREVIEW_URL in metadata
     assert "raw.githubusercontent.com" not in metadata
     assert "requires-dist: platformdirs" not in metadata.lower()
-    assert not any(name.startswith("tests/") for name in names)
-    assert not any(name.startswith("tools/") for name in names)
-    assert not any(name.startswith("workspace/") for name in names)
-    assert not any(name.startswith("vdb/") for name in names)
     assert not SDIST_ONLY_FILES.intersection(names)
 
 
 @pytest.mark.integration
 @pytest.mark.slow
-def test_built_sdist_contains_license_and_gitlab_metadata(tmp_path, monkeypatch):
-    from setuptools.build_meta import build_sdist
-
-    dist_dir = tmp_path / "dist"
-    monkeypatch.chdir(ROOT)
-    source_archive = dist_dir / build_sdist(str(dist_dir))
-
+def test_built_sdist_contains_only_allowlisted_sources(built_distributions):
+    _, source_archive, source_trees = built_distributions
     with tarfile.open(source_archive) as archive:
-        names = archive.getnames()
-        archive_root = PurePosixPath(names[0]).parts[0]
+        members = archive.getmembers()
+        assert all(member.isdir() or member.isfile() for member in members)
+        archive_roots = {PurePosixPath(member.name).parts[0] for member in members}
+        assert len(archive_roots) == 1
+        archive_root = next(iter(archive_roots))
+        file_members = [member for member in members if member.isfile()]
         archive_files = {
-            str(path.relative_to(archive_root))
-            for name in names
-            if len((path := PurePosixPath(name)).parts) > 1
+            str(PurePosixPath(member.name).relative_to(archive_root))
+            for member in file_members
         }
-        top_level_python_files = {
-            path.name
-            for name in names
-            if len((path := PurePosixPath(name)).parts) == 2 and path.suffix == ".py"
-        }
-        assert SDIST_ONLY_FILES <= archive_files
-        assert top_level_python_files == {"rchar.py"}
-        assert any(name.endswith("/README.md") for name in names)
-        assert any(name.endswith("/pyproject.toml") for name in names)
-        assert any(name.endswith("/license.txt") for name in names)
-        assert {
-            "plsqlwks/exporting.py",
-            "plsqlwks/html_exporting.py",
-            "plsqlwks/xlsx_exporting.py",
-            "plsqlwks/plugins/__init__.py",
-            "plsqlwks/plugins/_result_export.py",
-            "plsqlwks/plugins/api.py",
-            "plsqlwks/plugins/csv_export.py",
-            "plsqlwks/plugins/html_export.py",
-            "plsqlwks/plugins/loader.py",
-            "plsqlwks/plugins/xlsx_export.py",
-            "plsqlwks/ui/plugin_host.py",
-        } <= archive_files
-        pkg_info_name = next(name for name in names if name.endswith("/PKG-INFO"))
-        pkg_info_file = archive.extractfile(pkg_info_name)
-        assert pkg_info_file is not None
-        metadata = pkg_info_file.read().decode("utf-8")
+        assert archive_files == SDIST_PROJECT_FILES | SDIST_GENERATED_FILES
+        assert_safe_artifact_paths(archive_files)
+        payloads: dict[str, bytes] = {}
+        for member in file_members:
+            extracted = archive.extractfile(member)
+            assert extracted is not None
+            relative_name = str(PurePosixPath(member.name).relative_to(archive_root))
+            payloads[relative_name] = extracted.read()
+        assert_no_private_text(payloads, source_trees=source_trees)
+        metadata = payloads["PKG-INFO"].decode("utf-8")
 
     assert "License-Expression: LicenseRef-plsqlwks-Donationware" in metadata
     assert "License-File: license.txt" in metadata
     assert_xlsx_extra_metadata(metadata)
-    assert "Version: 0.1.6" in metadata
+    assert_only_authorized_public_author_metadata(metadata)
+    assert "Version: 0.1.7" in metadata
     assert f"Project-URL: Repository, {GITLAB_REPOSITORY_URL}" in metadata
     assert GITLAB_PREVIEW_URL in metadata
     assert "raw.githubusercontent.com" not in metadata
@@ -248,43 +420,8 @@ def test_built_sdist_contains_license_and_gitlab_metadata(tmp_path, monkeypatch)
 
 @pytest.mark.integration
 @pytest.mark.slow
-def test_installed_wheel_uses_user_paths_outside_installation(tmp_path):
-    source_tree = tmp_path / "source"
-    shutil.copytree(
-        ROOT,
-        source_tree,
-        ignore=shutil.ignore_patterns(
-            ".agents",
-            ".cache",
-            ".codex",
-            ".git",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".ruff_cache",
-            "*.egg-info",
-            "__pycache__",
-            "build",
-            "dist",
-            "vdb",
-        ),
-    )
-    wheelhouse = tmp_path / "wheelhouse"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            ".",
-            "--no-deps",
-            "--no-build-isolation",
-            "-w",
-            str(wheelhouse),
-        ],
-        cwd=source_tree,
-        check=True,
-    )
-    wheel = next(wheelhouse.glob("plsqlwks-*.whl"))
+def test_installed_wheel_uses_user_paths_outside_installation(tmp_path, built_distributions):
+    wheel, _, _ = built_distributions
     install_dir = tmp_path / "installed"
     subprocess.run(
         [
@@ -380,7 +517,7 @@ print(json.dumps({
             "PluginHandler",
             "ResultSnapshot",
         ],
-        "package_version": "0.1.6",
+        "package_version": "0.1.7",
     }
     assert payload["html_plugin"] == {
         "id": "html-export",

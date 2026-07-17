@@ -3,9 +3,22 @@ import curses
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 import plsqlwks.ui as ui
 from plsqlwks.config import AppConfig
-from plsqlwks.db import EditableResultContext, ExplainPlanResult, ExplainPlanStep, OracleExecutionError, QueryResult, TransactionReport
+from tests.ui_harness import ServiceHarness
+from plsqlwks.db import (
+    EditableResultContext,
+    ExplainPlanResult,
+    ExplainPlanStep,
+    OracleCompilationError,
+    OracleExecutionError,
+    PlsqlCompileDiagnostic,
+    PlsqlObject,
+    QueryResult,
+    TransactionReport,
+)
 from plsqlwks.db import QueryResultContinuation
 from plsqlwks.db import assemble_package_definition, ensure_sql_terminator, terminate_plsql_ddl
 from plsqlwks.sqlsplit import split_script
@@ -274,33 +287,44 @@ def test_ui_facade_export_contract_matches_pre_package_surface():
     assert all(hasattr(ui, name) for name in expected_exports)
 
 
-def test_ui_package_modules_replace_all_legacy_root_modules():
+def test_ui_package_contains_composed_service_modules():
     import importlib.util
 
     implementation_modules = (
         "app",
-        "app_db",
-        "app_editor",
-        "app_files",
-        "app_input",
-        "app_render",
-        "app_results",
-        "app_tabs_browser",
+        "application_controller",
         "browser",
         "buffer",
+        "catalog",
         "clipboard",
+        "command_dispatcher",
         "commands",
         "completion",
         "constants",
+        "db_operations",
+        "db_session",
+        "db_worker",
+        "dialogs",
         "display",
+        "documents",
+        "editor_controller",
         "errors",
         "help",
+        "input_controller",
+        "key_reader",
         "keys",
         "menu",
+        "plugin_host",
+        "ports",
+        "query_controller",
+        "renderer",
+        "result_controller",
+        "result_presenter",
         "results",
         "sql",
         "state",
         "syntax",
+        "viewport",
     )
 
     for module_name in implementation_modules:
@@ -308,37 +332,43 @@ def test_ui_package_modules_replace_all_legacy_root_modules():
         assert importlib.util.find_spec(f"plsqlwks.ui_{module_name}") is None
 
 
-def test_app_methods_are_owned_by_split_mixins():
-    from plsqlwks.ui.app_db import AppDbMixin
-    from plsqlwks.ui.app_editor import AppEditorMixin
-    from plsqlwks.ui.app_files import AppFilesMixin
-    from plsqlwks.ui.app_input import AppInputMixin
-    from plsqlwks.ui.app_render import AppRenderMixin
-    from plsqlwks.ui.app_results import AppResultsMixin
-    from plsqlwks.ui.app_tabs_browser import AppTabsBrowserMixin
+def test_app_is_plain_composition_root_and_services_own_ui_behavior():
+    from plsqlwks.ui.catalog import BrowserController
+    from plsqlwks.ui.documents import DocumentController
+    from plsqlwks.ui.editor_controller import CompletionController
+    from plsqlwks.ui.input_controller import InputController
+    from plsqlwks.ui.query_controller import QueryController
+    from plsqlwks.ui.renderer import Renderer
+    from plsqlwks.ui.result_controller import ResultController
 
-    for mixin in (
-        AppRenderMixin,
-        AppDbMixin,
-        AppInputMixin,
-        AppTabsBrowserMixin,
-        AppResultsMixin,
-        AppEditorMixin,
-        AppFilesMixin,
-    ):
-        assert issubclass(App, mixin)
-
-    expected_method_modules = {
-        "draw": "plsqlwks.ui.app_render",
-        "handle_key": "plsqlwks.ui.app_input",
-        "run_current_statement": "plsqlwks.ui.app_db",
-        "toggle_browser": "plsqlwks.ui.app_tabs_browser",
-        "handle_results_key": "plsqlwks.ui.app_results",
-        "autocomplete_editor": "plsqlwks.ui.app_editor",
-        "open_file": "plsqlwks.ui.app_files",
+    assert App.__bases__ == (object,)
+    assert set(App.__dict__) >= {
+        "__init__",
+        "_built_in_actions",
+        "_create_plugin_context",
+        "run",
     }
-    for method_name, module_name in expected_method_modules.items():
-        assert getattr(App, method_name).__module__ == module_name
+    assert not {
+        "draw",
+        "handle_key",
+        "run_current_statement",
+        "toggle_browser",
+        "handle_results_key",
+        "autocomplete_editor",
+        "open_file",
+    }.intersection(App.__dict__)
+
+    expected_method_owners = {
+        Renderer.draw: "plsqlwks.ui.renderer",
+        InputController.handle_key: "plsqlwks.ui.input_controller",
+        QueryController.run_current_statement: "plsqlwks.ui.query_controller",
+        BrowserController.toggle_browser: "plsqlwks.ui.catalog",
+        ResultController.handle_results_key: "plsqlwks.ui.result_controller",
+        CompletionController.autocomplete_editor: "plsqlwks.ui.editor_controller",
+        DocumentController.open_file: "plsqlwks.ui.documents",
+    }
+    for method, module_name in expected_method_owners.items():
+        assert method.__module__ == module_name
 
 
 def test_extended_keyboard_reporting_helpers_emit_sequences():
@@ -439,13 +469,13 @@ def test_normalizes_function_key_keynames():
 
 
 def test_alt_x_routes_to_current_statement_execution():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     calls: list[str] = []
     app.run_current_statement = lambda: calls.append("run")
 
-    App.handle_key(app, KEY_ALT_X)
+    app.handle_key(KEY_ALT_X)
 
     assert calls == ["run"]
 
@@ -457,7 +487,7 @@ def test_decodes_alt_o_commands_menu_shortcut():
 
 
 def test_alt_o_opens_top_left_command_menu_and_executes_selection(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(config=make_config(), db=object())
     app.running = True
@@ -474,7 +504,7 @@ def test_alt_o_opens_top_left_command_menu_and_executes_selection(monkeypatch):
     calls: list[str] = []
     app.show_help = lambda: calls.append("help")
 
-    App.handle_key(app, KEY_ALT_O)
+    app.handle_key(KEY_ALT_O)
 
     assert calls == ["help"]
     assert windows
@@ -533,7 +563,7 @@ def test_command_menu_tree_filter_expands_matches_and_selects_first_command():
 
 
 def test_command_menu_can_collapse_section_with_enter(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(config=make_config(), db=object())
     windows: list[FakePickerWindow] = []
@@ -547,24 +577,24 @@ def test_command_menu_can_collapse_section_with_enter(monkeypatch):
     keys = iter([curses.KEY_UP, 10, ESC])
     app.read_key = lambda window=None, idle_timeout=200: next(keys)
 
-    assert App.pick_command_menu(app, COMMAND_MENU_ITEMS) is None
+    assert app.pick_command_menu(COMMAND_MENU_ITEMS) is None
     assert any("[+] Application" in call.text for window in windows for call in window.calls)
 
 
 def test_alt_r_routes_to_buffer_rename():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     calls: list[str] = []
     app.rename_current_buffer = lambda: calls.append("rename")
 
-    App.handle_key(app, KEY_ALT_R)
+    app.handle_key(KEY_ALT_R)
 
     assert calls == ["rename"]
 
 
 def test_f1_routes_to_styled_help_and_clears_result_views():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.active_result = QueryResult("data", ["A"], [["1"]], "1 row")
@@ -572,7 +602,7 @@ def test_f1_routes_to_styled_help_and_clears_result_views():
     app.state.show_dbms_output = True
     app.state.focus = FOCUS_RESULTS
 
-    App.handle_key(app, curses.KEY_F1)
+    app.handle_key(curses.KEY_F1)
 
     assert app.state.active_result is None
     assert app.state.explain_result is None
@@ -585,43 +615,43 @@ def test_f1_routes_to_styled_help_and_clears_result_views():
 
 
 def test_f7_cycles_grid_fullscreen_editor_fullscreen_and_split_layout():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=24, width=120)
     app.state = UIState(config=make_config(), db=object())
     app.state.active_result = QueryResult("data", ["A"], [["1"]], "1 row")
     app.state.focus = FOCUS_EDITOR
 
-    App.handle_key(app, curses.KEY_F7)
+    app.handle_key(curses.KEY_F7)
     assert app.state.result_grid_fullscreen is True
     assert app.state.result_ratio == ui.RESULT_RATIO_FULLSCREEN
     assert app.state.result_mode == ui.RESULT_GRID
     assert app.state.status == "Data grid fullscreen"
     assert app.state.focus == FOCUS_RESULTS
-    assert App.current_pane_sizes(app)[:2] == (0, 24)
+    assert app.current_pane_sizes()[:2] == (0, 24)
 
-    App.handle_key(app, curses.KEY_F7)
+    app.handle_key(curses.KEY_F7)
     assert app.state.result_grid_fullscreen is False
     assert app.state.result_ratio == ui.RESULT_RATIO_EDITOR_FULLSCREEN
     assert app.state.status == "Results pane: editor fullscreen"
     assert app.state.focus == FOCUS_EDITOR
-    assert App.current_pane_sizes(app)[:2] == (24, 0)
+    assert app.current_pane_sizes()[:2] == (24, 0)
 
-    App.handle_key(app, curses.KEY_F7)
+    app.handle_key(curses.KEY_F7)
     assert app.state.result_grid_fullscreen is False
     assert app.state.result_ratio == ui.RESULT_RATIO_GRID_SPLIT
     assert app.state.result_mode == ui.RESULT_GRID
     assert app.state.status == "Results pane: 2/3 editor, 1/3 data grid"
-    assert App.current_pane_sizes(app)[:2] == (14, 7)
+    assert app.current_pane_sizes()[:2] == (14, 7)
 
 
 def test_f7_moves_from_grid_only_fullscreen_to_editor_fullscreen():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=24, width=120)
     app.state = UIState(config=make_config(), db=object())
     app.state.active_result = QueryResult("data", ["A"], [["1"]], "1 row")
 
-    App.handle_key(app, curses.KEY_F7)
-    App.handle_key(app, curses.KEY_F7)
+    app.handle_key(curses.KEY_F7)
+    app.handle_key(curses.KEY_F7)
 
     assert app.state.result_grid_fullscreen is False
     assert app.state.result_ratio == ui.RESULT_RATIO_EDITOR_FULLSCREEN
@@ -635,20 +665,20 @@ def test_result_pane_ratio_helpers_support_editor_and_split_layouts():
 
 
 def test_fullscreen_results_do_not_scroll_or_edit_hidden_editor():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=24, width=120)
     app.state = UIState(config=make_config(), db=object())
     app.state.result_ratio = ui.RESULT_RATIO_FULLSCREEN
     app.state.focus = FOCUS_EDITOR
     app.state.buffer = Buffer(lines=["select"], row=0, col=0, scroll=0, dirty=False)
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert (app.state.buffer.row, app.state.buffer.col, app.state.buffer.scroll) == (0, 0, 0)
     assert app.state.focus == FOCUS_RESULTS
     assert app.state.status == "Results pane: fullscreen"
 
-    App.handle_key(app, "x")
+    app.handle_key("x")
 
     assert app.state.buffer.text() == "select"
 
@@ -667,15 +697,15 @@ def test_decodes_ctrl_alt_commit_and_rollback_shortcuts():
 def test_transaction_shortcuts_commit_and_rollback_from_any_focus():
     for focus in (FOCUS_BROWSER, FOCUS_RESULTS, "editor"):
         db = TransactionDb()
-        app = object.__new__(App)
+        app = ServiceHarness()
         app.state = UIState(config=make_config(), db=db)
         app.state.focus = focus
         app.state.active_result = QueryResult("data", ["A"], [["1"]], "1 row")
 
-        App.handle_key(app, KEY_CTRL_ALT_C)
-        App.wait_for_db_operation(app, timeout=1)
-        App.handle_key(app, KEY_CTRL_ALT_R)
-        App.wait_for_db_operation(app, timeout=1)
+        app.handle_key(KEY_CTRL_ALT_C)
+        app.wait_for_db_operation(timeout=1)
+        app.handle_key(KEY_CTRL_ALT_R)
+        app.wait_for_db_operation(timeout=1)
 
         assert db.calls == ["commit", "rollback"]
         assert app.state.active_result is None
@@ -708,14 +738,14 @@ def test_transaction_pending_indicator_uses_db_state():
 
 def test_f12_chooses_transaction_mode(tmp_path):
     db = TransactionDb()
-    app = object.__new__(App)
+    app = ServiceHarness()
     config = make_config(tmp_path)
     app.state = UIState(config=config, db=db)
     answers = iter(["m", "a"])
     app.prompt = lambda label, default="", strip=True: next(answers)
 
-    App.handle_key(app, curses.KEY_F12)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(curses.KEY_F12)
+    app.wait_for_db_operation(timeout=1)
     assert db.autocommit is False
     assert db.modes == [False]
     assert transaction_mode_name(db) == "manual"
@@ -725,8 +755,8 @@ def test_f12_chooses_transaction_mode(tmp_path):
     parser.read(config.config_file, encoding="utf-8")
     assert parser.get("database", "autocommit") == "no"
 
-    App.handle_key(app, curses.KEY_F12)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(curses.KEY_F12)
+    app.wait_for_db_operation(timeout=1)
     assert db.autocommit is True
     assert db.modes == [False, True]
     assert transaction_mode_name(db) == "autocommit"
@@ -736,18 +766,78 @@ def test_f12_chooses_transaction_mode(tmp_path):
     assert parser.get("database", "autocommit") == "yes"
 
 
+def test_transaction_mode_persistence_failure_keeps_live_mode_and_ui_responsive(
+    monkeypatch,
+    tmp_path,
+):
+    db = TransactionDb()
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(tmp_path), db=db)
+    app.prompt = lambda label, default="", strip=True: "m"
+    monkeypatch.setattr(
+        "plsqlwks.ui.db_session.save_autocommit",
+        lambda config, enabled: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    app.choose_transaction_mode()
+    app.wait_for_db_operation(timeout=1)
+
+    assert db.autocommit is False
+    assert app.state.db_operation is None
+    assert app.state.status.startswith("Transaction mode: manual")
+    assert "preference was not saved: disk full" in app.state.status
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [KeyboardInterrupt("interrupted"), SystemExit(23)],
+    ids=["keyboard-interrupt", "system-exit"],
+)
+def test_transaction_mode_persistence_interruption_reports_live_mode_then_propagates(
+    monkeypatch,
+    tmp_path,
+    interruption,
+):
+    db = TransactionDb()
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(tmp_path), db=db)
+    app.prompt = lambda label, default="", strip=True: "m"
+
+    def interrupt_persistence(config, enabled):
+        raise interruption
+
+    monkeypatch.setattr(
+        "plsqlwks.ui.db_session.save_autocommit",
+        interrupt_persistence,
+    )
+
+    app.choose_transaction_mode()
+    with pytest.raises(type(interruption)) as raised:
+        app.wait_for_db_operation(timeout=1)
+
+    assert raised.value is interruption
+    assert db.autocommit is False
+    assert app.state.db_operation is None
+    assert app.state.status.startswith("Transaction mode: manual")
+    assert "live mode changed, preference save was interrupted" in app.state.status
+    assert (
+        type(interruption).__name__ in app.state.status
+        or str(interruption) in app.state.status
+    )
+
+
 def test_manual_to_autocommit_commits_pending_transaction_before_switch(tmp_path):
     db = TransactionDb()
     db.autocommit = False
     db.has_uncommitted_changes = True
-    app = object.__new__(App)
+    app = ServiceHarness()
     config = make_config(tmp_path, autocommit=False)
     app.state = UIState(config=config, db=db)
     answers = iter(["a", "c"])
     app.prompt = lambda label, default="", strip=True: next(answers)
 
-    App.choose_transaction_mode(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.choose_transaction_mode()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["commit"]
     assert db.modes == [True]
@@ -763,7 +853,7 @@ def test_manual_to_autocommit_rollback_invalidates_stale_grid_before_switch(tmp_
     db = TransactionDb()
     db.autocommit = False
     db.has_uncommitted_changes = True
-    app = object.__new__(App)
+    app = ServiceHarness()
     config = make_config(tmp_path, autocommit=False)
     app.state = UIState(config=config, db=db)
     app.state.focus = FOCUS_RESULTS
@@ -779,8 +869,8 @@ def test_manual_to_autocommit_rollback_invalidates_stale_grid_before_switch(tmp_
     answers = iter(["a", "r"])
     app.prompt = lambda label, default="", strip=True: next(answers)
 
-    App.choose_transaction_mode(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.choose_transaction_mode()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["rollback"]
     assert db.modes == [True]
@@ -795,7 +885,7 @@ def test_manual_to_autocommit_cancel_keeps_pending_transaction_and_mode(tmp_path
     db = TransactionDb()
     db.autocommit = False
     db.has_uncommitted_changes = True
-    app = object.__new__(App)
+    app = ServiceHarness()
     config = make_config(tmp_path, autocommit=False)
     app.state = UIState(config=config, db=db)
     prompts: list[tuple[str, str]] = []
@@ -807,8 +897,8 @@ def test_manual_to_autocommit_cancel_keeps_pending_transaction_and_mode(tmp_path
 
     app.prompt = prompt
 
-    App.choose_transaction_mode(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.choose_transaction_mode()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [
         ("Transaction mode (a=autocommit, m=manual)", "m"),
@@ -827,15 +917,15 @@ def test_manual_to_autocommit_resolution_failure_keeps_mode(tmp_path):
     db = FailingTransactionDb("rollback")
     db.autocommit = False
     db.has_uncommitted_changes = True
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     config = make_config(tmp_path, autocommit=False)
     app.state = UIState(config=config, db=db)
     answers = iter(["a", "r"])
     app.prompt = lambda label, default="", strip=True: next(answers)
 
-    App.choose_transaction_mode(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.choose_transaction_mode()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["rollback"]
     assert db.modes == []
@@ -855,15 +945,15 @@ def test_manual_to_autocommit_mode_failure_does_not_misreport_successful_commit(
     db = ModeFailingTransactionDb()
     db.autocommit = False
     db.has_uncommitted_changes = True
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     config = make_config(tmp_path, autocommit=False)
     app.state = UIState(config=config, db=db)
     answers = iter(["a", "c"])
     app.prompt = lambda label, default="", strip=True: next(answers)
 
-    App.choose_transaction_mode(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.choose_transaction_mode()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["commit"]
     assert db.has_uncommitted_changes is False
@@ -877,28 +967,28 @@ def test_manual_to_autocommit_mode_failure_does_not_misreport_successful_commit(
 
 
 def test_plain_cr_enter_in_editor_inserts_newline_not_execute():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select 1 from dual"], row=0, col=6)
     calls: list[str] = []
     app.run_current_statement = lambda: calls.append("run")
 
-    App.handle_key(app, 13)
+    app.handle_key(13)
 
     assert calls == []
     assert app.state.buffer.lines == ["select", " 1 from dual"]
 
 
 def test_ctrl_enter_lf_in_editor_executes_statement_not_newline():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select 1 from dual"], row=0, col=6)
     calls: list[str] = []
     app.run_current_statement = lambda: calls.append("run")
 
-    App.handle_key(app, 10)
+    app.handle_key(10)
 
     assert calls == ["run"]
     assert app.state.buffer.lines == ["select 1 from dual"]
@@ -906,22 +996,22 @@ def test_ctrl_enter_lf_in_editor_executes_statement_not_newline():
 
 def test_run_current_statement_shortcuts_use_cursor_column_for_same_line_sql():
     for key in (curses.KEY_F5, KEY_CTRL_ENTER, KEY_ALT_X):
-        app = object.__new__(App)
+        app = ServiceHarness()
         db = RecordingDb()
         app.screen = FakeScreen()
         app.draw_offset_x = 0
         app.state = UIState(config=make_config(), db=db)
         app.state.buffer = Buffer(lines=["select 1 from dual; select 2 from dual;"], row=0, col=25)
 
-        App.handle_key(app, key)
-        App.wait_for_db_operation(app, timeout=1)
+        app.handle_key(key)
+        app.wait_for_db_operation(timeout=1)
 
         assert db.statements == ["select 2 from dual"]
         assert app.state.status == "ok"
 
 
 def test_run_current_statement_executes_commented_declare_block_as_one_statement():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -937,8 +1027,8 @@ def test_run_current_statement_executes_commented_declare_block_as_one_statement
     ]
     app.state.buffer = Buffer(lines=lines, row=1, col=1)
 
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.statements == ["\n".join(lines[:6])]
     assert db.titles == ["Current statement"]
@@ -946,7 +1036,7 @@ def test_run_current_statement_executes_commented_declare_block_as_one_statement
 
 
 def test_failed_sql_offset_moves_cursor_to_same_line_statement_error():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = OffsetFailingDb(offset=len("select * "))
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -955,8 +1045,8 @@ def test_failed_sql_offset_moves_cursor_to_same_line_statement_error():
     bad = "select * frm dual;"
     app.state.buffer = Buffer(lines=[prefix + bad], row=0, col=len(prefix) + 1)
 
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
 
     expected_col = len(prefix) + len("select * ")
     assert db.statements == ["select * frm dual"]
@@ -966,7 +1056,7 @@ def test_failed_sql_offset_moves_cursor_to_same_line_statement_error():
 
 
 def test_run_current_statement_executes_selected_sql_only():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -979,8 +1069,8 @@ def test_run_current_statement_executes_selected_sql_only():
         selection_anchor=(1, 0),
     )
 
-    App.handle_key(app, curses.KEY_F5)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(curses.KEY_F5)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.statements == ["select 2 from dual"]
     assert db.titles == ["Selection lines 2-2"]
@@ -988,7 +1078,7 @@ def test_run_current_statement_executes_selected_sql_only():
 
 
 def test_run_current_statement_prompts_for_bind_values():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -1004,8 +1094,8 @@ def test_run_current_statement_prompts_for_bind_values():
 
     app.prompt_text_box = prompt_text_box
 
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [
         ("Value for :id", "", False),
@@ -1016,7 +1106,7 @@ def test_run_current_statement_prompts_for_bind_values():
 
 
 def test_run_current_statement_prefills_remembered_bind_values_when_enabled():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -1032,10 +1122,10 @@ def test_run_current_statement_prefills_remembered_bind_values_when_enabled():
 
     app.prompt_text_box = prompt_text_box
 
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [
         ("Value for :id", "", False),
@@ -1046,7 +1136,7 @@ def test_run_current_statement_prefills_remembered_bind_values_when_enabled():
 
 
 def test_remembered_unquoted_bind_value_is_reused_across_case_variants():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -1061,11 +1151,11 @@ def test_remembered_unquoted_bind_value_is_reused_across_case_variants():
 
     app.prompt_text_box = prompt_text_box
 
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
     app.state.buffer = Buffer(lines=["select :ID from dual"], row=0, col=0)
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [
         ("Value for :id", "", False),
@@ -1076,7 +1166,7 @@ def test_remembered_unquoted_bind_value_is_reused_across_case_variants():
 
 
 def test_run_current_statement_cancelled_bind_prompt_does_not_execute():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -1084,7 +1174,7 @@ def test_run_current_statement_cancelled_bind_prompt_does_not_execute():
     app.state.buffer = Buffer(lines=["select * from decisions where id = :id"], row=0, col=0)
     app.prompt_text_box = lambda label, default="", strip=True: None
 
-    App.run_current_statement(app)
+    app.run_current_statement()
 
     assert db.statements == []
     assert app.state.db_operation is None
@@ -1092,15 +1182,15 @@ def test_run_current_statement_cancelled_bind_prompt_does_not_execute():
 
 
 def test_f6_toggles_dbms_output_and_f11_runs_script():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     calls: list[str] = []
     app.toggle_dbms_output_view = lambda: calls.append("toggle")
     app.run_script = lambda: calls.append("script")
 
-    App.handle_key(app, curses.KEY_F6)
-    App.handle_key(app, curses_function_key(11))
+    app.handle_key(curses.KEY_F6)
+    app.handle_key(curses_function_key(11))
 
     assert calls == ["toggle", "script"]
 
@@ -1266,42 +1356,47 @@ def test_ignores_unknown_escape_sequence():
 
 
 def test_read_key_returns_escape_when_sequence_times_out():
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     window = FakeInputWindow(["\x1b"])
 
-    assert App.read_key(app, window, idle_timeout=200) == ESC
+    assert app.read_key(window, idle_timeout=200) == ESC
     assert window.timeouts == [100, 200]
 
 
 def test_read_key_decodes_alt_x_sequence():
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     window = FakeInputWindow(["\x1b", "x"])
 
-    assert App.read_key(app, window, idle_timeout=200) == KEY_ALT_X
+    assert app.read_key(window, idle_timeout=200) == KEY_ALT_X
     assert window.timeouts == [100, 200]
 
 
 def test_read_key_decodes_raw_f3_sequence():
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     window = FakeInputWindow(["\x1b", "[", "1", "3", "~"])
 
-    assert App.read_key(app, window, idle_timeout=200) == curses.KEY_F3
+    assert app.read_key(window, idle_timeout=200) == curses.KEY_F3
     assert window.timeouts == [100, 200]
 
 
 def test_read_key_normalizes_raw_lf_to_ctrl_enter():
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     window = FakeInputWindow(["\n"])
 
-    assert App.read_key(app, window, idle_timeout=200) == KEY_CTRL_ENTER
+    assert app.read_key(window, idle_timeout=200) == KEY_CTRL_ENTER
     assert window.timeouts == []
 
 
 def test_read_key_normalizes_raw_cr_to_plain_enter():
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     window = FakeInputWindow(["\r"])
 
-    assert App.read_key(app, window, idle_timeout=200) == 13
+    assert app.read_key(window, idle_timeout=200) == 13
     assert window.timeouts == []
 
 
@@ -1661,22 +1756,76 @@ def test_buffer_file_load_is_undoable(tmp_path):
     assert buffer.dirty is False
 
 
-def test_buffer_save_is_not_undoable_but_dirty_state_is_restored(tmp_path):
+def test_buffer_save_is_not_undoable_and_undo_keeps_saved_identity(tmp_path):
     path = tmp_path / "saved.sql"
-    buffer = Buffer(lines=["select"], row=0, col=6, path=path, title="saved.sql", dirty=False)
+    buffer = Buffer(lines=["select"], row=0, col=6, dirty=False)
 
     buffer.insert_char("1")
-    buffer.save()
+    buffer.save(path)
 
     assert buffer.text() == "select1"
     assert buffer.dirty is False
 
     assert buffer.undo() is True
     assert buffer.text() == "select"
-    assert buffer.dirty is False
+    assert buffer.path == path
+    assert buffer.title == "saved.sql"
+    assert buffer.dirty is True
 
     assert buffer.redo() is True
     assert buffer.text() == "select1"
+    assert buffer.path == path
+    assert buffer.dirty is False
+
+
+def test_buffer_undo_and_redo_compare_content_with_clean_checkpoint(tmp_path):
+    path = tmp_path / "saved.sql"
+    path.write_text("select\n", encoding="utf-8")
+    buffer = Buffer()
+    buffer.load(path, record_undo=False)
+
+    buffer.insert_char("1")
+    assert buffer.dirty is True
+
+    assert buffer.undo() is True
+    assert buffer.text() == "select"
+    assert buffer.dirty is False
+
+    assert buffer.redo() is True
+    assert buffer.text() == "1select"
+    assert buffer.dirty is True
+
+
+def test_buffer_failed_atomic_save_as_preserves_destination_and_identity(
+    monkeypatch,
+    tmp_path,
+):
+    import plsqlwks.exporting as exporting_module
+
+    source = tmp_path / "source.sql"
+    destination = tmp_path / "destination.sql"
+    destination.write_text("external\n", encoding="utf-8")
+    buffer = Buffer(lines=["select"], row=0, col=6, path=source, title=source.name)
+    buffer.insert_char("1")
+
+    monkeypatch.setattr(
+        exporting_module.os,
+        "replace",
+        lambda source_path, destination_path: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        buffer.save(destination)
+
+    assert destination.read_text(encoding="utf-8") == "external\n"
+    assert buffer.path == source
+    assert buffer.title == source.name
+    assert buffer.dirty is True
+    assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
+
+    assert buffer.undo() is True
+    assert buffer.text() == "select"
+    assert buffer.path == source
     assert buffer.dirty is False
 
 
@@ -1709,6 +1858,20 @@ def test_buffer_save_load_long_special_sql_round_trip(tmp_path, long_special_sql
     assert [statement.text for statement in split_script(loaded.text())] == long_special_sql_case.expected_statements
 
 
+def test_buffer_round_trip_preserves_non_crlf_line_separator_characters(tmp_path):
+    path = tmp_path / "literal_separators.sql"
+    source = "select q'[left\u2028middle\u0085vertical\vform\fright]' from dual;\n"
+    path.write_text(source, encoding="utf-8")
+    buffer = Buffer()
+
+    buffer.load(path, record_undo=False)
+    saved = buffer.save()
+
+    assert saved == path
+    assert buffer.text() == source.rstrip("\n")
+    assert path.read_text(encoding="utf-8") == source
+
+
 def test_buffer_redo_stack_clears_after_new_edit_following_undo():
     buffer = Buffer()
     buffer.insert_char("a")
@@ -1736,42 +1899,42 @@ def test_buffer_undo_history_respects_snapshot_cap():
 
 
 def test_editor_undo_redo_shortcuts_route_only_in_editor_focus():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer.insert_char("x")
 
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
     assert app.state.buffer.text() == ""
     assert app.state.status == "Undo"
 
-    App.handle_key(app, CTRL_Y)
+    app.handle_key(CTRL_Y)
     assert app.state.buffer.text() == "x"
     assert app.state.status == "Redo"
 
     app.state.focus = FOCUS_RESULTS
     app.state.active_result = QueryResult("data", ["A"], [["1"]], "1 row")
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
     assert app.state.buffer.text() == "x"
     assert app.state.status == "Redo"
 
     app.state.focus = FOCUS_BROWSER
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
     assert app.state.buffer.text() == "x"
     assert app.state.status == "Redo"
 
 
 def test_editor_undo_redo_shortcuts_report_empty_history():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select 1"], row=0, col=8)
 
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
     assert app.state.buffer.text() == "select 1"
     assert app.state.status == "Nothing to undo"
 
-    App.handle_key(app, CTRL_Y)
+    app.handle_key(CTRL_Y)
     assert app.state.buffer.text() == "select 1"
     assert app.state.status == "Nothing to redo"
 
@@ -1803,7 +1966,7 @@ def test_search_status_formats_match_count_and_wrap_marker():
 
 
 def test_ctrl_f_prompts_and_selects_first_match_without_dirtying_buffer():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select one", "select two"], row=0, col=0, dirty=False)
@@ -1815,7 +1978,7 @@ def test_ctrl_f_prompts_and_selects_first_match_without_dirtying_buffer():
 
     app.prompt = find_prompt
 
-    App.handle_key(app, CTRL_F)
+    app.handle_key(CTRL_F)
 
     assert prompts == [("Find", "", False)]
     assert app.state.active_tab.search_query == "select"
@@ -1827,25 +1990,25 @@ def test_ctrl_f_prompts_and_selects_first_match_without_dirtying_buffer():
 
 
 def test_ctrl_n_and_ctrl_p_repeat_search_and_wrap():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["one two one"], row=0, col=0, dirty=False)
     app.state.active_tab.search_query = "one"
 
-    App.handle_key(app, CTRL_N)
+    app.handle_key(CTRL_N)
     assert (app.state.buffer.selection_anchor, app.state.buffer.row, app.state.buffer.col) == ((0, 0), 0, 3)
     assert app.state.status == 'Found "one" 1/2'
 
-    App.handle_key(app, CTRL_N)
+    app.handle_key(CTRL_N)
     assert (app.state.buffer.selection_anchor, app.state.buffer.row, app.state.buffer.col) == ((0, 8), 0, 11)
     assert app.state.status == 'Found "one" 2/2'
 
-    App.handle_key(app, CTRL_N)
+    app.handle_key(CTRL_N)
     assert (app.state.buffer.selection_anchor, app.state.buffer.row, app.state.buffer.col) == ((0, 0), 0, 3)
     assert app.state.status == 'Found "one" 1/2 (wrapped)'
 
-    App.handle_key(app, CTRL_P)
+    app.handle_key(CTRL_P)
     assert (app.state.buffer.selection_anchor, app.state.buffer.row, app.state.buffer.col) == ((0, 8), 0, 11)
     assert app.state.status == 'Found "one" 2/2 (wrapped)'
     assert app.state.buffer.dirty is False
@@ -1853,13 +2016,13 @@ def test_ctrl_n_and_ctrl_p_repeat_search_and_wrap():
 
 
 def test_ctrl_n_without_query_prompts_for_search_text():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["alpha beta"], row=0, col=0)
     app.prompt = lambda label, default="", strip=True: "beta"
 
-    App.handle_key(app, CTRL_N)
+    app.handle_key(CTRL_N)
 
     assert app.state.active_tab.search_query == "beta"
     assert (app.state.buffer.selection_anchor, app.state.buffer.row, app.state.buffer.col) == ((0, 6), 0, 10)
@@ -1867,30 +2030,30 @@ def test_ctrl_n_without_query_prompts_for_search_text():
 
 
 def test_search_reports_no_match_and_clear_or_cancel_status():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["alpha"], row=0, col=0, selection_anchor=(0, 0))
     app.state.active_tab.search_query = "missing"
 
-    App.handle_key(app, CTRL_N)
+    app.handle_key(CTRL_N)
     assert app.state.buffer.selection_range() is None
     assert app.state.status == 'No matches for "missing"'
 
     app.prompt = lambda label, default="", strip=True: ""
-    App.handle_key(app, CTRL_F)
+    app.handle_key(CTRL_F)
     assert app.state.active_tab.search_query == ""
     assert app.state.status == "Search cleared"
 
     app.state.active_tab.search_query = "alpha"
-    app.prompt = lambda label, default="", strip=True: None
-    App.handle_key(app, CTRL_F)
+    app.dialogs.prompt = lambda label, default="", strip=True: None
+    app.handle_key(CTRL_F)
     assert app.state.active_tab.search_query == "alpha"
     assert app.state.status == "Search cancelled"
 
 
 def test_ctrl_g_prompts_with_dialog_and_moves_to_line_without_dirtying_buffer():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(
@@ -1908,7 +2071,7 @@ def test_ctrl_g_prompts_with_dialog_and_moves_to_line_without_dirtying_buffer():
 
     app.prompt_text_box = go_to_line_prompt
 
-    App.handle_key(app, CTRL_G)
+    app.handle_key(CTRL_G)
 
     assert prompts == [("Go to line", "1", True)]
     assert (app.state.buffer.row, app.state.buffer.col) == (2, 0)
@@ -1919,23 +2082,23 @@ def test_ctrl_g_prompts_with_dialog_and_moves_to_line_without_dirtying_buffer():
 
 
 def test_ctrl_g_reports_cancel_invalid_and_out_of_range_without_moving():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["one", "two"], row=1, col=2, dirty=False)
 
     app.prompt_text_box = lambda label, default="", strip=True: None
-    App.handle_key(app, CTRL_G)
+    app.handle_key(CTRL_G)
     assert (app.state.buffer.row, app.state.buffer.col) == (1, 2)
     assert app.state.status == "Go to line cancelled"
 
-    app.prompt_text_box = lambda label, default="", strip=True: "two"
-    App.handle_key(app, CTRL_G)
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: "two"
+    app.handle_key(CTRL_G)
     assert (app.state.buffer.row, app.state.buffer.col) == (1, 2)
     assert app.state.status == "Invalid line number"
 
-    app.prompt_text_box = lambda label, default="", strip=True: "3"
-    App.handle_key(app, CTRL_G)
+    app.dialogs.prompt_text_box = lambda label, default="", strip=True: "3"
+    app.handle_key(CTRL_G)
     assert (app.state.buffer.row, app.state.buffer.col) == (1, 2)
     assert app.state.status == "Line number must be 1-2"
 
@@ -1957,6 +2120,26 @@ def test_completion_context_detects_prefix_and_qualifier():
     assert context.prefix == ""
     assert context.qualifier == "employees"
     assert context.start_col == 17
+
+
+def test_apply_completion_recomputes_exact_clean_checkpoint():
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
+    buffer = Buffer(lines=["select"], row=0, col=6, dirty=False)
+    buffer.backspace()
+    app.state.buffer = buffer
+
+    assert buffer.text() == "selec"
+    assert buffer.dirty is True
+
+    app.apply_completion(
+        CompletionContext(0, 0, 5, "selec", statement="selec"),
+        CompletionCandidate("select", "select [keyword]", "keyword"),
+    )
+
+    assert buffer.text() == "select"
+    assert buffer.dirty is False
+    assert app.state.status == "Completed keyword: select"
 
 
 def test_statement_table_references_extract_tables_and_aliases():
@@ -2028,6 +2211,97 @@ def test_filtered_picker_indexes_matches_case_insensitive_substrings():
     assert filtered_picker_indexes(options, "missing") == []
 
 
+def run_prompt(
+    monkeypatch,
+    keys: list[int | str],
+    label: str = "Set NAME",
+    default: str = "",
+    strip: bool = False,
+    width: int = 80,
+) -> tuple[str | None, "FakePickerWindow"]:
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
+    screen = FakePickerWindow(3, width, 0, 0)
+    app.screen = screen
+
+    monkeypatch.setattr(curses, "curs_set", lambda visibility: None)
+    monkeypatch.setattr(curses, "color_pair", lambda pair: 0)
+    key_iter = iter(keys)
+    app.read_key = lambda window=None, idle_timeout=200: next(key_iter)
+
+    return app.prompt(label, default, strip), screen
+
+
+def test_prompt_inserts_printable_text_at_cursor(monkeypatch):
+    value, _screen = run_prompt(
+        monkeypatch,
+        [curses.KEY_LEFT, curses.KEY_LEFT, "X", 10],
+        default="abcd",
+    )
+
+    assert value == "abXcd"
+
+
+def test_prompt_backspace_delete_home_and_end_edit_around_cursor(monkeypatch):
+    value, _screen = run_prompt(
+        monkeypatch,
+        [
+            curses.KEY_LEFT,
+            curses.KEY_BACKSPACE,
+            curses.KEY_HOME,
+            curses.KEY_DC,
+            curses.KEY_END,
+            curses.KEY_BACKSPACE,
+            10,
+        ],
+        default="abcd",
+    )
+
+    assert value == "b"
+
+
+def test_prompt_navigation_and_deletion_stop_at_text_boundaries(monkeypatch):
+    value, _screen = run_prompt(
+        monkeypatch,
+        [
+            curses.KEY_HOME,
+            curses.KEY_LEFT,
+            curses.KEY_BACKSPACE,
+            curses.KEY_END,
+            curses.KEY_RIGHT,
+            curses.KEY_DC,
+            10,
+        ],
+        default="ab",
+    )
+
+    assert value == "ab"
+
+
+def test_prompt_scrolls_long_text_and_places_cursor_by_display_width(monkeypatch):
+    value, screen = run_prompt(
+        monkeypatch,
+        [curses.KEY_HOME, curses.KEY_RIGHT, curses.KEY_RIGHT, 10],
+        label="Set",
+        default="a界bcdefghijklmnop",
+        width=16,
+    )
+
+    assert value == "a界bcdefghijklmnop"
+    assert screen.calls[0].text == "Set: ghijklmnop "
+    assert screen.calls[-1].text == "Set: a界bcdefghi"
+    assert screen.moves[0] == (2, 15)
+    assert screen.moves[-1] == (2, 8)
+
+
+def test_prompt_preserves_enter_strip_and_escape_behavior(monkeypatch):
+    value, _screen = run_prompt(monkeypatch, [10], default="  value  ", strip=True)
+    cancelled, _screen = run_prompt(monkeypatch, [ESC], default="unchanged")
+
+    assert value == "value"
+    assert cancelled is None
+
+
 def run_prompt_text_box(
     monkeypatch,
     keys: list[int | str],
@@ -2036,7 +2310,8 @@ def run_prompt_text_box(
     strip: bool = True,
     screen: "FakeScreen | None" = None,
 ) -> tuple[str | None, list["FakePickerWindow"]]:
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     app.screen = screen or FakeScreen(height=12, width=80)
     windows: list["FakePickerWindow"] = []
 
@@ -2050,7 +2325,7 @@ def run_prompt_text_box(
     key_iter = iter(keys)
     app.read_key = lambda window=None, idle_timeout=200: next(key_iter)
 
-    return App.prompt_text_box(app, label, default, strip), windows
+    return app.prompt_text_box(label, default, strip), windows
 
 
 def test_prompt_text_box_accepts_entered_value(monkeypatch):
@@ -2078,7 +2353,8 @@ def test_prompt_text_box_escape_cancels(monkeypatch):
 
 
 def test_prompt_text_box_redraws_after_resize_key(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     screen = FakeScreen(height=12, width=80)
     app.screen = screen
     windows: list[FakePickerWindow] = []
@@ -2101,7 +2377,7 @@ def test_prompt_text_box_redraws_after_resize_key(monkeypatch):
 
     app.read_key = read_key
 
-    value = App.prompt_text_box(app, "Value for :id", "", strip=False)
+    value = app.prompt_text_box("Value for :id", "", strip=False)
 
     assert value == "7"
     assert [window.width for window in windows] == [36, 26, 26]
@@ -2121,7 +2397,8 @@ def test_prompt_text_box_survives_resize_window_draw_errors(monkeypatch):
         def refresh(self):
             raise curses.error
 
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     app.screen = FakeScreen(height=12, width=80)
     windows: list[FakePickerWindow] = []
 
@@ -2139,7 +2416,7 @@ def test_prompt_text_box_survives_resize_window_draw_errors(monkeypatch):
     keys = iter([curses.KEY_RESIZE, "4", "2", 10])
     app.read_key = lambda window=None, idle_timeout=200: next(keys)
 
-    value = App.prompt_text_box(app, "Value for :id", "", strip=False)
+    value = app.prompt_text_box("Value for :id", "", strip=False)
 
     assert value == "42"
     assert len(windows) == 4
@@ -2169,7 +2446,8 @@ def test_prompt_text_box_clips_long_value_inside_field(monkeypatch):
 
 
 def test_pick_filters_options_and_returns_original_index(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     app.screen = FakeScreen(height=12, width=80)
     windows = []
 
@@ -2182,7 +2460,7 @@ def test_pick_filters_options_and_returns_original_index(monkeypatch):
     keys = iter(["l", "o", 10])
     app.read_key = lambda window=None, idle_timeout=200: next(keys)
 
-    choice = App.pick(app, "Complete", ["DECISIONS [table]", "DECISION_LOG [table]", "SELECT [keyword]"])
+    choice = app.pick("Complete", ["DECISIONS [table]", "DECISION_LOG [table]", "SELECT [keyword]"])
 
     assert choice == 1
     assert any("Filter: lo" in call.text for window in windows for call in window.calls)
@@ -2190,7 +2468,8 @@ def test_pick_filters_options_and_returns_original_index(monkeypatch):
 
 
 def test_pick_ignores_enter_without_matches_and_recovers_with_backspace(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     app.screen = FakeScreen(height=12, width=80)
     windows = []
 
@@ -2203,14 +2482,15 @@ def test_pick_ignores_enter_without_matches_and_recovers_with_backspace(monkeypa
     keys = iter(["z", 10, curses.KEY_BACKSPACE, "g", 10])
     app.read_key = lambda window=None, idle_timeout=200: next(keys)
 
-    choice = App.pick(app, "Complete", ["Alpha", "Beta", "Gamma"])
+    choice = app.pick("Complete", ["Alpha", "Beta", "Gamma"])
 
     assert choice == 2
     assert any("No matches" in call.text for window in windows for call in window.calls)
 
 
 def test_pick_refreshes_background_when_filter_resizes_popup(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
     app.screen = FakeScreen(height=12, width=80)
     windows = []
     refresh_counts_before_newwin: list[tuple[int, int]] = []
@@ -2225,7 +2505,7 @@ def test_pick_refreshes_background_when_filter_resizes_popup(monkeypatch):
     keys = iter(["z", ESC])
     app.read_key = lambda window=None, idle_timeout=200: next(keys)
 
-    choice = App.pick(app, "Complete", ["Alpha", "Beta", "Gamma", "Delta"])
+    choice = app.pick("Complete", ["Alpha", "Beta", "Gamma", "Delta"])
 
     assert choice is None
     assert [(window.height, window.width, window.top, window.left) for window in windows] == [
@@ -2236,38 +2516,38 @@ def test_pick_refreshes_background_when_filter_resizes_popup(monkeypatch):
 
 
 def test_shift_tab_completes_unique_keyword_and_undo_restores_prefix():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["SEL"], row=0, col=3, dirty=False)
 
-    App.handle_key(app, KEY_SHIFT_TAB)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_SHIFT_TAB)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.buffer.text() == "SELECT"
     assert app.state.buffer.dirty is True
     assert app.state.status == "Completed keyword: SELECT"
 
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
     assert app.state.buffer.text() == "SEL"
     assert app.state.buffer.dirty is False
 
 
 def test_shift_tab_completes_left_and_right_join_keywords():
     for prefix, expected in [("LEF", "LEFT"), ("RIG", "RIGHT")]:
-        app = object.__new__(App)
+        app = ServiceHarness()
         app.state = UIState(config=make_config(), db=object())
         app.running = True
         app.state.buffer = Buffer(lines=[prefix], row=0, col=len(prefix), dirty=False)
 
-        App.handle_key(app, KEY_SHIFT_TAB)
+        app.handle_key(KEY_SHIFT_TAB)
 
         assert app.state.buffer.text() == expected
         assert app.state.status == f"Completed keyword: {expected}"
 
 
 def test_shift_tab_uses_picker_for_multiple_object_matches():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["dec"], row=0, col=3, dirty=False)
@@ -2287,8 +2567,8 @@ def test_shift_tab_uses_picker_for_multiple_object_matches():
 
     app.pick = choose_first
 
-    App.handle_key(app, KEY_SHIFT_TAB)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_SHIFT_TAB)
+    app.wait_for_db_operation(timeout=1)
 
     assert seen_options
     assert "DECISIONS [table]" in seen_options[0]
@@ -2328,7 +2608,7 @@ def test_object_completion_excludes_browser_only_object_types():
 
 
 def test_shift_tab_picker_filter_selects_completion_candidate(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(config=make_config(), db=object())
     app.running = True
@@ -2352,7 +2632,7 @@ def test_shift_tab_picker_filter_selects_completion_candidate(monkeypatch):
     keys = iter(["l", "o", "g", 10])
     app.read_key = lambda window=None, idle_timeout=200: next(keys)
 
-    App.handle_key(app, KEY_SHIFT_TAB)
+    app.handle_key(KEY_SHIFT_TAB)
 
     assert app.state.buffer.text() == "DECISION_LOG"
     assert app.state.status == "Completed table: DECISION_LOG"
@@ -2361,13 +2641,13 @@ def test_shift_tab_picker_filter_selects_completion_candidate(monkeypatch):
 
 def test_shift_tab_lazily_loads_schema_objects_for_object_completion():
     db = CompletionDb(objects={"TABLE": ["EMPLOYEES"], "VIEW": [], "PROCEDURE": [], "FUNCTION": [], "PACKAGE": []})
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["emp"], row=0, col=3, dirty=False)
 
-    App.handle_key(app, KEY_SHIFT_TAB)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_SHIFT_TAB)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.object_calls == 1
     assert app.state.browser_loaded is True
@@ -2377,13 +2657,13 @@ def test_shift_tab_lazily_loads_schema_objects_for_object_completion():
 
 def test_shift_tab_completes_qualified_columns_and_caches_metadata():
     db = CompletionDb(columns={"EMPLOYEES": ["EMPLOYEE_ID", "FIRST_NAME"]})
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["employees.em"], row=0, col=len("employees.em"), dirty=False)
 
-    App.handle_key(app, KEY_SHIFT_TAB)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_SHIFT_TAB)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.object_calls == 1
     assert db.column_calls == ["EMPLOYEES"]
@@ -2394,15 +2674,15 @@ def test_shift_tab_completes_qualified_columns_and_caches_metadata():
 
 def test_alt_plus_refreshes_autocomplete_objects_and_clears_column_cache():
     db = CompletionDb(objects={"TABLE": ["FRESH_TABLE"], "VIEW": [], "PROCEDURE": [], "FUNCTION": [], "PACKAGE": []})
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.browser_loaded = True
     app.state.browser_objects = {"TABLE": ["STALE_TABLE"], "VIEW": [], "PROCEDURE": [], "FUNCTION": [], "PACKAGE": []}
     app.state.schema_columns = {"STALE_TABLE": ["STALE_COLUMN"]}
 
-    App.handle_key(app, KEY_ALT_PLUS)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_ALT_PLUS)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.object_calls == 1
     assert app.state.browser_loaded is True
@@ -2418,7 +2698,7 @@ def test_alt_plus_refresh_failure_preserves_autocomplete_cache():
             raise RuntimeError("metadata down")
 
     db = FailingCompletionDb()
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.browser_loaded = True
@@ -2426,8 +2706,8 @@ def test_alt_plus_refresh_failure_preserves_autocomplete_cache():
     app.state.schema_columns = {"STALE_TABLE": ["STALE_COLUMN"]}
     app.set_results = lambda lines, clear_table=True: setattr(app.state, "results", lines)
 
-    App.handle_key(app, KEY_ALT_PLUS)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_ALT_PLUS)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.object_calls == 1
     assert app.state.browser_objects["TABLE"] == ["STALE_TABLE"]
@@ -2441,13 +2721,13 @@ def test_shift_tab_completes_unqualified_columns_from_current_statement():
         objects={"TABLE": [], "VIEW": [], "PROCEDURE": [], "FUNCTION": [], "PACKAGE": []},
         columns={"EMPLOYEES": ["EMPLOYEE_ID", "NAME"]},
     )
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["select na from employees e"], row=0, col=len("select na"), dirty=False)
 
-    App.handle_key(app, KEY_SHIFT_TAB)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_SHIFT_TAB)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.column_calls == ["EMPLOYEES"]
     assert app.state.buffer.text() == "select NAME from employees e"
@@ -2473,7 +2753,7 @@ def test_completion_metadata_changed_buffer_caches_without_applying_completion()
             "PACKAGE": [],
         }
     )
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["emp"], row=0, col=3, dirty=False)
@@ -2481,11 +2761,11 @@ def test_completion_metadata_changed_buffer_caches_without_applying_completion()
         AssertionError("completion picker must not open for stale context")
     )
 
-    App.handle_key(app, KEY_SHIFT_TAB)
+    app.handle_key(KEY_SHIFT_TAB)
     assert started.wait(1)
     app.state.buffer.insert_char("x")
     release.set()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.browser_loaded is True
     assert app.state.browser_objects["TABLE"] == ["EMPLOYEES"]
@@ -2512,7 +2792,7 @@ def test_completion_metadata_changed_focus_caches_without_applying_completion():
             "PACKAGE": [],
         }
     )
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["emp"], row=0, col=3, dirty=False)
@@ -2520,11 +2800,11 @@ def test_completion_metadata_changed_focus_caches_without_applying_completion():
         AssertionError("completion picker must not open after focus changes")
     )
 
-    App.handle_key(app, KEY_SHIFT_TAB)
+    app.handle_key(KEY_SHIFT_TAB)
     assert started.wait(1)
     app.state.focus = FOCUS_BROWSER
     release.set()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.browser_objects["TABLE"] == ["EMPLOYEES"]
     assert app.state.buffer.text() == "emp"
@@ -2533,19 +2813,19 @@ def test_completion_metadata_changed_focus_caches_without_applying_completion():
 
 
 def test_alt_g_routes_to_sql_generator_from_editor_focus():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     called: list[bool] = []
     app.generate_sql_with_columns = lambda: called.append(True)
 
-    App.handle_key(app, KEY_ALT_G)
+    app.handle_key(KEY_ALT_G)
 
     assert called == [True]
 
 
 def test_generate_sql_with_columns_infers_table_and_replaces_selection():
     db = CompletionDb(columns={"EMPLOYEES": ["EMPLOYEE_ID", "FIRST_NAME"]})
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     statement = "select * from employees e"
     app.state.buffer = Buffer(lines=[statement], row=0, col=len(statement), selection_anchor=(0, 0), dirty=False)
@@ -2564,9 +2844,9 @@ def test_generate_sql_with_columns_infers_table_and_replaces_selection():
     app.pick = pick
 
     app.generate_sql_with_columns()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
-    assert prompts == [("Table", "EMPLOYEES", True)]
+    assert prompts == [("Table or view", "EMPLOYEES", True)]
     assert picks == [("Generate SQL", ["SELECT with columns", "INSERT with columns", "UPDATE with columns"])]
     assert db.column_calls == ["EMPLOYEES"]
     assert app.state.buffer.text() == (
@@ -2580,7 +2860,7 @@ def test_generate_sql_with_columns_infers_table_and_replaces_selection():
 
 def test_generate_sql_with_columns_uses_selected_browser_table_default():
     db = CompletionDb(columns={"DECISIONS": ["ID", "NAME"]})
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.state.focus = FOCUS_BROWSER
     app.state.buffer = Buffer(dirty=False)
@@ -2595,9 +2875,9 @@ def test_generate_sql_with_columns_uses_selected_browser_table_default():
     app.pick = lambda title, options: 2
 
     app.generate_sql_with_columns()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
-    assert prompts == [("Table", "DECISIONS")]
+    assert prompts == [("Table or view", "DECISIONS")]
     assert app.state.buffer.text() == (
         "update DECISIONS\n"
         "set\n"
@@ -2609,14 +2889,50 @@ def test_generate_sql_with_columns_uses_selected_browser_table_default():
     assert app.state.status == "Inserted UPDATE with columns for DECISIONS"
 
 
+def test_alt_g_generates_select_columns_for_selected_browser_view():
+    db = CompletionDb(columns={"DECISION_VIEW": ["ID", "NAME"]})
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=db)
+    app.state.focus = FOCUS_BROWSER
+    app.state.buffer = Buffer(dirty=False)
+    app.active_browser_entry = lambda: BrowserEntry(
+        "object",
+        "DECISION_VIEW",
+        "VIEW",
+        "DECISION_VIEW",
+    )
+    prompts: list[tuple[str, str]] = []
+
+    def prompt(label: str, default: str = "", strip: bool = True) -> str:
+        prompts.append((label, default))
+        return default
+
+    app.prompt = prompt
+    app.pick = lambda title, options: 0
+
+    app.handle_key(KEY_ALT_G)
+    app.wait_for_db_operation(timeout=1)
+
+    assert prompts == [("Table or view", "DECISION_VIEW")]
+    assert db.column_calls == ["DECISION_VIEW"]
+    assert app.state.buffer.text() == (
+        "select\n"
+        "  ID,\n"
+        "  NAME\n"
+        "from DECISION_VIEW;\n"
+    )
+    assert app.state.focus == FOCUS_EDITOR
+    assert app.state.status == "Inserted SELECT with columns for DECISION_VIEW"
+
+
 def test_generate_sql_with_columns_cancelled_prompt_leaves_buffer_unchanged():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=CompletionDb(columns={"DECISIONS": ["ID"]}))
     app.state.buffer = Buffer(lines=["select 1"], row=0, col=0, dirty=False)
     app.prompt = lambda label, default="", strip=True: None
 
     app.generate_sql_with_columns()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.buffer.text() == "select 1"
     assert app.state.buffer.dirty is False
@@ -2624,14 +2940,14 @@ def test_generate_sql_with_columns_cancelled_prompt_leaves_buffer_unchanged():
 
 
 def test_generate_sql_with_columns_handles_missing_columns_without_inserting():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=CompletionDb(columns={"DECISIONS": []}))
     app.state.buffer = Buffer(lines=[""], row=0, col=0, dirty=False)
     app.prompt = lambda label, default="", strip=True: "decisions"
     app.pick = lambda title, options: (_ for _ in ()).throw(AssertionError("unexpected picker"))
 
     app.generate_sql_with_columns()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.buffer.text() == ""
     assert app.state.buffer.dirty is False
@@ -2643,14 +2959,14 @@ def test_generate_sql_with_columns_reports_metadata_failure_without_inserting():
         def list_object_columns(self, object_name: str) -> list[str]:
             raise RuntimeError("metadata offline")
 
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=FailingColumnsDb())
     app.state.buffer = Buffer(lines=[""], row=0, col=0, dirty=False)
     app.prompt = lambda label, default="", strip=True: "decisions"
     app.pick = lambda title, options: (_ for _ in ()).throw(AssertionError("unexpected picker"))
 
     app.generate_sql_with_columns()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.buffer.text() == ""
     assert app.state.buffer.dirty is False
@@ -2658,14 +2974,14 @@ def test_generate_sql_with_columns_reports_metadata_failure_without_inserting():
 
 
 def test_generate_sql_with_columns_cancelled_picker_leaves_buffer_unchanged():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=CompletionDb(columns={"DECISIONS": ["ID"]}))
     app.state.buffer = Buffer(lines=[""], row=0, col=0, dirty=False)
     app.prompt = lambda label, default="", strip=True: "decisions"
     app.pick = lambda title, options: None
 
     app.generate_sql_with_columns()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.buffer.text() == ""
     assert app.state.buffer.dirty is False
@@ -2683,7 +2999,7 @@ def test_generate_sql_metadata_switched_tab_caches_without_opening_picker():
             return super().list_object_columns(object_name)
 
     db = BlockingColumnsDb(columns={"DECISIONS": ["ID", "NAME"]})
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.state.buffer = Buffer(lines=["select * from decisions"], row=0, col=23, dirty=False)
     app.prompt = lambda label, default="", strip=True: default
@@ -2695,7 +3011,7 @@ def test_generate_sql_metadata_switched_tab_caches_without_opening_picker():
     assert started.wait(1)
     app.new_tab()
     release.set()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.schema_columns == {"DECISIONS": ["ID", "NAME"]}
     assert app.state.active_tab_idx == 1
@@ -2705,12 +3021,12 @@ def test_generate_sql_metadata_switched_tab_caches_without_opening_picker():
 
 
 def test_shift_tab_without_prefix_does_not_dirty_buffer():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select "], row=0, col=len("select "), dirty=False)
 
-    App.handle_key(app, KEY_SHIFT_TAB)
+    app.handle_key(KEY_SHIFT_TAB)
 
     assert app.state.buffer.text() == "select "
     assert app.state.buffer.dirty is False
@@ -2719,12 +3035,12 @@ def test_shift_tab_without_prefix_does_not_dirty_buffer():
 
 
 def test_ctrl_u_uppercases_selected_text_and_keeps_selection():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select one from dual"], row=0, col=10, selection_anchor=(0, 7), dirty=False)
 
-    App.handle_key(app, CTRL_U)
+    app.handle_key(CTRL_U)
 
     assert app.state.buffer.lines == ["select ONE from dual"]
     assert app.state.buffer.selected_text() == "ONE"
@@ -2733,13 +3049,13 @@ def test_ctrl_u_uppercases_selected_text_and_keeps_selection():
 
 
 def test_ctrl_u_uppercases_code_without_touching_string_literals():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     line = "x := 'Hello';"
     app.state.buffer = Buffer(lines=[line], row=0, col=len(line), selection_anchor=(0, 0), dirty=False)
 
-    App.handle_key(app, CTRL_U)
+    app.handle_key(CTRL_U)
 
     assert app.state.buffer.lines == ["X := 'Hello';"]
     assert app.state.buffer.selected_text() == "X := 'Hello';"
@@ -2749,12 +3065,12 @@ def test_ctrl_u_uppercases_code_without_touching_string_literals():
 
 def test_ctrl_l_lowercases_selected_text_without_reconnecting():
     db = ReconnectDb()
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["SELECT ONE FROM DUAL"], row=0, col=10, selection_anchor=(0, 7), dirty=False)
 
-    App.handle_key(app, CTRL_L)
+    app.handle_key(CTRL_L)
 
     assert app.state.buffer.lines == ["SELECT one FROM DUAL"]
     assert app.state.buffer.selected_text() == "one"
@@ -2764,13 +3080,13 @@ def test_ctrl_l_lowercases_selected_text_without_reconnecting():
 
 
 def test_ctrl_l_lowercases_code_without_touching_string_literals():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     line = "X := 'HELLO';"
     app.state.buffer = Buffer(lines=[line], row=0, col=len(line), selection_anchor=(0, 0), dirty=False)
 
-    App.handle_key(app, CTRL_L)
+    app.handle_key(CTRL_L)
 
     assert app.state.buffer.lines == ["x := 'HELLO';"]
     assert app.state.buffer.selected_text() == "x := 'HELLO';"
@@ -2779,12 +3095,12 @@ def test_ctrl_l_lowercases_code_without_touching_string_literals():
 
 
 def test_ctrl_u_without_selection_reports_no_selection():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select one"], row=0, col=6, dirty=False)
 
-    App.handle_key(app, CTRL_U)
+    app.handle_key(CTRL_U)
 
     assert app.state.buffer.text() == "select one"
     assert app.state.buffer.dirty is False
@@ -2793,12 +3109,12 @@ def test_ctrl_u_without_selection_reports_no_selection():
 
 def test_ctrl_l_without_selection_reports_no_selection_and_does_not_reconnect():
     db = ReconnectDb()
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["select one"], row=0, col=6, dirty=False)
 
-    App.handle_key(app, CTRL_L)
+    app.handle_key(CTRL_L)
 
     assert app.state.buffer.text() == "select one"
     assert db.closed == 0
@@ -2808,13 +3124,13 @@ def test_ctrl_l_without_selection_reports_no_selection_and_does_not_reconnect():
 
 def test_ctrl_equals_reconnects_without_touching_buffer():
     db = ReconnectDb()
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     app.state.buffer = Buffer(lines=["select one"], row=0, col=6, dirty=False)
 
-    App.handle_key(app, KEY_CTRL_EQUALS)
-    App.wait_for_db_operation(app, timeout=1)
+    app.handle_key(KEY_CTRL_EQUALS)
+    app.wait_for_db_operation(timeout=1)
 
     assert app.state.buffer.text() == "select one"
     assert db.closed == 1
@@ -2824,7 +3140,7 @@ def test_ctrl_equals_reconnects_without_touching_buffer():
 
 def test_reconnect_invalidates_editable_and_paged_results_from_old_session():
     db = ReconnectDb()
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=db)
     app.running = True
     result = QueryResult(
@@ -2840,7 +3156,7 @@ def test_reconnect_invalidates_editable_and_paged_results_from_old_session():
     app.state.focus = FOCUS_RESULTS
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.closed == 1
     assert db.connected == 1
@@ -2863,7 +3179,7 @@ def test_reconnect_commits_pending_transaction_before_replacing_session():
     app.prompt = prompt
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [("Pending transaction: c=commit, r=rollback, d=discard session, x=cancel", "")]
     assert db.calls == ["commit", "close", "connect"]
@@ -2888,7 +3204,7 @@ def test_reconnect_rolls_back_pending_transaction_before_replacing_session():
     app.prompt = prompt
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [("Pending transaction: c=commit, r=rollback, d=discard session, x=cancel", "")]
     assert db.calls == ["rollback", "close", "connect"]
@@ -2913,7 +3229,7 @@ def test_reconnect_discards_pending_transaction_only_when_explicitly_requested()
     app.prompt = prompt
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [("Pending transaction: c=commit, r=rollback, d=discard session, x=cancel", "")]
     assert db.calls == ["close", "connect"]
@@ -2965,7 +3281,7 @@ def test_direct_forced_connect_cancel_preserves_pending_session():
 
     app.prompt = prompt
 
-    App.try_connect(app, force=True)
+    app.try_connect(force=True)
 
     assert prompts == [("Pending transaction: c=commit, r=rollback, d=discard session, x=cancel", "")]
     assert db.calls == []
@@ -2985,7 +3301,7 @@ def test_reconnect_commit_failure_preserves_session_and_results():
     app.prompt = lambda label, default="", strip=True: "c"
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["commit"]
     assert db.closed == 0
@@ -3007,7 +3323,7 @@ def test_reconnect_rollback_failure_preserves_session_and_results():
     app.prompt = lambda label, default="", strip=True: "r"
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["rollback"]
     assert db.closed == 0
@@ -3035,7 +3351,7 @@ def test_reconnect_can_discard_dead_session_after_commit_failure():
     app.prompt = prompt
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     assert db.calls == ["commit"]
     assert db.closed == 0
@@ -3045,7 +3361,7 @@ def test_reconnect_can_discard_dead_session_after_commit_failure():
     assert app.state.active_result is result
 
     app.reconnect_database()
-    App.wait_for_db_operation(app, timeout=1)
+    app.wait_for_db_operation(timeout=1)
 
     expected_prompt = (
         "Pending transaction: c=commit, r=rollback, d=discard session, x=cancel",
@@ -3084,7 +3400,7 @@ def test_reconnect_keeps_session_results_while_commit_is_in_progress():
         assert app.state.focus == FOCUS_RESULTS
 
         db.commit_release.set()
-        App.wait_for_db_operation(app, timeout=1)
+        app.wait_for_db_operation(timeout=1)
     finally:
         db.commit_release.set()
 
@@ -3099,25 +3415,25 @@ def test_reconnect_keeps_session_results_while_commit_is_in_progress():
 
 
 def test_ctrl_b_toggles_current_line_comment_with_indent():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["  select 1 from dual"], row=0, col=4, dirty=False)
 
-    App.handle_key(app, CTRL_B)
+    app.handle_key(CTRL_B)
 
     assert app.state.buffer.lines == ["  -- select 1 from dual"]
     assert app.state.buffer.dirty is True
     assert app.state.status == "Commented line"
 
-    App.handle_key(app, CTRL_B)
+    app.handle_key(CTRL_B)
 
     assert app.state.buffer.lines == ["  select 1 from dual"]
     assert app.state.status == "Uncommented line"
 
 
 def test_ctrl_b_toggles_selected_line_block_and_leaves_blank_lines():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(
@@ -3128,13 +3444,13 @@ def test_ctrl_b_toggles_selected_line_block_and_leaves_blank_lines():
         dirty=False,
     )
 
-    App.handle_key(app, CTRL_B)
+    app.handle_key(CTRL_B)
 
     assert app.state.buffer.lines == ["-- begin", "  -- null;", "", "-- end;"]
     assert app.state.buffer.selection_range() is None
     assert app.state.status == "Commented 3 lines"
 
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
 
     assert app.state.buffer.lines == ["begin", "  null;", "", "end;"]
     assert app.state.buffer.selection_anchor == (0, 0)
@@ -3142,7 +3458,7 @@ def test_ctrl_b_toggles_selected_line_block_and_leaves_blank_lines():
 
 
 def test_ctrl_b_uncomments_selected_commented_block_and_skips_final_column_zero_line():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(
@@ -3153,47 +3469,94 @@ def test_ctrl_b_uncomments_selected_commented_block_and_skips_final_column_zero_
         dirty=False,
     )
 
-    App.handle_key(app, CTRL_B)
+    app.handle_key(CTRL_B)
 
     assert app.state.buffer.lines == ["begin", "  null;", "end;"]
     assert app.state.status == "Uncommented 2 lines"
 
 
 def test_ctrl_b_comments_mixed_selected_lines():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["-- begin", "  null;"], row=1, col=7, selection_anchor=(0, 0), dirty=False)
 
-    App.handle_key(app, CTRL_B)
+    app.handle_key(CTRL_B)
 
     assert app.state.buffer.lines == ["-- -- begin", "  -- null;"]
     assert app.state.status == "Commented 2 lines"
 
 
 def test_ctrl_b_routes_only_in_editor_focus():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select 1"], row=0, col=0, dirty=False)
     app.state.focus = FOCUS_RESULTS
     app.state.active_result = QueryResult("data", ["A"], [["1"]], "1 row")
 
-    App.handle_key(app, CTRL_B)
+    app.handle_key(CTRL_B)
 
     assert app.state.buffer.lines == ["select 1"]
     assert app.state.status == "Ready"
 
 
+def test_ctrl_c_copies_selected_result_cell_to_system_clipboard(monkeypatch):
+    copied: list[str] = []
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
+    app.running = True
+    app.state.focus = FOCUS_RESULTS
+    value = "Příliš\nžluťouč"
+    app.state.active_result = QueryResult(
+        "data",
+        ["ID", "VALUE"],
+        [["1", value]],
+        "1 row",
+    )
+    app.state.result_col = 1
+    monkeypatch.setattr(
+        ui,
+        "copy_to_system_clipboard",
+        lambda text: copied.append(text) or "test clipboard",
+    )
+
+    app.handle_key(CTRL_C)
+
+    assert copied == [value]
+    assert app.state.internal_clipboard == value
+    assert (app.state.result_row, app.state.result_col) == (0, 1)
+    assert app.state.status == "Copied 14 char(s) to test clipboard"
+
+
+def test_copy_selected_result_cell_command_falls_back_to_internal_clipboard(monkeypatch):
+    app = ServiceHarness()
+    app.state = UIState(config=make_config(), db=object())
+    app.running = True
+    app.state.focus = FOCUS_RESULTS
+    app.state.result_mode = RESULT_ROW_DETAIL
+    app.state.active_result = QueryResult("data", ["VALUE"], [["<NULL>"]], "1 row")
+    monkeypatch.setattr(ui, "copy_to_system_clipboard", lambda text: None)
+    command = next(
+        item for item in COMMAND_MENU_ITEMS if item.handler == "copy_selected_result_cell"
+    )
+    app._wire()
+
+    app.dispatcher.execute(command.handler)
+
+    assert app.state.internal_clipboard == "<NULL>"
+    assert app.state.status == "Copied 6 char(s) internally"
+
+
 def test_ctrl_x_cuts_selected_text_to_clipboard(monkeypatch):
     copied: list[str] = []
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select one from dual"], row=0, col=10, selection_anchor=(0, 7), dirty=False)
     monkeypatch.setattr(ui, "copy_to_system_clipboard", lambda text: copied.append(text) or "test clipboard")
 
-    App.handle_key(app, CTRL_X)
+    app.handle_key(CTRL_X)
 
     assert copied == ["one"]
     assert app.state.internal_clipboard == "one"
@@ -3205,20 +3568,20 @@ def test_ctrl_x_cuts_selected_text_to_clipboard(monkeypatch):
 
 
 def test_ctrl_x_cuts_multiline_utf8_selection_and_undo_restores_it(monkeypatch):
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select Příliš", "žluťoučký kůň", "from dual"], row=1, col=7, selection_anchor=(0, 7), dirty=False)
     monkeypatch.setattr(ui, "copy_to_system_clipboard", lambda text: None)
 
-    App.handle_key(app, CTRL_X)
+    app.handle_key(CTRL_X)
 
     assert app.state.internal_clipboard == "Příliš\nžluťouč"
     assert app.state.buffer.lines == ["select ký kůň", "from dual"]
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 7)
     assert app.state.status == "Cut 14 char(s) internally"
 
-    App.handle_key(app, CTRL_Z)
+    app.handle_key(CTRL_Z)
 
     assert app.state.buffer.lines == ["select Příliš", "žluťoučký kůň", "from dual"]
     assert (app.state.buffer.row, app.state.buffer.col) == (1, 7)
@@ -3228,13 +3591,13 @@ def test_ctrl_x_cuts_multiline_utf8_selection_and_undo_restores_it(monkeypatch):
 
 def test_ctrl_x_without_selection_leaves_buffer_unchanged(monkeypatch):
     copied: list[str] = []
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.running = True
     app.state.buffer = Buffer(lines=["select 1"], row=0, col=8, dirty=False)
     monkeypatch.setattr(ui, "copy_to_system_clipboard", lambda text: copied.append(text) or "test clipboard")
 
-    App.handle_key(app, CTRL_X)
+    app.handle_key(CTRL_X)
 
     assert copied == []
     assert app.state.internal_clipboard == ""
@@ -3399,42 +3762,42 @@ def test_buffer_file_boundary_selection_helpers_keep_anchor():
 
 
 def test_editor_shift_home_end_keys_select_line_boundaries():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["select name from dual"], row=0, col=11)
 
-    App.edit_key(app, KEY_SHIFT_HOME)
+    app.edit_key(KEY_SHIFT_HOME)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
     assert app.state.buffer.selected_text() == "select name"
 
     app.state.buffer = Buffer(lines=["select name from dual"], row=0, col=7)
-    App.edit_key(app, KEY_SHIFT_END)
+    app.edit_key(KEY_SHIFT_END)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, len("select name from dual"))
     assert app.state.buffer.selected_text() == "name from dual"
 
 
 def test_editor_ctrl_shift_home_end_keys_select_document_boundaries():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["select", "from dual", "where id = 1"], row=1, col=4)
 
-    App.edit_key(app, KEY_CTRL_SHIFT_HOME)
+    app.edit_key(KEY_CTRL_SHIFT_HOME)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
     assert app.state.buffer.selected_text() == "select\nfrom"
 
     app.state.buffer = Buffer(lines=["select", "from dual", "where id = 1"], row=1, col=4)
-    App.edit_key(app, KEY_CTRL_SHIFT_END)
+    app.edit_key(KEY_CTRL_SHIFT_END)
     assert (app.state.buffer.row, app.state.buffer.col) == (2, len("where id = 1"))
     assert app.state.buffer.selected_text() == " dual\nwhere id = 1"
 
 
 def test_editor_ctrl_shift_end_selects_exact_utf8_text_to_file_end():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     start_col = len("Příliš ")
     app.state.buffer = Buffer(lines=["select 1", "Příliš žluťoučký", "from dual"], row=1, col=start_col)
 
-    App.edit_key(app, KEY_CTRL_SHIFT_END)
+    app.edit_key(KEY_CTRL_SHIFT_END)
 
     assert (app.state.buffer.row, app.state.buffer.col) == (2, len("from dual"))
     assert app.state.buffer.selection_anchor == (1, start_col)
@@ -3442,12 +3805,12 @@ def test_editor_ctrl_shift_end_selects_exact_utf8_text_to_file_end():
 
 
 def test_editor_ctrl_shift_home_selects_exact_utf8_text_to_file_start():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     start_col = len("Příliš")
     app.state.buffer = Buffer(lines=["select 1", "Příliš žluťoučký", "from dual"], row=1, col=start_col)
 
-    App.edit_key(app, KEY_CTRL_SHIFT_HOME)
+    app.edit_key(KEY_CTRL_SHIFT_HOME)
 
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
     assert app.state.buffer.selection_anchor == (1, start_col)
@@ -3455,28 +3818,28 @@ def test_editor_ctrl_shift_home_selects_exact_utf8_text_to_file_start():
 
 
 def test_editor_ctrl_shift_home_end_reuse_anchor_when_reversing_selection():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["zero", "one two", "three"], row=1, col=4)
 
-    App.edit_key(app, KEY_CTRL_SHIFT_END)
+    app.edit_key(KEY_CTRL_SHIFT_END)
     assert (app.state.buffer.row, app.state.buffer.col) == (2, len("three"))
     assert app.state.buffer.selection_anchor == (1, 4)
     assert app.state.buffer.selected_text() == "two\nthree"
 
-    App.edit_key(app, KEY_CTRL_SHIFT_HOME)
+    app.edit_key(KEY_CTRL_SHIFT_HOME)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
     assert app.state.buffer.selection_anchor == (1, 4)
     assert app.state.buffer.selected_text() == "zero\none "
 
 
 def test_editor_ctrl_shift_home_end_affect_only_active_tab():
-    app = object.__new__(App)
+    app = ServiceHarness()
     first = FileTab(buffer=Buffer(lines=["first tab"], row=0, col=5, title="first.sql"))
     second = FileTab(buffer=Buffer(lines=["select", "from dual"], row=0, col=3, title="second.sql"))
     app.state = UIState(config=make_config(), db=object(), tabs=[first, second], active_tab_idx=1)
 
-    App.edit_key(app, KEY_CTRL_SHIFT_END)
+    app.edit_key(KEY_CTRL_SHIFT_END)
 
     assert second.buffer.selection_anchor == (0, 3)
     assert second.buffer.selected_text() == "ect\nfrom dual"
@@ -3485,59 +3848,59 @@ def test_editor_ctrl_shift_home_end_affect_only_active_tab():
 
 
 def test_editor_ctrl_shift_arrow_keys_select_by_word():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["select name from dual"], row=0, col=7)
 
-    App.edit_key(app, KEY_CTRL_SHIFT_RIGHT)
+    app.edit_key(KEY_CTRL_SHIFT_RIGHT)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 12)
     assert app.state.buffer.selected_text() == "name "
 
-    App.edit_key(app, KEY_CTRL_SHIFT_RIGHT)
+    app.edit_key(KEY_CTRL_SHIFT_RIGHT)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 17)
     assert app.state.buffer.selection_anchor == (0, 7)
     assert app.state.buffer.selected_text() == "name from "
 
-    App.edit_key(app, KEY_CTRL_SHIFT_LEFT)
+    app.edit_key(KEY_CTRL_SHIFT_LEFT)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 12)
     assert app.state.buffer.selection_anchor == (0, 7)
     assert app.state.buffer.selected_text() == "name "
 
 
 def test_editor_ctrl_backspace_deletes_previous_word():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["select name from dual"], row=0, col=7)
 
-    App.edit_key(app, KEY_CTRL_BACKSPACE)
+    app.edit_key(KEY_CTRL_BACKSPACE)
 
     assert app.state.buffer.lines == ["name from dual"]
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
 
 
 def test_editor_ctrl_delete_deletes_next_word():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["select name from dual"], row=0, col=7)
 
-    App.edit_key(app, KEY_CTRL_DELETE)
+    app.edit_key(KEY_CTRL_DELETE)
 
     assert app.state.buffer.lines == ["select from dual"]
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 7)
 
 
 def test_editor_shift_page_keys_select_by_page():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=[f"line {idx:02d}" for idx in range(20)], row=2, col=4)
 
-    App.edit_key(app, KEY_SHIFT_PAGEDOWN)
+    app.edit_key(KEY_SHIFT_PAGEDOWN)
 
     assert (app.state.buffer.row, app.state.buffer.col) == (12, 4)
     assert app.state.buffer.selection_anchor == (2, 4)
     assert app.state.buffer.selection_range() == ((2, 4), (12, 4))
 
-    App.edit_key(app, KEY_SHIFT_PAGEUP)
+    app.edit_key(KEY_SHIFT_PAGEUP)
 
     assert (app.state.buffer.row, app.state.buffer.col) == (2, 4)
     assert app.state.buffer.selection_anchor == (2, 4)
@@ -3545,25 +3908,25 @@ def test_editor_shift_page_keys_select_by_page():
 
 
 def test_editor_plain_page_keys_clear_selection():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=[f"line {idx:02d}" for idx in range(20)], row=12, col=4, selection_anchor=(2, 4))
 
-    App.edit_key(app, curses.KEY_PPAGE)
+    app.edit_key(curses.KEY_PPAGE)
 
     assert (app.state.buffer.row, app.state.buffer.col) == (2, 4)
     assert app.state.buffer.selection_range() is None
 
     app.state.buffer = Buffer(lines=[f"line {idx:02d}" for idx in range(20)], row=2, col=4, selection_anchor=(2, 0))
 
-    App.edit_key(app, curses.KEY_NPAGE)
+    app.edit_key(curses.KEY_NPAGE)
 
     assert (app.state.buffer.row, app.state.buffer.col) == (12, 4)
     assert app.state.buffer.selection_range() is None
 
 
 def test_ctrl_page_shortcuts_still_switch_tabs_outside_results_focus():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(
         config=make_config(),
         db=object(),
@@ -3575,22 +3938,22 @@ def test_ctrl_page_shortcuts_still_switch_tabs_outside_results_focus():
         active_tab_idx=1,
     )
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab_idx == 0
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert app.state.active_tab_idx == 1
 
     app.state.focus = FOCUS_BROWSER
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab_idx == 0
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert app.state.active_tab_idx == 1
 
 
 def test_ctrl_page_does_not_scroll_dbms_output_with_editor_focus():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     output_tab = FileTab(
         buffer=Buffer(title="output.sql"),
@@ -3605,14 +3968,14 @@ def test_ctrl_page_does_not_scroll_dbms_output_with_editor_focus():
     )
     app.state.focus = FOCUS_EDITOR
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
 
     assert app.state.active_tab_idx == 0
     assert output_tab.dbms_output_scroll is None
 
 
 def test_ctrl_page_scrolls_dbms_output_by_page_from_tail_and_clamps():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(
         config=make_config(),
@@ -3624,26 +3987,26 @@ def test_ctrl_page_scrolls_dbms_output_by_page_from_tail_and_clamps():
     app.state.dbms_output = [f"line {idx}" for idx in range(8)]
     app.state.show_dbms_output = True
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
 
     assert app.state.active_tab_idx == 1
     assert app.state.active_tab.dbms_output_scroll == 2
     assert app.state.status == "DBMS_OUTPUT: lines 3-5/8"
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab.dbms_output_scroll == 0
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert app.state.active_tab_idx == 1
     assert app.state.active_tab.dbms_output_scroll == 5
     assert app.state.status == "DBMS_OUTPUT: lines 6-8/8"
 
 
 def test_ctrl_page_scrolls_text_results_by_page_from_tail_and_clamps():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(
         config=make_config(),
@@ -3654,26 +4017,26 @@ def test_ctrl_page_scrolls_text_results_by_page_from_tail_and_clamps():
     app.state.focus = FOCUS_RESULTS
     app.state.results = [f"line {idx}" for idx in range(8)]
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
 
     assert app.state.active_tab_idx == 1
     assert app.state.active_tab.results_scroll == 2
     assert app.state.status == "Results: lines 3-5/8"
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab.results_scroll == 0
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert app.state.active_tab_idx == 1
     assert app.state.active_tab.results_scroll == 5
     assert app.state.status == "Results: lines 6-8/8"
 
 
 def test_ctrl_page_scrolls_explain_plan_by_page_and_clamps():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(
         config=make_config(),
@@ -3684,23 +4047,23 @@ def test_ctrl_page_scrolls_explain_plan_by_page_and_clamps():
     app.state.explain_result = ExplainPlanResult("plan", sample_plan_steps(), "ok")
     app.state.explain_page_size = 2
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
 
     assert app.state.active_tab_idx == 0
     assert app.state.explain_scroll == 2
     assert app.state.status == "Explain plan: lines 3-4/4"
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert app.state.explain_scroll == 2
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab_idx == 0
     assert app.state.explain_scroll == 0
 
 
 def test_ctrl_page_scrolls_result_grid_by_page_and_keeps_selection_visible():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(
         config=make_config(),
@@ -3711,23 +4074,23 @@ def test_ctrl_page_scrolls_result_grid_by_page_and_keeps_selection_visible():
     app.state.active_result = QueryResult("data", ["A"], [[str(idx)] for idx in range(7)], "7 rows")
     app.state.result_page_size = 2
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
 
     assert app.state.active_tab_idx == 0
     assert (app.state.result_row_scroll, app.state.result_row) == (2, 2)
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert (app.state.result_row_scroll, app.state.result_row) == (5, 5)
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab_idx == 0
     assert (app.state.result_row_scroll, app.state.result_row) == (3, 4)
 
 
 def test_ctrl_page_scrolls_result_detail_by_page_and_keeps_selection_visible():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(
         config=make_config(),
@@ -3744,40 +4107,40 @@ def test_ctrl_page_scrolls_result_detail_by_page_and_keeps_selection_visible():
     app.state.result_mode = RESULT_ROW_DETAIL
     app.state.result_page_size = 2
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
 
     assert app.state.active_tab_idx == 0
     assert (app.state.result_col_scroll, app.state.result_col) == (2, 2)
 
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
-    App.handle_key(app, KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
+    app.handle_key(KEY_CTRL_PAGEDOWN)
     assert (app.state.result_col_scroll, app.state.result_col) == (5, 5)
 
-    App.handle_key(app, KEY_CTRL_PAGEUP)
+    app.handle_key(KEY_CTRL_PAGEUP)
     assert app.state.active_tab_idx == 0
     assert (app.state.result_col_scroll, app.state.result_col) == (3, 4)
 
 
 def test_ctrl_up_down_scrolls_editor_window_without_dirtying_buffer():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=24, width=120)
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=[f"line {idx:02d}" for idx in range(30)], row=5, col=4, scroll=2, dirty=False)
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert (app.state.buffer.scroll, app.state.buffer.row, app.state.buffer.col) == (3, 5, 4)
     assert app.state.buffer.dirty is False
     assert app.state.buffer.undo_stack == []
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert (app.state.buffer.scroll, app.state.buffer.row, app.state.buffer.col) == (2, 5, 4)
 
 
 def test_ctrl_down_editor_scroll_clamps_cursor_if_it_leaves_window():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=24, width=120)
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(
@@ -3789,7 +4152,7 @@ def test_ctrl_down_editor_scroll_clamps_cursor_if_it_leaves_window():
         selection_anchor=(2, 0),
     )
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert (app.state.buffer.scroll, app.state.buffer.row, app.state.buffer.col) == (3, 3, 4)
     assert app.state.buffer.selection_range() is None
@@ -3797,7 +4160,7 @@ def test_ctrl_down_editor_scroll_clamps_cursor_if_it_leaves_window():
 
 
 def test_ctrl_up_down_scrolls_schema_browser_window():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_BROWSER
@@ -3811,52 +4174,52 @@ def test_ctrl_up_down_scrolls_schema_browser_window():
         "PACKAGE": [],
     }
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert (app.state.browser_scroll, app.state.browser_row) == (1, 1)
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert (app.state.browser_scroll, app.state.browser_row) == (0, 1)
 
 
 def test_ctrl_up_down_scrolls_explain_plan_window():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_RESULTS
     app.state.explain_result = ExplainPlanResult("plan", sample_plan_steps(), "ok")
     app.state.explain_page_size = 2
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert app.state.explain_scroll == 1
     assert app.state.status == "Explain plan: lines 2-3/4"
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert app.state.explain_scroll == 0
 
 
 def test_ctrl_up_down_scrolls_result_grid_window():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_RESULTS
     app.state.active_result = QueryResult("data", ["A"], [[str(idx)] for idx in range(5)], "5 rows")
     app.state.result_page_size = 2
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert (app.state.result_row_scroll, app.state.result_row) == (1, 1)
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert (app.state.result_row_scroll, app.state.result_row) == (0, 1)
 
 
 def test_ctrl_up_down_scrolls_result_detail_window():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_RESULTS
@@ -3864,44 +4227,44 @@ def test_ctrl_up_down_scrolls_result_detail_window():
     app.state.result_mode = RESULT_ROW_DETAIL
     app.state.result_page_size = 2
 
-    App.handle_key(app, KEY_CTRL_DOWN)
+    app.handle_key(KEY_CTRL_DOWN)
 
     assert (app.state.result_col_scroll, app.state.result_col) == (1, 1)
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert (app.state.result_col_scroll, app.state.result_col) == (0, 1)
 
 
 def test_ctrl_up_scrolls_text_results_from_tail_position():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_RESULTS
     app.state.results = [f"line {idx}" for idx in range(6)]
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert app.state.active_tab.results_scroll == 2
     assert app.state.status == "Results: lines 3-5/6"
 
 
 def test_ctrl_up_scrolls_dbms_output_from_tail_position():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_RESULTS
     app.state.dbms_output = [f"line {idx}" for idx in range(6)]
     app.state.show_dbms_output = True
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert app.state.active_tab.dbms_output_scroll == 2
     assert app.state.status == "DBMS_OUTPUT: lines 3-5/6"
 
 
 def test_ctrl_up_scrolls_visible_dbms_output_when_editor_has_focus():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.screen = FakeScreen(height=12, width=80)
     app.state = UIState(config=make_config(), db=object())
     app.state.focus = FOCUS_EDITOR
@@ -3909,7 +4272,7 @@ def test_ctrl_up_scrolls_visible_dbms_output_when_editor_has_focus():
     app.state.dbms_output = [f"line {idx}" for idx in range(6)]
     app.state.show_dbms_output = True
 
-    App.handle_key(app, KEY_CTRL_UP)
+    app.handle_key(KEY_CTRL_UP)
 
     assert app.state.active_tab.dbms_output_scroll == 2
     assert app.state.buffer.scroll == 4
@@ -3917,26 +4280,26 @@ def test_ctrl_up_scrolls_visible_dbms_output_when_editor_has_focus():
 
 
 def test_editor_plain_home_end_and_ctrl_home_end_clear_selection():
-    app = object.__new__(App)
+    app = ServiceHarness()
     app.state = UIState(config=make_config(), db=object())
     app.state.buffer = Buffer(lines=["select", "from dual"], row=1, col=4, selection_anchor=(0, 1))
 
-    App.edit_key(app, curses.KEY_HOME)
+    app.edit_key(curses.KEY_HOME)
     assert (app.state.buffer.row, app.state.buffer.col) == (1, 0)
     assert app.state.buffer.selection_range() is None
 
     app.state.buffer = Buffer(lines=["select", "from dual"], row=0, col=2, selection_anchor=(0, 0))
-    App.edit_key(app, curses.KEY_END)
+    app.edit_key(curses.KEY_END)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, len("select"))
     assert app.state.buffer.selection_range() is None
 
     app.state.buffer = Buffer(lines=["select", "from dual"], row=1, col=4, selection_anchor=(0, 0))
-    App.edit_key(app, KEY_CTRL_HOME)
+    app.edit_key(KEY_CTRL_HOME)
     assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
     assert app.state.buffer.selection_range() is None
 
     app.state.buffer = Buffer(lines=["select", "from dual"], row=0, col=2, selection_anchor=(0, 0))
-    App.edit_key(app, KEY_CTRL_END)
+    app.edit_key(KEY_CTRL_END)
     assert (app.state.buffer.row, app.state.buffer.col) == (1, len("from dual"))
     assert app.state.buffer.selection_range() is None
 
@@ -3967,6 +4330,22 @@ def test_first_document_error_location_maps_statement_offset_and_earliest_line()
 def test_first_document_error_location_uses_ora_06512_fallback():
     exc = RuntimeError("ORA-06512: at line 5")
     assert first_document_error_location(exc, statement_start_line=3) == ErrorLocation(7, 1)
+
+
+def test_first_document_error_location_ignores_named_external_units():
+    exc = RuntimeError(
+        'ORA-06512: at "SCOTT.PKG_RUN", line 17\n'
+        "ORA-06512: at line 3"
+    )
+
+    assert first_document_error_location(exc, statement_start_line=8) == ErrorLocation(10, 1)
+    assert (
+        first_document_error_location(
+            RuntimeError('ORA-06512: at "SCOTT.PKG_RUN", line 17'),
+            statement_start_line=8,
+        )
+        is None
+    )
 
 
 def test_first_document_error_location_returns_none_without_location():
@@ -4042,6 +4421,35 @@ def test_execution_error_lines_include_diagnostics_and_dbms_output():
     assert any("PKG.RUN line 3: ORA-20000: boom" in line for line in lines)
 
 
+def test_execution_error_lines_include_non_masking_cleanup_warnings():
+    exc = OracleExecutionError(
+        RuntimeError("ORA-20000: primary failure"),
+        "Block",
+        warnings=["Statement cursor cleanup failed: close failed"],
+    )
+
+    lines = execution_error_lines(exc)
+
+    assert "Warnings:" in lines
+    assert "Statement cursor cleanup failed: close failed" in lines
+
+
+def test_compilation_error_location_prefers_error_over_earlier_warning():
+    compilation_error = OracleCompilationError(
+        PlsqlObject("PROCEDURE", "BROKEN"),
+        [
+            PlsqlCompileDiagnostic(2, 3, "PLW-06002: warning", "WARNING"),
+            PlsqlCompileDiagnostic(4, 5, "PLS-00103: error", "ERROR"),
+        ],
+    )
+    exc = OracleExecutionError(compilation_error, "Compile")
+
+    assert first_document_error_location(exc, statement_start_line=10) == ErrorLocation(
+        13,
+        5,
+    )
+
+
 def test_move_buffer_to_error_clamps_column_and_clears_selection():
     buffer = Buffer(lines=["select", "from dual"], row=0, col=2, selection_anchor=(0, 0))
     moved = move_buffer_to_error(buffer, ErrorLocation(2, 99))
@@ -4051,26 +4459,225 @@ def test_move_buffer_to_error_clamps_column_and_clears_selection():
 
 
 def test_run_script_failure_moves_to_failing_statement_and_keeps_prior_results():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = FailingScriptDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
     app.state = UIState(config=make_config(), db=db)
     app.state.buffer = Buffer(lines=["select 1 from dual;", "begin", "  bad;", "end;", "/"], row=0, col=0)
 
-    App.run_script(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_script()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.titles == ["Statement 1 lines 1-1", "Statement 2 lines 2-4"]
     assert (app.state.buffer.row, app.state.buffer.col) == (2, 2)
     assert app.state.status.startswith("Execution failed at line 3, column 3")
+    assert "stopped at 2/2" in app.state.status
     assert "Error location: line 3, column 3" in app.state.results
     assert any("[Statement 1 lines 1-1] 1 row" in line for line in app.state.results)
     assert any("ERROR executing statement:" in line for line in app.state.results)
 
 
+def test_run_script_status_reports_statement_progress_and_completion_count():
+    app = ServiceHarness()
+    db = RecordingDb()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=db)
+    app.state.buffer = Buffer(
+        lines=["select 1 from dual;", "select 2 from dual;"],
+        row=0,
+        col=0,
+    )
+
+    app.run_script()
+
+    assert app.state.db_operation is not None
+    assert "1/2" in app.state.db_operation.label
+    app.wait_for_db_operation(timeout=1)
+    assert app.state.status == "Completed 2/2: ok"
+
+
+def test_changed_source_keeps_error_cursor_in_place_and_marks_diagnostics_stale():
+    started = ui.threading.Event()
+    release = ui.threading.Event()
+
+    class BlockingFailureDb:
+        def execute_statement(self, statement: str, title: str = "Statement") -> QueryResult:
+            started.set()
+            assert release.wait(1)
+            raise RuntimeError("ORA-06550: line 1, column 3: bad source")
+
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=BlockingFailureDb())
+    app.state.buffer = Buffer(lines=["select bad from dual;"], row=0, col=0)
+
+    app.run_current_statement()
+    assert started.wait(1)
+    app.state.buffer.lines.append("-- edited while running")
+    app.state.buffer.row = 1
+    app.state.buffer.col = 4
+    release.set()
+    app.wait_for_db_operation(timeout=1)
+
+    assert (app.state.buffer.row, app.state.buffer.col) == (1, 4)
+    assert "Source changed since execution started" in app.state.status
+    assert any("earlier buffer revision" in line for line in app.state.results)
+    assert len(app.state.active_tab.execution_diagnostics) == 1
+
+    app.next_execution_diagnostic()
+
+    assert (app.state.buffer.row, app.state.buffer.col) == (1, 4)
+    assert "diagnostics are stale" in app.state.status
+
+
+def test_execution_diagnostic_commands_cycle_local_locations_and_success_clears_them():
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=object())
+    app.state.buffer = Buffer(lines=["one", "two", "three", "four"], row=0, col=0)
+
+    app.handle_execution_error(
+        RuntimeError(
+            "ORA-06550: line 2, column 3: first\n"
+            "ORA-06550: line 4, column 2: second"
+        )
+    )
+
+    assert [(item.line, item.column) for item in app.state.active_tab.execution_diagnostics] == [
+        (2, 3),
+        (4, 2),
+    ]
+    assert [
+        item.message for item in app.state.active_tab.execution_diagnostics
+    ] == ["first", "second"]
+    assert (app.state.buffer.row, app.state.buffer.col) == (1, 2)
+
+    app.next_execution_diagnostic()
+    assert (app.state.buffer.row, app.state.buffer.col) == (3, 1)
+    assert app.state.status.startswith("Diagnostic 2/2")
+    assert app.state.status.endswith(": second")
+
+    app.previous_execution_diagnostic()
+    assert (app.state.buffer.row, app.state.buffer.col) == (1, 2)
+    assert app.state.status.startswith("Diagnostic 1/2")
+    assert app.state.status.endswith(": first")
+
+    app.finish_execution([QueryResult("Statement", [], [], "ok")])
+    assert app.state.active_tab.execution_diagnostics == []
+
+
+def test_structured_compile_error_navigation_preserves_each_message():
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=object())
+    app.state.buffer = Buffer(lines=["one", "two", "three", "four"])
+    compilation_error = OracleCompilationError(
+        PlsqlObject("PROCEDURE", "BROKEN"),
+        [
+            PlsqlCompileDiagnostic(2, 3, "first compile error", "ERROR"),
+            PlsqlCompileDiagnostic(4, 2, "second compile error", "ERROR"),
+        ],
+    )
+
+    app.handle_execution_error(
+        OracleExecutionError(compilation_error, "Compile", statement="create procedure")
+    )
+
+    assert [
+        item.message for item in app.state.active_tab.execution_diagnostics
+    ] == ["Error: first compile error", "Error: second compile error"]
+    app.next_execution_diagnostic()
+    assert app.state.status.endswith(": Error: second compile error")
+
+
+def test_same_location_compile_error_message_beats_warning_message():
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=object())
+    app.state.buffer = Buffer(lines=["one", "two", "three"])
+    compilation_error = OracleCompilationError(
+        PlsqlObject("PROCEDURE", "BROKEN"),
+        [
+            PlsqlCompileDiagnostic(2, 3, "fatal compile error", "ERROR"),
+            PlsqlCompileDiagnostic(2, 3, "secondary warning", "WARNING"),
+        ],
+    )
+
+    app.handle_execution_error(
+        OracleExecutionError(compilation_error, "Compile", statement="create procedure")
+    )
+
+    assert [
+        item.message for item in app.state.active_tab.execution_diagnostics
+    ] == ["Error: fatal compile error"]
+
+
+def test_successful_compile_diagnostics_are_rendered_and_navigable():
+    class CompileWarning:
+        line = 2
+        position = 4
+        text = "PLW-06009: procedure should raise"
+        severity = "warning"
+
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=object())
+    app.state.buffer = Buffer(lines=[f"line {idx}" for idx in range(1, 10)], row=0, col=0)
+    source_text = app.state.buffer.text()
+    result = QueryResult("Statement 2 lines 5-8", [], [], "compiled with warnings")
+    result.diagnostics = [CompileWarning()]
+
+    app.finish_execution([result], source_text=source_text)
+
+    assert any("Warning at line 2, column 4" in line for line in app.state.results)
+    assert [(item.line, item.column) for item in app.state.active_tab.execution_diagnostics] == [
+        (6, 4)
+    ]
+    app.next_execution_diagnostic()
+    assert (app.state.buffer.row, app.state.buffer.col) == (5, 3)
+
+
+def test_selected_compile_warning_keeps_same_line_statement_column_origin():
+    class CompileWarningDb:
+        def execute_statement(
+            self,
+            statement: str,
+            title: str = "Statement",
+        ) -> QueryResult:
+            result = QueryResult(title, [], [], "compiled with warnings")
+            result.diagnostics = [
+                PlsqlCompileDiagnostic(1, 3, "PLW-06002: warning", "WARNING")
+            ]
+            return result
+
+    app = ServiceHarness()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=CompileWarningDb())
+    app.state.buffer = Buffer(lines=["skip: create procedure p as begin null; end;"])
+
+    app.run_selected_script(
+        "create procedure p as begin null; end;",
+        first_line=1,
+        first_col=6,
+    )
+    app.wait_for_db_operation(timeout=1)
+
+    assert [
+        (diagnostic.line, diagnostic.column)
+        for diagnostic in app.state.active_tab.execution_diagnostics
+    ] == [(1, 9)]
+
+
 def test_run_script_executes_selected_sql_only_with_document_line_titles():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -4083,15 +4690,45 @@ def test_run_script_executes_selected_sql_only_with_document_line_titles():
         selection_anchor=(1, 0),
     )
 
-    App.run_script(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_script()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.statements == ["select 1 from dual", "select 2 from dual"]
     assert db.titles == ["Selection 1 lines 2-2", "Selection 2 lines 3-3"]
 
 
+def test_run_script_preflight_rejects_all_client_syntax_before_binds_or_db():
+    app = ServiceHarness()
+    db = RecordingDb()
+    app.screen = FakeScreen()
+    app.draw_offset_x = 0
+    app.state = UIState(config=make_config(), db=db)
+    app.state.buffer = Buffer(
+        lines=[
+            "set serveroutput on",
+            "select :id from dual;",
+            "prompt finished",
+            "select &name from dual;",
+        ],
+        row=0,
+        col=0,
+    )
+    prompts: list[str] = []
+    app.prompt_text_box = lambda label, default="", strip=True: prompts.append(label)
+
+    app.run_script()
+
+    assert prompts == []
+    assert db.statements == []
+    assert app.state.db_operation is None
+    assert (app.state.buffer.row, app.state.buffer.col) == (0, 0)
+    assert app.state.status.startswith("Execution blocked at line 1, column 1")
+    assert any("line 3, column 1" in line for line in app.state.results)
+    assert any("line 4, column 8" in line for line in app.state.results)
+
+
 def test_run_script_prompts_once_per_bind_and_filters_values_per_statement():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -4114,8 +4751,8 @@ def test_run_script_prompts_once_per_bind_and_filters_values_per_statement():
 
     app.prompt_text_box = prompt_text_box
 
-    App.run_script(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_script()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [
         ("Value for :id", "", False),
@@ -4125,7 +4762,7 @@ def test_run_script_prompts_once_per_bind_and_filters_values_per_statement():
 
 
 def test_run_script_prompts_once_for_unquoted_bind_case_variants():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -4146,15 +4783,15 @@ def test_run_script_prompts_once_for_unquoted_bind_case_variants():
 
     app.prompt_text_box = prompt_text_box
 
-    App.run_script(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_script()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [("Value for :id", "", False)]
     assert db.bind_values == [{"id": "42"}, {"ID": "42"}]
 
 
 def test_run_current_statement_keeps_quoted_bind_names_case_sensitive():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = RecordingDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -4170,8 +4807,8 @@ def test_run_current_statement_keeps_quoted_bind_names_case_sensitive():
 
     app.prompt_text_box = prompt_text_box
 
-    App.run_current_statement(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_current_statement()
+    app.wait_for_db_operation(timeout=1)
 
     assert prompts == [
         ('Value for :"Mixed Name"', "", False),
@@ -4181,7 +4818,7 @@ def test_run_current_statement_keeps_quoted_bind_names_case_sensitive():
 
 
 def test_selected_script_failure_moves_to_original_document_line():
-    app = object.__new__(App)
+    app = ServiceHarness()
     db = FailingScriptDb()
     app.screen = FakeScreen()
     app.draw_offset_x = 0
@@ -4193,8 +4830,8 @@ def test_selected_script_failure_moves_to_original_document_line():
         selection_anchor=(1, 0),
     )
 
-    App.run_script(app)
-    App.wait_for_db_operation(app, timeout=1)
+    app.run_script()
+    app.wait_for_db_operation(timeout=1)
 
     assert db.titles == ["Selection 1 lines 2-2", "Selection 2 lines 3-5"]
     assert (app.state.buffer.row, app.state.buffer.col) == (3, 2)
@@ -4916,8 +5553,8 @@ class BlockingReconnectDb(ReconnectDb):
         return TransactionReport(datetime(2026, 6, 12, 10, 12, 15), rows_changed=1)
 
 
-def make_reconnect_app(db: ReconnectDb) -> tuple[App, QueryResult]:
-    app = object.__new__(App)
+def make_reconnect_app(db: ReconnectDb) -> tuple[ServiceHarness, QueryResult]:
+    app = ServiceHarness()
     app.screen = FakeScreen()
     app.state = UIState(config=make_config(autocommit=False), db=db)
     app.running = True

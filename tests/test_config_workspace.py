@@ -3,6 +3,7 @@ from __future__ import annotations
 import configparser
 import os
 from pathlib import Path
+import stat
 
 import pytest
 
@@ -11,9 +12,11 @@ from plsqlwks.config import paths as config_paths
 from plsqlwks.config import (
     AppConfig,
     SessionTab,
+    ensure_config_file,
     load_config,
     read_password,
     save_autocommit,
+    save_read_only,
     save_session_tabs,
 )
 from plsqlwks.workspace import STARTER_PLSQL, STARTER_SQL, ensure_workspace, list_workspace_files, write_once
@@ -186,7 +189,7 @@ def test_load_config_uses_environment_overrides(monkeypatch, tmp_path):
     assert config.config_file == workspace / "config.ini"
     assert config.max_rows == 17
     assert config.arraysize == 9
-    assert config.autocommit is True
+    assert config.autocommit is False
     assert config.read_only is False
     assert config.remember_bind_values is False
 
@@ -409,14 +412,14 @@ def test_csv_settings_preserve_existing_app_config_positional_arguments(tmp_path
     assert config.csv_export_protect_formulas is False
 
 
-def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch, tmp_path):
+def test_load_config_defaults_to_manual_when_config_is_missing(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
 
     config = load_config()
 
     assert config.config_file == workspace / "config.ini"
-    assert config.autocommit is True
+    assert config.autocommit is False
     assert config.read_only is False
     assert config.remember_bind_values is False
     assert config.csv_export_separator == ","
@@ -430,7 +433,7 @@ def test_load_config_defaults_autocommit_yes_when_config_is_missing(monkeypatch,
     assert config.active_session_tab == 0
 
 
-def test_load_config_defaults_autocommit_yes_when_key_is_missing(monkeypatch, tmp_path):
+def test_load_config_defaults_to_manual_when_autocommit_key_is_missing(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "config.ini").write_text("[ui]\ntheme = plain\n", encoding="utf-8")
@@ -438,12 +441,24 @@ def test_load_config_defaults_autocommit_yes_when_key_is_missing(monkeypatch, tm
 
     config = load_config()
 
-    assert config.autocommit is True
+    assert config.autocommit is False
     assert config.read_only is False
     assert config.remember_bind_values is False
 
 
-def test_load_config_reads_autocommit_from_workspace_config_ini(monkeypatch, tmp_path):
+def test_load_config_defaults_to_manual_when_autocommit_value_is_invalid(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "config.ini").write_text(
+        "[database]\nautocommit = sometimes\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PLSQLWKS_WORKSPACE", str(workspace))
+
+    assert load_config().autocommit is False
+
+
+def test_load_config_preserves_explicit_autocommit_from_workspace_config_ini(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     config_file = workspace / "config.ini"
@@ -692,6 +707,74 @@ def test_save_autocommit_creates_and_updates_workspace_config_ini(tmp_path):
     assert parser.get("database", "autocommit") == "yes"
     assert parser.get("database", "max_rows") == "17"
     assert parser.get("ui", "theme") == "plain"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_database_config_update_preserves_existing_permissions(tmp_path):
+    config = make_config(tmp_path)
+    assert config.config_file is not None
+    config.config_file.parent.mkdir(parents=True, exist_ok=True)
+    config.config_file.write_text("[database]\nautocommit = yes\n", encoding="utf-8")
+    config.config_file.chmod(0o640)
+
+    save_autocommit(config, False)
+
+    assert stat.S_IMODE(config.config_file.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("operation", ["ensure", "autocommit", "read_only"])
+def test_database_config_updates_are_atomic_on_replace_failure(
+    monkeypatch,
+    tmp_path,
+    operation,
+):
+    from plsqlwks.config import settings
+
+    config = make_config(tmp_path)
+    assert config.config_file is not None
+    config.config_file.parent.mkdir(parents=True, exist_ok=True)
+    original = b"[database]\nautocommit = yes\nread_only = no\n"
+    config.config_file.write_bytes(original)
+    monkeypatch.setattr(
+        settings.os,
+        "replace",
+        lambda source, destination: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        if operation == "ensure":
+            ensure_config_file(config)
+        elif operation == "autocommit":
+            save_autocommit(config, False)
+        else:
+            save_read_only(config, True)
+
+    assert config.config_file.read_bytes() == original
+    assert list(config.config_file.parent.glob(f".{config.config_file.name}.*.tmp")) == []
+
+
+def test_database_config_atomic_write_cleans_up_after_interruption(
+    monkeypatch,
+    tmp_path,
+):
+    from plsqlwks.config import settings
+
+    config = make_config(tmp_path)
+    assert config.config_file is not None
+    config.config_file.parent.mkdir(parents=True, exist_ok=True)
+    original = b"[database]\nautocommit = yes\n"
+    config.config_file.write_bytes(original)
+
+    def interrupt_replace(source, destination):
+        raise KeyboardInterrupt("interrupted")
+
+    monkeypatch.setattr(settings.os, "replace", interrupt_replace)
+
+    with pytest.raises(KeyboardInterrupt, match="interrupted"):
+        save_autocommit(config, False)
+
+    assert config.config_file.read_bytes() == original
+    assert list(config.config_file.parent.glob(f".{config.config_file.name}.*.tmp")) == []
 
 
 def test_save_session_tabs_round_trips_order_cursors_active_and_paths(monkeypatch, tmp_path):
@@ -956,6 +1039,32 @@ def test_parse_args_describes_read_only_as_client_side_guardrail(capsys):
     assert "not a security boundary" in help_text
 
 
+def test_fresh_workspace_cli_autocommit_override_is_not_persisted(monkeypatch, tmp_path):
+    import plsqlwks.ui.app as app_module
+
+    workspace = tmp_path / "workspace"
+    runtime_configs = []
+
+    class FakeApp:
+        def __init__(self, screen, config):
+            runtime_configs.append(config)
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(app_module, "configure_utf8_locale", lambda: None)
+    monkeypatch.setattr(app_module, "App", FakeApp)
+    monkeypatch.setattr(app_module.curses, "wrapper", lambda callback: callback(object()))
+
+    app_module.main(["--workspace", str(workspace), "--autocommit"])
+
+    assert runtime_configs[0].autocommit is True
+    assert load_config(workspace=workspace).autocommit is False
+    parser = configparser.ConfigParser()
+    parser.read(workspace / "config.ini", encoding="utf-8")
+    assert parser.get("database", "autocommit") == "no"
+
+
 def test_ensure_workspace_creates_starter_files_once(tmp_path):
     config = make_config(tmp_path)
 
@@ -967,7 +1076,7 @@ def test_ensure_workspace_creates_starter_files_once(tmp_path):
     parser = configparser.ConfigParser()
     assert config.config_file is not None
     parser.read(config.config_file, encoding="utf-8")
-    assert parser.get("database", "autocommit") == "yes"
+    assert parser.get("database", "autocommit") == "no"
     assert parser.get("database", "read_only") == "no"
     assert parser.get("database", "remember_bind_values") == "no"
     assert (config.sql_dir / "session_info.sql").read_text(encoding="utf-8") == STARTER_SQL
@@ -975,9 +1084,15 @@ def test_ensure_workspace_creates_starter_files_once(tmp_path):
 
     custom_sql = "select 42 from dual;\n"
     (config.sql_dir / "session_info.sql").write_text(custom_sql, encoding="utf-8")
+    parser.set("database", "autocommit", "yes")
+    assert config.config_file is not None
+    with config.config_file.open("w", encoding="utf-8") as handle:
+        parser.write(handle)
     ensure_workspace(config)
 
     assert (config.sql_dir / "session_info.sql").read_text(encoding="utf-8") == custom_sql
+    parser.read(config.config_file, encoding="utf-8")
+    assert parser.get("database", "autocommit") == "yes"
 
 
 def test_write_once_does_not_replace_existing_file(tmp_path):
