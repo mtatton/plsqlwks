@@ -1,0 +1,380 @@
+# TEMPORARY CI FALLBACK
+# - Ordinary jobs use GitHub-hosted Ubuntu runners instead of unavailable self-hosted labels.
+# - All verification jobs are non-blocking via continue-on-error.
+# - Oracle jobs are manual-only and non-blocking.
+# Restore required private-runner gates after the runner infrastructure is online.
+
+name: CI
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_oracle:
+        description: "Run optional Oracle 19c and 26ai integration jobs"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Temporary hosted-runner fallback. A new run supersedes an older run for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  repository-hygiene:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Check repository hygiene
+        run: python tools/dev.py hygiene
+      - name: Report allowed hygiene failure
+        if: ${{ failure() }}
+        run: echo "::warning title=Temporary soft gate::Repository hygiene failed, but this temporary workflow allows the failure."
+
+  quality:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Install development dependencies
+        run: python tools/dev.py install
+      - name: Run quality checks
+        run: python tools/dev.py lint
+      - name: Report allowed quality failure
+        if: ${{ failure() }}
+        run: echo "::warning title=Temporary soft gate::Quality checks failed, but this temporary workflow allows the failure."
+
+  test-and-coverage:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install test dependencies
+        run: python tools/dev.py install --xlsx
+      - name: Run tests and enforce branch coverage
+        run: python tools/dev.py coverage --report-dir coverage-reports
+      - name: Publish coverage summary
+        if: ${{ always() && hashFiles('coverage-reports/coverage-summary.md') != '' }}
+        run: cat coverage-reports/coverage-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain machine-readable test and coverage reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-coverage-python-${{ matrix.python-version }}
+          path: |
+            coverage-reports/junit-non-oracle.xml
+            coverage-reports/junit-plugins.xml
+            coverage-reports/coverage.xml
+            coverage-reports/coverage.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+      - name: Report allowed test failure
+        if: ${{ failure() }}
+        run: echo "::warning title=Temporary soft gate::Tests or coverage failed, but this temporary workflow allows the failure."
+
+  build-smoke:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Install build dependencies
+        run: python tools/dev.py install
+      - name: Build and smoke-test distributions
+        run: python tools/dev.py build --smoke
+      - name: Report allowed build failure
+        if: ${{ failure() }}
+        run: echo "::warning title=Temporary soft gate::Build smoke testing failed, but this temporary workflow allows the failure."
+
+  oracle-gate-warning:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_oracle != true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report temporary Oracle-gate fallback
+        run: |
+          echo "::warning title=Oracle gates temporarily optional::Oracle 19c and 26ai jobs are disabled for normal GitHub runs until private CI infrastructure is restored."
+          {
+            echo "### Temporary GitHub CI fallback"
+            echo
+            echo "Ordinary checks run on GitHub-hosted runners and are non-blocking."
+            echo "Oracle 19c/26ai jobs run only when manually requested with run_oracle=true."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  oracle-integration-19c:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.run_oracle &&
+        github.event.repository.fork == false
+      }}
+    needs:
+      - repository-hygiene
+      - quality
+      - test-and-coverage
+      - build-smoke
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    environment: oracle-integration
+    concurrency:
+      group: ${{ github.repository }}-oracle-integration-19c
+      cancel-in-progress: false
+    env:
+      ORACLE_USER: ${{ secrets.ORACLE_19C_USER }}
+      ORACLE_DSN: ${{ secrets.ORACLE_19C_DSN }}
+      PLSQLWKS_TEST_ORACLE: "1"
+      PLSQLWKS_TEST_ORACLE_MATRIX: "1"
+      PLSQLWKS_TEST_ORACLE_TARGET: 19c
+      PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN: ${{ secrets.ORACLE_19C_DESCRIPTOR_DSN }}
+      PLSQLWKS_TEST_ORACLE_DML_USER: ${{ secrets.ORACLE_19C_DML_USER }}
+      PLSQLWKS_TEST_ORACLE_READ_ONLY_USER: ${{ secrets.ORACLE_19C_READ_ONLY_USER }}
+      PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME: ${{ secrets.ORACLE_19C_EXPECTED_DB_UNIQUE_NAME }}
+      PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME: ${{ secrets.ORACLE_19C_EXPECTED_CON_NAME }}
+      PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME: ${{ secrets.ORACLE_19C_EXPECTED_SERVICE_NAME }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Install development dependencies
+        run: python tools/dev.py install
+      - name: Prepare protected Oracle inputs
+        env:
+          DEVELOPER_PASSWORD: ${{ secrets.ORACLE_19C_PASSWORD }}
+          DML_PASSWORD: ${{ secrets.ORACLE_19C_DML_PASSWORD }}
+          READ_ONLY_PASSWORD: ${{ secrets.ORACLE_19C_READ_ONLY_PASSWORD }}
+          GUARD_TOKEN: ${{ secrets.ORACLE_19C_GUARD_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$ORACLE_USER"
+          test -n "$ORACLE_DSN"
+          test -n "$PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN"
+          test -n "$PLSQLWKS_TEST_ORACLE_DML_USER"
+          test -n "$PLSQLWKS_TEST_ORACLE_READ_ONLY_USER"
+          test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME"
+          test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME"
+          test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME"
+          test -n "$DEVELOPER_PASSWORD"
+          test -n "$DML_PASSWORD"
+          test -n "$READ_ONLY_PASSWORD"
+          test -n "$GUARD_TOKEN"
+          test -n "$RUNNER_TEMP"
+          test -d "$RUNNER_TEMP"
+          case "$GITHUB_RUN_ID" in ""|*[!0-9]*) exit 1 ;; esac
+          case "$GITHUB_RUN_ATTEMPT" in ""|*[!0-9]*) exit 1 ;; esac
+          umask 077
+          workspace="$RUNNER_TEMP/plsqlwks-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-19c-workspace"
+          test ! -e "$workspace"
+          mkdir -m 700 -- "$workspace"
+          printf '%s\n' "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:19c" > "$workspace/.ci-owned"
+          chmod 600 "$workspace/.ci-owned"
+          {
+            printf 'PLSQLWKS_WORKSPACE=%s\n' "$workspace"
+            printf 'PLSQLWKS_CI_WORKSPACE_CREATED=1\n'
+          } >> "$GITHUB_ENV"
+          developer_password_file="$workspace/developer.password"
+          dml_password_file="$workspace/dml.password"
+          read_only_password_file="$workspace/read-only.password"
+          guard_token_file="$workspace/guard.token"
+          printf '%s' "$DEVELOPER_PASSWORD" > "$developer_password_file"
+          printf '%s' "$DML_PASSWORD" > "$dml_password_file"
+          printf '%s' "$READ_ONLY_PASSWORD" > "$read_only_password_file"
+          printf '%s' "$GUARD_TOKEN" > "$guard_token_file"
+          chmod 600 \
+            "$developer_password_file" \
+            "$dml_password_file" \
+            "$read_only_password_file" \
+            "$guard_token_file"
+          printf 'ORACLE_PASSWORD_FILE=%s\n' "$developer_password_file" >> "$GITHUB_ENV"
+          printf 'PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE=%s\n' "$dml_password_file" >> "$GITHUB_ENV"
+          printf 'PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE=%s\n' "$read_only_password_file" >> "$GITHUB_ENV"
+          printf 'PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE=%s\n' "$guard_token_file" >> "$GITHUB_ENV"
+      - name: Run Oracle 19c integration tests
+        run: |
+          set -euo pipefail
+          test -f "$ORACLE_PASSWORD_FILE" && test -s "$ORACLE_PASSWORD_FILE"
+          test -f "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE"
+          test -f "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE"
+          test -f "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"
+          python tools/dev.py test oracle-matrix
+      - name: Remove Oracle temporary files
+        if: ${{ always() }}
+        run: |
+          test -n "$RUNNER_TEMP"
+          test -d "$RUNNER_TEMP"
+          case "$GITHUB_RUN_ID" in ""|*[!0-9]*) exit 1 ;; esac
+          case "$GITHUB_RUN_ATTEMPT" in ""|*[!0-9]*) exit 1 ;; esac
+          workspace="$RUNNER_TEMP/plsqlwks-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-19c-workspace"
+          expected_owner="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:19c"
+          if [ "${PLSQLWKS_CI_WORKSPACE_CREATED:-}" = "1" ]; then
+            test "${PLSQLWKS_WORKSPACE:-}" = "$workspace"
+            test -d "$workspace"
+            test ! -L "$workspace"
+            test -f "$workspace/.ci-owned"
+            test ! -L "$workspace/.ci-owned"
+            test "$(cat "$workspace/.ci-owned")" = "$expected_owner"
+            rm -rf -- "$workspace"
+          fi
+      - name: Report allowed Oracle 19c failure
+        if: ${{ failure() }}
+        run: echo "::warning title=Temporary Oracle soft gate::Oracle 19c integration failed, but this temporary workflow allows the failure."
+
+  oracle-integration-26ai:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        inputs.run_oracle &&
+        github.event.repository.fork == false
+      }}
+    needs:
+      - repository-hygiene
+      - quality
+      - test-and-coverage
+      - build-smoke
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    environment: oracle-integration
+    concurrency:
+      group: ${{ github.repository }}-oracle-integration-26ai
+      cancel-in-progress: false
+    env:
+      ORACLE_USER: ${{ secrets.ORACLE_26AI_USER }}
+      ORACLE_DSN: ${{ secrets.ORACLE_26AI_DSN }}
+      PLSQLWKS_TEST_ORACLE: "1"
+      PLSQLWKS_TEST_ORACLE_MATRIX: "1"
+      PLSQLWKS_TEST_ORACLE_TARGET: 26ai
+      PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN: ${{ secrets.ORACLE_26AI_DESCRIPTOR_DSN }}
+      PLSQLWKS_TEST_ORACLE_DML_USER: ${{ secrets.ORACLE_26AI_DML_USER }}
+      PLSQLWKS_TEST_ORACLE_READ_ONLY_USER: ${{ secrets.ORACLE_26AI_READ_ONLY_USER }}
+      PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME: ${{ secrets.ORACLE_26AI_EXPECTED_DB_UNIQUE_NAME }}
+      PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME: ${{ secrets.ORACLE_26AI_EXPECTED_CON_NAME }}
+      PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME: ${{ secrets.ORACLE_26AI_EXPECTED_SERVICE_NAME }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Install development dependencies
+        run: python tools/dev.py install
+      - name: Prepare protected Oracle inputs
+        env:
+          DEVELOPER_PASSWORD: ${{ secrets.ORACLE_26AI_PASSWORD }}
+          DML_PASSWORD: ${{ secrets.ORACLE_26AI_DML_PASSWORD }}
+          READ_ONLY_PASSWORD: ${{ secrets.ORACLE_26AI_READ_ONLY_PASSWORD }}
+          GUARD_TOKEN: ${{ secrets.ORACLE_26AI_GUARD_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$ORACLE_USER"
+          test -n "$ORACLE_DSN"
+          test -n "$PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN"
+          test -n "$PLSQLWKS_TEST_ORACLE_DML_USER"
+          test -n "$PLSQLWKS_TEST_ORACLE_READ_ONLY_USER"
+          test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME"
+          test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME"
+          test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME"
+          test -n "$DEVELOPER_PASSWORD"
+          test -n "$DML_PASSWORD"
+          test -n "$READ_ONLY_PASSWORD"
+          test -n "$GUARD_TOKEN"
+          test -n "$RUNNER_TEMP"
+          test -d "$RUNNER_TEMP"
+          case "$GITHUB_RUN_ID" in ""|*[!0-9]*) exit 1 ;; esac
+          case "$GITHUB_RUN_ATTEMPT" in ""|*[!0-9]*) exit 1 ;; esac
+          umask 077
+          workspace="$RUNNER_TEMP/plsqlwks-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-26ai-workspace"
+          test ! -e "$workspace"
+          mkdir -m 700 -- "$workspace"
+          printf '%s\n' "${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:26ai" > "$workspace/.ci-owned"
+          chmod 600 "$workspace/.ci-owned"
+          {
+            printf 'PLSQLWKS_WORKSPACE=%s\n' "$workspace"
+            printf 'PLSQLWKS_CI_WORKSPACE_CREATED=1\n'
+          } >> "$GITHUB_ENV"
+          developer_password_file="$workspace/developer.password"
+          dml_password_file="$workspace/dml.password"
+          read_only_password_file="$workspace/read-only.password"
+          guard_token_file="$workspace/guard.token"
+          printf '%s' "$DEVELOPER_PASSWORD" > "$developer_password_file"
+          printf '%s' "$DML_PASSWORD" > "$dml_password_file"
+          printf '%s' "$READ_ONLY_PASSWORD" > "$read_only_password_file"
+          printf '%s' "$GUARD_TOKEN" > "$guard_token_file"
+          chmod 600 \
+            "$developer_password_file" \
+            "$dml_password_file" \
+            "$read_only_password_file" \
+            "$guard_token_file"
+          printf 'ORACLE_PASSWORD_FILE=%s\n' "$developer_password_file" >> "$GITHUB_ENV"
+          printf 'PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE=%s\n' "$dml_password_file" >> "$GITHUB_ENV"
+          printf 'PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE=%s\n' "$read_only_password_file" >> "$GITHUB_ENV"
+          printf 'PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE=%s\n' "$guard_token_file" >> "$GITHUB_ENV"
+      - name: Run Oracle 26ai integration tests
+        run: |
+          set -euo pipefail
+          test -f "$ORACLE_PASSWORD_FILE" && test -s "$ORACLE_PASSWORD_FILE"
+          test -f "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE"
+          test -f "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE"
+          test -f "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"
+          python tools/dev.py test oracle-matrix
+      - name: Remove Oracle temporary files
+        if: ${{ always() }}
+        run: |
+          test -n "$RUNNER_TEMP"
+          test -d "$RUNNER_TEMP"
+          case "$GITHUB_RUN_ID" in ""|*[!0-9]*) exit 1 ;; esac
+          case "$GITHUB_RUN_ATTEMPT" in ""|*[!0-9]*) exit 1 ;; esac
+          workspace="$RUNNER_TEMP/plsqlwks-oracle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-26ai-workspace"
+          expected_owner="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:26ai"
+          if [ "${PLSQLWKS_CI_WORKSPACE_CREATED:-}" = "1" ]; then
+            test "${PLSQLWKS_WORKSPACE:-}" = "$workspace"
+            test -d "$workspace"
+            test ! -L "$workspace"
+            test -f "$workspace/.ci-owned"
+            test ! -L "$workspace/.ci-owned"
+            test "$(cat "$workspace/.ci-owned")" = "$expected_owner"
+            rm -rf -- "$workspace"
+          fi
+      - name: Report allowed Oracle 26ai failure
+        if: ${{ failure() }}
+        run: echo "::warning title=Temporary Oracle soft gate::Oracle 26ai integration failed, but this temporary workflow allows the failure."

@@ -13,7 +13,7 @@ from plsqlwks.plugins import PLUGIN_API_VERSION
 from plsqlwks.plugins import html_export as html_export_plugin
 from plsqlwks.plugins import xlsx_export as xlsx_export_plugin
 from plsqlwks.ui import parse_args as parse_app_args
-from tools import dev
+from tools import chat_choices, dev
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTATION_PATHS = tuple(
@@ -167,6 +167,9 @@ def test_documented_application_and_development_commands_parse_without_execution
             elif tokens[:2] == ["python3", "tools/dev.py"]:
                 development_examples.append(tokens)
                 _parse_documented_args(dev.create_parser().parse_args, tokens[2:])
+            elif tokens[:2] == ["python3", "tools/chat_choices.py"]:
+                development_examples.append(tokens)
+                _parse_documented_args(chat_choices.create_parser().parse_args, tokens[2:])
 
     assert app_examples
     assert development_examples

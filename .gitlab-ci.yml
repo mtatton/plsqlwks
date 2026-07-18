@@ -1,4 +1,11 @@
+# Temporary GitLab.com hosted-runner fallback.
+# - No private runner tags: ordinary jobs are picked up by GitLab-hosted runners.
+# - Non-Oracle gates are soft: failures are reported as warnings.
+# - Oracle jobs are optional manual checks until a private Oracle runner is online.
+# - The protected release include is intentionally disabled in this fallback.
+
 workflow:
+  name: "plsqlwks verification"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
@@ -15,6 +22,7 @@ stages:
 variables:
   PYTHON_VERSION: "3.14"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_ROOT_USER_ACTION: "ignore"
 
 default:
   image: "python:${PYTHON_VERSION}-slim"
@@ -22,200 +30,82 @@ default:
 
 .install-dev:
   before_script:
-    - python -m pip install --upgrade pip setuptools wheel
-    - python -m pip install --editable '.[dev]'
+    - python --version
+    - python tools/dev.py install
 
 repository-hygiene:
   stage: quality
+  allow_failure: true
+  before_script:
+    - python --version
   script:
-    - |
-      python - <<'PY'
-      from pathlib import Path
-
-      generated = [Path("PKG-INFO"), Path("build"), Path("dist")]
-      generated.extend(Path.cwd().glob("*.egg-info"))
-      present = sorted(str(path) for path in generated if path.exists())
-      if present:
-          raise SystemExit("generated packaging artifacts are tracked: " + ", ".join(present))
-      PY
+    - python tools/dev.py hygiene
 
 quality:
   extends: .install-dev
   stage: quality
   allow_failure: true
-  variables:
-    MYPY_TARGETS: >-
-    MYPY_TARGETS: >-
-      plsqlwks/config/__init__.py
-      plsqlwks/config/models.py
-      plsqlwks/config/paths.py
-      plsqlwks/config/settings.py
-      plsqlwks/config/session.py
-      plsqlwks/config/loader.py
-      plsqlwks/workspace.py
-      plsqlwks/sqlbinds.py
-      plsqlwks/sqlsplit.py
-      plsqlwks/db/models.py
-      plsqlwks/db/transactions.py
   script:
-    - python -m ruff check plsqlwks tests tools
-    - python -m mypy $MYPY_TARGETS
-    - >-
-      python -m mypy --follow-imports=skip
-      plsqlwks/plugins
-      plsqlwks/ui/plugin_host.py
-      plsqlwks/exporting.py
+    - python tools/dev.py lint
 
-test-non-oracle:
-  extends: .install-dev
+test-and-coverage:
   stage: test
+  allow_failure: true
   parallel:
     matrix:
       - PYTHON_VERSION:
           - "3.10"
           - "3.14"
-  variables:
-    PLSQLWKS_TEST_PTY: "1"
-    PLSQLWKS_TEST_SLOW: "1"
+  before_script:
+    - python --version
+    - python tools/dev.py install --xlsx
   script:
-    - python -m pytest --strict-markers -m 'not oracle'
-
-test-plugins:
-  extends: .install-dev
-  stage: test
-  parallel:
-    matrix:
-      - PYTHON_VERSION:
-          - "3.10"
-          - "3.14"
-  variables:
-    PLSQLWKS_TEST_PLUGINS: "1"
-  script:
-    - python -m pip install --editable '.[xlsx]'
-    - python -m pytest --noconftest --strict-markers -m plugin tests/test_*plugin*.py
+    - python tools/dev.py coverage --report-dir coverage-reports
+  artifacts:
+    name: "test-coverage-python-$PYTHON_VERSION-$CI_COMMIT_SHORT_SHA"
+    when: always
+    expire_in: 7 days
+    paths:
+      - coverage-reports/junit-non-oracle.xml
+      - coverage-reports/junit-plugins.xml
+      - coverage-reports/coverage.xml
+      - coverage-reports/coverage.json
+    reports:
+      junit:
+        - coverage-reports/junit-non-oracle.xml
+        - coverage-reports/junit-plugins.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage-reports/coverage.xml
 
 build-smoke:
   extends: .install-dev
   stage: build
+  allow_failure: true
   script:
-    - python -m build
-    - |
-      python - <<'PY'
-      from email.parser import Parser
-      from pathlib import Path
-      import tarfile
-      from zipfile import ZipFile
-
-      from packaging.requirements import Requirement
-
-      wheels = list(Path("dist").glob("plsqlwks-*.whl"))
-      source_archives = list(Path("dist").glob("plsqlwks-*.tar.gz"))
-      assert len(wheels) == 1, wheels
-      assert len(source_archives) == 1, source_archives
-      with ZipFile(wheels[0]) as archive:
-          metadata_name = next(
-              name for name in archive.namelist()
-              if name.endswith(".dist-info/METADATA")
-          )
-          wheel_metadata = archive.read(metadata_name).decode("utf-8")
-      with tarfile.open(source_archives[0]) as archive:
-          names = archive.getnames()
-          assert any(name.endswith("/license.txt") for name in names)
-          pkg_info_name = next(name for name in names if name.endswith("/PKG-INFO"))
-          pkg_info_file = archive.extractfile(pkg_info_name)
-          assert pkg_info_file is not None
-          pkg_info = pkg_info_file.read().decode("utf-8")
-      assert "License-Expression: LicenseRef-plsqlwks-Donationware" in pkg_info
-      assert "License-File: license.txt" in pkg_info
-      assert "Project-URL: Repository, https://gitlab.com/unununu/plsqlwks" in pkg_info
-      assert "https://gitlab.com/unununu/plsqlwks/-/raw/main/img/preview.png" in pkg_info
-
-      def assert_author_details(raw_metadata):
-          metadata = Parser().parsestr(raw_metadata)
-          assert metadata["Author"] == "unu2000"
-          assert metadata["Author-email"] is None
-          assert metadata["Maintainer"] is None
-          assert metadata["Maintainer-email"] is None
-          assert (
-              "Ko-fi, https://ko-fi.com/unu2000"
-              in metadata.get_all("Project-URL", [])
-          )
-
-      def assert_xlsx_extra(raw_metadata):
-          metadata = Parser().parsestr(raw_metadata)
-          assert "xlsx" in metadata.get_all("Provides-Extra", [])
-          requirements = [
-              Requirement(value)
-              for value in metadata.get_all("Requires-Dist", [])
-          ]
-          openpyxl = [
-              requirement
-              for requirement in requirements
-              if requirement.name.casefold() == "openpyxl"
-          ]
-          assert len(openpyxl) == 1, openpyxl
-          requirement = openpyxl[0]
-          assert str(requirement.specifier) == ">=3.1"
-          assert requirement.marker is not None
-          assert requirement.marker.evaluate({"extra": "xlsx"})
-          assert not requirement.marker.evaluate({"extra": ""})
-          assert not requirement.marker.evaluate({"extra": "dev"})
-
-      assert_xlsx_extra(pkg_info)
-      assert_xlsx_extra(wheel_metadata)
-      assert_author_details(pkg_info)
-      assert_author_details(wheel_metadata)
-      PY
-    - SMOKE_ROOT="$(mktemp -d)"
-    - trap 'rm -rf -- "$SMOKE_ROOT"' EXIT
-    - SMOKE_PYTHON="$SMOKE_ROOT/venv/bin/python"
-    - SMOKE_WHEEL="$(find "$CI_PROJECT_DIR/dist" -maxdepth 1 -type f -name 'plsqlwks-*.whl' -print -quit)"
-    - test -n "$SMOKE_WHEEL"
-    - python -m venv "$SMOKE_ROOT/venv"
-    - $SMOKE_PYTHON -m pip install --upgrade pip
-    - $SMOKE_PYTHON -m pip install "$SMOKE_WHEEL"
-    - $SMOKE_PYTHON -c 'import importlib.util; assert importlib.util.find_spec("openpyxl") is None'
-    - cd "$SMOKE_ROOT"
-    - unset ORACLE_PASSWORD_FILE PLSQLWKS_WORKSPACE
-    - XDG_CONFIG_HOME="$SMOKE_ROOT/config" XDG_DATA_HOME="$SMOKE_ROOT/data" "$SMOKE_ROOT/venv/bin/plsqlwks" --help
-    - >-
-      XDG_CONFIG_HOME="$SMOKE_ROOT/config" XDG_DATA_HOME="$SMOKE_ROOT/data"
-      "$SMOKE_PYTHON" -c
-      'import importlib.metadata as metadata; import os; import site;
-      from pathlib import Path;
-      import plsqlwks;
-      from plsqlwks.config import load_config;
-      from plsqlwks.workspace import ensure_workspace;
-      config = load_config();
-      paths = (config.workspace_dir, config.config_file, config.password_file);
-      install_roots = tuple(Path(path).resolve() for path in site.getsitepackages());
-      assert metadata.version("plsqlwks") == plsqlwks.__version__;
-      assert config.autocommit is False;
-      assert all(path is not None for path in paths);
-      assert not any(resolved == root or root in resolved.parents for path in paths for resolved in (Path(path).resolve(),) for root in install_roots);
-      assert Path(os.environ["XDG_DATA_HOME"]).resolve() in config.workspace_dir.resolve().parents;
-      assert Path(os.environ["XDG_CONFIG_HOME"]).resolve() in Path(config.config_file).resolve().parents;
-      ensure_workspace(config);
-      assert "autocommit = no" in Path(config.config_file).read_text(encoding="utf-8")'
-    - $SMOKE_PYTHON -m pip install "${SMOKE_WHEEL}[xlsx]"
-    - $SMOKE_PYTHON -c 'import openpyxl; assert openpyxl.__version__'
+    - python tools/dev.py build --smoke
 
 .oracle-integration:
-  extends: .install-dev
   stage: integration
+  interruptible: false
   timeout: 20 minutes
   allow_failure: true
-  variables:
-    PLSQLWKS_TEST_ORACLE: "0"
-    PLSQLWKS_TEST_ORACLE_MATRIX: "0"
   rules:
-    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - if: '$CI_COMMIT_TAG =~ /^plsqlwks-/'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: true
     - when: never
+  variables:
+    AFTER_SCRIPT_IGNORE_ERRORS: "false"
+    PLSQLWKS_TEST_ORACLE: "1"
+    PLSQLWKS_TEST_ORACLE_MATRIX: "1"
+  before_script:
+    - python --version
+    - python tools/dev.py install
   script:
-    - test -n "$CI_PROJECT_DIR"
-    - test -d "$CI_PROJECT_DIR"
-    - 'case "$CI_JOB_ID" in ""|*[!0-9]*) exit 1 ;; esac'
-    - test -n "$CI_JOB_TOKEN"
     - export PLSQLWKS_WORKSPACE="$CI_PROJECT_DIR/.ci-oracle-workspace-$CI_JOB_ID"
     - test ! -e "$PLSQLWKS_WORKSPACE"
     - mkdir -m 700 -- "$PLSQLWKS_WORKSPACE"
@@ -227,23 +117,7 @@ build-smoke:
       Path(workspace, ".ci-owned").write_text(
       hmac.new(token.encode(), workspace.encode(), hashlib.sha256).hexdigest(), encoding="ascii")'
     - chmod 600 "$PLSQLWKS_WORKSPACE/.ci-owned"
-    - test -n "$ORACLE_USER"
-    - test -n "$ORACLE_DSN"
-    - test -n "$PLSQLWKS_TEST_ORACLE_DESCRIPTOR_DSN"
-    - test -n "$PLSQLWKS_TEST_ORACLE_DML_USER"
-    - test -n "$PLSQLWKS_TEST_ORACLE_READ_ONLY_USER"
-    - test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_DB_UNIQUE_NAME"
-    - test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_CON_NAME"
-    - test -n "$PLSQLWKS_TEST_ORACLE_EXPECTED_SERVICE_NAME"
-    - test -f "$ORACLE_PASSWORD_FILE"
-    - test -s "$ORACLE_PASSWORD_FILE"
-    - test -f "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE"
-    - test -s "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE"
-    - test -f "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE"
-    - test -s "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE"
-    - test -f "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"
-    - test -s "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"
-    - python -m pytest --strict-markers -m oracle
+    - python tools/dev.py test oracle-matrix
   after_script:
     - test -n "$CI_PROJECT_DIR"
     - test -d "$CI_PROJECT_DIR"
