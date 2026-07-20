@@ -1,0 +1,128 @@
+{
+  "coverage_version": "7.15.1",
+  "critical_floors": {
+    "branch_percent": 90.0,
+    "line_percent": 95.0
+  },
+  "initial": {
+    "3.10": {
+      "critical": {
+        "plsqlwks/db/sql_analysis.py": {
+          "branches": {"covered": 125, "total": 136},
+          "combined": {"covered": 372, "total": 401},
+          "lines": {"covered": 247, "total": 265}
+        },
+        "plsqlwks/db/transactions.py": {
+          "branches": {"covered": 79, "total": 88},
+          "combined": {"covered": 294, "total": 314},
+          "lines": {"covered": 215, "total": 226}
+        },
+        "plsqlwks/exporting.py": {
+          "branches": {"covered": 27, "total": 34},
+          "combined": {"covered": 133, "total": 143},
+          "lines": {"covered": 106, "total": 109}
+        },
+        "tests/oracle_matrix.py": {
+          "branches": {"covered": 73, "total": 142},
+          "combined": {"covered": 293, "total": 540},
+          "lines": {"covered": 220, "total": 398}
+        }
+      },
+      "production": {
+        "branches": {"covered": 3379, "total": 4248},
+        "combined": {"covered": 14225, "total": 16302},
+        "lines": {"covered": 10846, "total": 12054}
+      }
+    },
+    "3.14": {
+      "critical": {
+        "plsqlwks/db/sql_analysis.py": {
+          "branches": {"covered": 125, "total": 136},
+          "combined": {"covered": 372, "total": 401},
+          "lines": {"covered": 247, "total": 265}
+        },
+        "plsqlwks/db/transactions.py": {
+          "branches": {"covered": 79, "total": 88},
+          "combined": {"covered": 294, "total": 314},
+          "lines": {"covered": 215, "total": 226}
+        },
+        "plsqlwks/exporting.py": {
+          "branches": {"covered": 27, "total": 34},
+          "combined": {"covered": 133, "total": 143},
+          "lines": {"covered": 106, "total": 109}
+        },
+        "tests/oracle_matrix.py": {
+          "branches": {"covered": 73, "total": 142},
+          "combined": {"covered": 293, "total": 540},
+          "lines": {"covered": 220, "total": 398}
+        }
+      },
+      "production": {
+        "branches": {"covered": 3379, "total": 4248},
+        "combined": {"covered": 14225, "total": 16302},
+        "lines": {"covered": 10846, "total": 12054}
+      }
+    }
+  },
+  "minimum": {
+    "3.10": {
+      "critical": {
+        "plsqlwks/db/sql_analysis.py": {
+          "branches": {"covered": 136, "total": 136},
+          "combined": {"covered": 401, "total": 401},
+          "lines": {"covered": 265, "total": 265}
+        },
+        "plsqlwks/db/transactions.py": {
+          "branches": {"covered": 82, "total": 88},
+          "combined": {"covered": 300, "total": 314},
+          "lines": {"covered": 218, "total": 226}
+        },
+        "plsqlwks/exporting.py": {
+          "branches": {"covered": 31, "total": 34},
+          "combined": {"covered": 138, "total": 143},
+          "lines": {"covered": 107, "total": 109}
+        },
+        "tests/oracle_matrix.py": {
+          "branches": {"covered": 130, "total": 142},
+          "combined": {"covered": 517, "total": 540},
+          "lines": {"covered": 387, "total": 398}
+        }
+      },
+      "production": {
+        "branches": {"covered": 3409, "total": 4248},
+        "combined": {"covered": 14297, "total": 16302},
+        "lines": {"covered": 10888, "total": 12054}
+      }
+    },
+    "3.14": {
+      "critical": {
+        "plsqlwks/db/sql_analysis.py": {
+          "branches": {"covered": 136, "total": 136},
+          "combined": {"covered": 401, "total": 401},
+          "lines": {"covered": 265, "total": 265}
+        },
+        "plsqlwks/db/transactions.py": {
+          "branches": {"covered": 82, "total": 88},
+          "combined": {"covered": 300, "total": 314},
+          "lines": {"covered": 218, "total": 226}
+        },
+        "plsqlwks/exporting.py": {
+          "branches": {"covered": 31, "total": 34},
+          "combined": {"covered": 138, "total": 143},
+          "lines": {"covered": 107, "total": 109}
+        },
+        "tests/oracle_matrix.py": {
+          "branches": {"covered": 130, "total": 142},
+          "combined": {"covered": 517, "total": 540},
+          "lines": {"covered": 387, "total": 398}
+        }
+      },
+      "production": {
+        "branches": {"covered": 3409, "total": 4248},
+        "combined": {"covered": 14297, "total": 16302},
+        "lines": {"covered": 10888, "total": 12054}
+      }
+    }
+  },
+  "schema": 1
+}

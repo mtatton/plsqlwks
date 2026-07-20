@@ -1,63 +1,72 @@
-# Temporary GitLab.com hosted-runner fallback.
-# - No private runner tags: ordinary jobs are picked up by GitLab-hosted runners.
-# - Non-Oracle gates are soft: failures are reported as warnings.
-# - Oracle jobs are optional manual checks until a private Oracle runner is online.
-# - The protected release include is intentionally disabled in this fallback.
+include:
+  - local: .gitlab/ci/release.yml
+    rules:
+      - if: '$CI_COMMIT_TAG =~ /^plsqlwks-/'
 
 workflow:
-  name: "plsqlwks verification"
+  name: "$PIPELINE_NAME"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
       when: never
+    - if: '$CI_COMMIT_TAG =~ /^plsqlwks-/'
+      variables:
+        PIPELINE_NAME: "Release $CI_COMMIT_TAG"
     - when: always
+      variables:
+        PIPELINE_NAME: "plsqlwks verification"
 
 stages:
+  - release-validate
   - quality
   - test
   - build
   - integration
+  - release-build
+  - release
 
 variables:
   PYTHON_VERSION: "3.14"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PIP_ROOT_USER_ACTION: "ignore"
 
 default:
   image: "python:${PYTHON_VERSION}-slim"
   interruptible: true
+  tags:
+    - plsqlwks
+    - docker
 
 .install-dev:
   before_script:
-    - python --version
+    - 'command -v python >/dev/null || { echo "CI preflight failed: Python interpreter is unavailable" >&2; exit 1; }'
+    - python tools/dev.py preflight gitlab --expected-python "$PYTHON_VERSION"
     - python tools/dev.py install
 
 repository-hygiene:
   stage: quality
-  allow_failure: true
   before_script:
-    - python --version
+    - 'command -v python >/dev/null || { echo "CI preflight failed: Python interpreter is unavailable" >&2; exit 1; }'
+    - python tools/dev.py preflight gitlab --expected-python "$PYTHON_VERSION"
   script:
     - python tools/dev.py hygiene
 
 quality:
   extends: .install-dev
   stage: quality
-  allow_failure: true
   script:
     - python tools/dev.py lint
 
 test-and-coverage:
   stage: test
-  allow_failure: true
   parallel:
     matrix:
       - PYTHON_VERSION:
           - "3.10"
           - "3.14"
   before_script:
-    - python --version
+    - 'command -v python >/dev/null || { echo "CI preflight failed: Python interpreter is unavailable" >&2; exit 1; }'
+    - python tools/dev.py preflight gitlab --expected-python "$PYTHON_VERSION"
     - python tools/dev.py install --xlsx
   script:
     - python tools/dev.py coverage --report-dir coverage-reports
@@ -81,30 +90,35 @@ test-and-coverage:
 build-smoke:
   extends: .install-dev
   stage: build
-  allow_failure: true
   script:
     - python tools/dev.py build --smoke
 
 .oracle-integration:
+  extends: .install-dev
   stage: integration
   interruptible: false
   timeout: 20 minutes
-  allow_failure: true
-  rules:
-    - if: '$CI_COMMIT_TAG =~ /^plsqlwks-/'
-      when: manual
-      allow_failure: true
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      when: manual
-      allow_failure: true
-    - when: never
+  needs:
+    - job: repository-hygiene
+      artifacts: false
+    - job: quality
+      artifacts: false
+    - job: test-and-coverage
+      artifacts: false
+    - job: build-smoke
+      artifacts: false
   variables:
     AFTER_SCRIPT_IGNORE_ERRORS: "false"
     PLSQLWKS_TEST_ORACLE: "1"
     PLSQLWKS_TEST_ORACLE_MATRIX: "1"
   before_script:
-    - python --version
+    - 'command -v python >/dev/null || { echo "CI preflight failed: Python interpreter is unavailable" >&2; exit 1; }'
+    - python tools/dev.py preflight gitlab --expected-python "$PYTHON_VERSION" --oracle
     - python tools/dev.py install
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^plsqlwks-/ && $CI_COMMIT_REF_PROTECTED == "true"'
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - when: never
   script:
     - export PLSQLWKS_WORKSPACE="$CI_PROJECT_DIR/.ci-oracle-workspace-$CI_JOB_ID"
     - test ! -e "$PLSQLWKS_WORKSPACE"
