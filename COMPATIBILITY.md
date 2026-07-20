@@ -449,8 +449,8 @@ sources. Do not reuse a credentialed runner for untrusted fork code.
    the platform prerequisites needed by this repository. On the GitHub runner,
    expose the interpreters as executable `/usr/local/bin/python3.10` and
    `/usr/local/bin/python3.14` paths for the runner service account. Each GitHub
-   job creates a private virtual environment from the selected installed
-   interpreter instead of relying on the GitHub Actions Python tool cache. For
+   job creates a workspace `.venv` directly from the selected installed
+   interpreter instead of relying on GitHub-specific setup state. For
    GitLab, use the Docker executor because the Python 3.10/3.14 matrix selects
    `python:<version>-slim` images and rejects other executor environments.
 2. In the GitHub repository or organization runner UI, follow the official

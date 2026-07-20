@@ -10,7 +10,6 @@ permissions:
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PLSQLWKS_CI_PYTHON_ROOT: /usr/local/bin
   PLSQLWKS_PYTHON_VERSION: "3.14"
 
 jobs:
@@ -23,9 +22,9 @@ jobs:
           persist-credentials: false
       - name: Prepare installed Python
         shell: bash
-        run: bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"
+        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Check repository hygiene
-        run: python tools/dev.py hygiene
+        run: .venv/bin/python tools/dev.py hygiene
 
   quality:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -36,11 +35,11 @@ jobs:
           persist-credentials: false
       - name: Prepare installed Python
         shell: bash
-        run: bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"
+        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Install development dependencies
-        run: python tools/dev.py install
+        run: .venv/bin/python tools/dev.py install
       - name: Run quality checks
-        run: python tools/dev.py lint
+        run: .venv/bin/python tools/dev.py lint
 
   test-and-coverage:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -57,11 +56,11 @@ jobs:
           persist-credentials: false
       - name: Prepare installed Python
         shell: bash
-        run: bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"
+        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Install test dependencies
-        run: python tools/dev.py install --xlsx
+        run: .venv/bin/python tools/dev.py install --xlsx
       - name: Run tests and enforce branch coverage
-        run: python tools/dev.py coverage --report-dir coverage-reports
+        run: .venv/bin/python tools/dev.py coverage --report-dir coverage-reports
       - name: Publish coverage summary
         if: ${{ always() && hashFiles('coverage-reports/coverage-summary.md') != '' }}
         run: cat coverage-reports/coverage-summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -88,11 +87,11 @@ jobs:
           persist-credentials: false
       - name: Prepare installed Python
         shell: bash
-        run: bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"
+        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Install build dependencies
-        run: python tools/dev.py install
+        run: .venv/bin/python tools/dev.py install
       - name: Build and smoke-test distributions
-        run: python tools/dev.py build --smoke
+        run: .venv/bin/python tools/dev.py build --smoke
 
   oracle-integration-19c:
     if: >-
@@ -133,9 +132,9 @@ jobs:
           persist-credentials: false
       - name: Prepare installed Python
         shell: bash
-        run: bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"
+        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Install development dependencies
-        run: python tools/dev.py install
+        run: .venv/bin/python tools/dev.py install
       - name: Prepare protected Oracle inputs
         env:
           DEVELOPER_PASSWORD: ${{ secrets.ORACLE_19C_PASSWORD }}
@@ -194,7 +193,7 @@ jobs:
           test -f "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE"
           test -f "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE"
           test -f "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"
-          python tools/dev.py test oracle-matrix
+          .venv/bin/python tools/dev.py test oracle-matrix
       - name: Remove Oracle temporary files
         if: ${{ always() }}
         run: |
@@ -253,9 +252,9 @@ jobs:
           persist-credentials: false
       - name: Prepare installed Python
         shell: bash
-        run: bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"
+        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Install development dependencies
-        run: python tools/dev.py install
+        run: .venv/bin/python tools/dev.py install
       - name: Prepare protected Oracle inputs
         env:
           DEVELOPER_PASSWORD: ${{ secrets.ORACLE_26AI_PASSWORD }}
@@ -314,7 +313,7 @@ jobs:
           test -f "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_DML_PASSWORD_FILE"
           test -f "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_READ_ONLY_PASSWORD_FILE"
           test -f "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE" && test -s "$PLSQLWKS_TEST_ORACLE_GUARD_TOKEN_FILE"
-          python tools/dev.py test oracle-matrix
+          .venv/bin/python tools/dev.py test oracle-matrix
       - name: Remove Oracle temporary files
         if: ${{ always() }}
         run: |
