@@ -446,8 +446,12 @@ or data and can reach only the required disposable Oracle endpoints and package
 sources. Do not reuse a credentialed runner for untrusted fork code.
 
 1. Install Python 3.10 and 3.14, Python build tooling, a compiler/toolchain, and
-   the platform prerequisites needed by this repository. For GitLab, use the
-   Docker executor because the Python 3.10/3.14 matrix selects
+   the platform prerequisites needed by this repository. On the GitHub runner,
+   expose the interpreters as executable `/usr/local/bin/python3.10` and
+   `/usr/local/bin/python3.14` paths for the runner service account. Each GitHub
+   job creates a private virtual environment from the selected installed
+   interpreter instead of relying on the GitHub Actions Python tool cache. For
+   GitLab, use the Docker executor because the Python 3.10/3.14 matrix selects
    `python:<version>-slim` images and rejects other executor environments.
 2. In the GitHub repository or organization runner UI, follow the official
    [self-hosted runner setup](https://docs.github.com/en/actions/reference/runners/self-hosted-runners),

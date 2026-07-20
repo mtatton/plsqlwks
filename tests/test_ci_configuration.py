@@ -57,6 +57,20 @@ def test_ci_uses_the_versioned_runner_without_a_duplicate_root_workflow():
         assert "MYPY_TARGETS" not in workflow
 
 
+def test_github_uses_runner_installed_python_without_the_actions_tool_cache():
+    github = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "tools/prepare_github_python.sh").read_text(encoding="utf-8")
+
+    assert "actions/setup-python@" not in github
+    assert "PLSQLWKS_CI_PYTHON_ROOT: /usr/local/bin" in github
+    assert 'PLSQLWKS_PYTHON_VERSION: "3.14"' in github
+    assert "PLSQLWKS_PYTHON_VERSION: ${{ matrix.python-version }}" in github
+    assert github.count('bash tools/prepare_github_python.sh "$PLSQLWKS_PYTHON_VERSION"') == 6
+    assert 'python_bin="$python_root/python$version"' in bootstrap
+    assert '"$python_bin" -m venv "$environment"' in bootstrap
+    assert '>> "$GITHUB_PATH"' in bootstrap
+
+
 def test_ci_publishes_short_lived_machine_readable_reports_for_each_python_gate():
     github = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     gitlab = (ROOT / ".gitlab-ci.yml").read_text(encoding="utf-8")
