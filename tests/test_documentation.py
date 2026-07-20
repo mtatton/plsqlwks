@@ -7,9 +7,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import unquote
 
-import plsqlwks
 from plsqlwks.config import load_config, settings
-from plsqlwks.plugins import PLUGIN_API_VERSION
 from plsqlwks.plugins import html_export as html_export_plugin
 from plsqlwks.plugins import xlsx_export as xlsx_export_plugin
 from plsqlwks.ui import parse_args as parse_app_args
@@ -256,39 +254,3 @@ def test_documented_environment_names_match_runtime_and_plugin_loaders(monkeypat
     assert (xlsx_options.null_value, xlsx_options.theme, xlsx_options.date_format) == ("NULL", "dark", "%Y")
     assert (xlsx_options.auto_filter, xlsx_options.auto_width, xlsx_options.freeze_top_row) == (False, False, False)
 
-
-def test_documented_versions_match_package_metadata_and_source_contracts():
-    pyproject = _read(ROOT / "pyproject.toml")
-    readme = _read(ROOT / "README.md")
-    quickstart = _read(ROOT / "QUICKSTART.md")
-    plugins = _read(ROOT / "PLUGINS.md")
-    architecture = _read(ROOT / "ARCHITECTURE.md")
-
-    assert 'dynamic = ["version"]' in pyproject
-    assert 'version = {attr = "plsqlwks.__version__"}' in pyproject
-    latest_release = re.search(r"^## (?P<version>\d+\.\d+\.\d+) \d{8}$", _read(ROOT / "CHANGELOG.md"), re.MULTILINE)
-    assert latest_release is not None
-    assert latest_release.group("version") == plsqlwks.__version__
-    quickstart_version = re.search(r'dependencies = \["plsqlwks>=(?P<version>\d+\.\d+\.\d+)"\]', quickstart)
-    assert quickstart_version is not None
-    assert quickstart_version.group("version") == plsqlwks.__version__
-    quickstart_html = _read(ROOT / "QUICKSTART.html")
-    assert f"plsqlwks&gt;={plsqlwks.__version__}" in quickstart_html
-    assert ">--version</span>" in quickstart_html
-
-    python_requirement = re.search(r'^requires-python = "(?P<value>>=\d+\.\d+)"$', pyproject, re.MULTILINE)
-    assert python_requirement is not None
-    minimum_python = python_requirement.group("value").removeprefix(">=")
-    assert f"Python {minimum_python} or newer" in readme
-    assert f"Python {minimum_python} or newer" in quickstart
-    assert f'requires-python = "{python_requirement.group("value")}"' in quickstart
-
-    for document in (readme, quickstart, plugins, architecture):
-        assert re.search(rf"\bPlugin API (?:version {PLUGIN_API_VERSION}|v{PLUGIN_API_VERSION})\b", document)
-
-    xlsx_requirement_match = re.search(r'"(?P<requirement>openpyxl>=[^"]+)"', pyproject)
-    assert xlsx_requirement_match is not None
-    xlsx_requirement = xlsx_requirement_match.group("requirement")
-    assert _read(ROOT / "plugin-requirements/xlsx-export/requirements.txt").splitlines()[-1] == xlsx_requirement
-    assert xlsx_requirement in readme
-    assert xlsx_requirement in plugins

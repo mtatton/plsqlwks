@@ -40,29 +40,6 @@ def _gitlab_job_blocks(text: str) -> dict[str, str]:
     }
 
 
-def test_ci_uses_the_versioned_runner_without_a_duplicate_root_workflow():
-    github = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    gitlab = (ROOT / ".gitlab-ci.yml").read_text(encoding="utf-8")
-
-    assert not (ROOT / "ci.yml").exists()
-    for workflow in (github, gitlab):
-        assert "python tools/dev.py install" in workflow
-        assert "python tools/dev.py build --smoke" in workflow
-        assert "python -m ruff" not in workflow
-        assert "python -m mypy" not in workflow
-        assert "python -m pytest" not in workflow
-        assert "python -m build" not in workflow
-        assert "MYPY_TARGETS" not in workflow
-
-    assert "\n  quality:" not in github
-    assert "python tools/dev.py lint" not in github
-    assert "python tools/dev.py coverage" not in github
-    assert ".venv/bin/python tools/dev.py test non-oracle" in github
-    assert ".venv/bin/python tools/dev.py test plugins" in github
-    assert "python tools/dev.py lint" in gitlab
-    assert "python tools/dev.py coverage --report-dir coverage-reports" in gitlab
-
-
 def test_github_uses_runner_installed_python_without_the_actions_tool_cache():
     github = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 

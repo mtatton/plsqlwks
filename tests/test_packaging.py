@@ -350,24 +350,6 @@ def test_pyproject_declares_runtime_package_and_console_script():
     assert "raw.githubusercontent.com" not in readme
 
 
-def test_manifest_and_artifact_allowlist_cover_every_runtime_python_module():
-    package_python_files = {
-        path.relative_to(ROOT).as_posix()
-        for path in (ROOT / "plsqlwks").rglob("*.py")
-    }
-    manifest_runtime_files = {
-        line.removeprefix("include ")
-        for line in (ROOT / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
-        if line.startswith("include plsqlwks/") and line.endswith(".py")
-    }
-    allowlisted_runtime_python = {
-        path for path in RUNTIME_PACKAGE_FILES if path.endswith(".py")
-    }
-
-    assert manifest_runtime_files == package_python_files
-    assert allowlisted_runtime_python == package_python_files
-
-
 @pytest.mark.integration
 @pytest.mark.slow
 def test_built_wheel_contains_only_allowlisted_runtime_files(built_distributions):

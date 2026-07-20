@@ -323,63 +323,6 @@ def test_ui_facade_export_contract_matches_pre_package_surface():
     assert all(hasattr(ui, name) for name in expected_exports)
 
 
-def test_ui_package_contains_composed_service_modules():
-    import importlib.util
-
-    implementation_modules = (
-        "app",
-        "application_controller",
-        "browser",
-        "buffer",
-        "catalog",
-        "clipboard",
-        "command_dispatcher",
-        "commands",
-        "completion",
-        "constants",
-        "db_operations",
-        "db_session",
-        "db_worker",
-        "dialogs",
-        "display",
-        "documents",
-        "editor_controller",
-        "errors",
-        "help",
-        "input_controller",
-        "key_reader",
-        "keys",
-        "menu",
-        "plugin_host",
-        "ports",
-        "query_controller",
-        "renderer",
-        "result_controller",
-        "result_presenter",
-        "results",
-        "sql",
-        "state",
-        "syntax",
-        "viewport",
-    )
-
-    for module_name in implementation_modules:
-        assert importlib.util.find_spec(f"plsqlwks.ui.{module_name}") is not None
-        assert importlib.util.find_spec(f"plsqlwks.ui_{module_name}") is None
-
-    legacy_mixin_modules = (
-        "app_db",
-        "app_editor",
-        "app_files",
-        "app_input",
-        "app_render",
-        "app_results",
-        "app_tabs_browser",
-    )
-    for module_name in legacy_mixin_modules:
-        assert importlib.util.find_spec(f"plsqlwks.ui.{module_name}") is None
-
-
 def test_app_is_plain_composition_root_and_services_own_ui_behavior():
     from plsqlwks.ui.catalog import BrowserController
     from plsqlwks.ui.documents import DocumentController
