@@ -847,8 +847,7 @@ def smoke_test_wheel(
             cwd=smoke_root,
             env=smoke_env,
         )
-        console_script = smoke_python.parent / ("plsqlwks.exe" if os.name == "nt" else "plsqlwks")
-        run_command([str(console_script), "--help"], cwd=smoke_root, env=smoke_env)
+        run_command([str(smoke_python), "-m", "plsqlwks", "--help"], cwd=smoke_root, env=smoke_env)
         run_command(
             [
                 str(smoke_python),

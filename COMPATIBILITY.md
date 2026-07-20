@@ -35,12 +35,13 @@ query, and bounded connection-failure recovery. These mutation-heavy scenarios
 run in the developer/Easy Connect cell; the other five cells retain their
 connection, identity, fingerprint, and privilege-boundary purposes.
 
-A qualifying protected pipeline must select both Oracle target jobs after all
-required hygiene, quality, Python 3.10/3.14 test, and build jobs; every selected
-Oracle test must pass without a skip, allowed failure, cancellation, or pending
-gate. A failed or incomplete qualifying pipeline restarts the consecutive-run
-count. Ad-hoc local runs and experimental connection jobs never count toward
-the public claim.
+A qualifying protected pipeline must select both Oracle target jobs after its
+required upstream gates. GitHub requires repository hygiene, Python 3.10/3.14
+tests, and build smoke; GitLab additionally requires its quality job. Every
+selected Oracle test must pass without a skip, allowed failure, cancellation,
+or pending gate. A failed or incomplete qualifying pipeline restarts the
+consecutive-run count. Ad-hoc local runs and experimental connection jobs never
+count toward the public claim.
 
 Other Oracle releases may be used for ad-hoc development, but are not part of
 the compatibility claim. Thick mode, TNS aliases, wallets, TCPS-specific
@@ -347,22 +348,24 @@ self-hosted runners, and have no schedule or nightly trigger. GitLab explicitly
 rejects scheduled pipelines and fork merge-request pipelines. Missing
 configuration fails the selected job. Test output stays in the job log; the CI
 definitions do not upload artifacts or use vendor-hosted remote caches from the
-live Oracle jobs. Separate non-Oracle Python 3.10 and 3.14 gates retain JUnit,
-Cobertura XML, and coverage JSON for seven days. Build and installed-wheel smoke
+live Oracle jobs. GitHub runs the non-Oracle and plugin suites directly on
+Python 3.10 and 3.14 without retaining reports; GitLab retains JUnit, Cobertura
+XML, and coverage JSON for seven days. Build and installed-wheel smoke
 verification stay in one job so no distribution artifact transfer is needed.
 The shared GitLab Oracle template explicitly sets both live-test opt-in flags,
 declares blocking `needs` edges to repository hygiene, quality, both parallel
 Python test instances, and build smoke, disables dependency artifact downloads,
 and is non-interruptible. The GitHub jobs use the equivalent explicit flags,
-blocking dependencies, and non-cancelling concurrency groups.
+depend on repository hygiene, both Python test instances, and build smoke, and
+use non-cancelling concurrency groups.
 
 The authoritative CI definitions are `.github/workflows/ci.yml` and
 `.gitlab-ci.yml`; a duplicate root `ci.yml` is intentionally not maintained.
 Both definitions call the versioned `tools/dev.py` commands for installation,
-linting, test profiles, hygiene, and build smoke checks, keeping shared behavior
-in one locally runnable source. Installs and nested wheel smoke environments use
-the exact Linux/Python 3.10/3.14 dependency set in `constraints/ci.txt`; dependency
-updates are deliberate reviewed changes rather than upgrades performed by each job.
+test profiles, hygiene, and build smoke checks; GitLab also calls the lint
+command. Installs and nested wheel smoke environments use the exact
+Linux/Python 3.10/3.14 dependency set in `constraints/ci.txt`; dependency updates
+are deliberate reviewed changes rather than upgrades performed by each job.
 
 Every GitLab job runs a standard-library preflight before installation or test
 work. It verifies the requested Python version, `curses`, usable PTYs, the selected

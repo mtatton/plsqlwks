@@ -1,0 +1,67 @@
+; Example plsqlwks configuration for an explicitly selected workspace.
+; Copy this file to that workspace as config.ini, for example:
+;   cp config.ini.example workspace/config.ini
+;
+; Database connection values are configured with environment variables:
+;   ORACLE_USER, ORACLE_DSN, ORACLE_PASSWORD_FILE, PLSQLWKS_WORKSPACE,
+;   PLSQLWKS_MAX_ROWS, and PLSQLWKS_ARRAYSIZE.
+; PLSQLWKS_MAX_ROWS and PLSQLWKS_ARRAYSIZE must be positive integers.
+
+[database]
+; New installations default to manual transaction mode.
+; yes = commit each write automatically
+; no = keep changes pending until commit or rollback
+autocommit = no
+
+; yes = enable a client-side guardrail that rejects recognized write statements
+; no = allow writes
+; This is not a security boundary; use a least-privileged database account to
+; enforce read-only access.
+read_only = no
+
+; yes = prefill bind prompts with values entered earlier in this app session
+; no = start bind prompts blank
+remember_bind_values = no
+
+[plugin.csv-export]
+; yes = show the bundled CSV export command; no = disable it
+; Missing or invalid enabled values default to yes. Restart after changing this switch.
+enabled = yes
+; A delimiter must be exactly one character. Invalid values fall back to a comma.
+separator = ,
+; Text written for database NULL values. An empty value writes an empty CSV field.
+null_value =
+; Python strftime format for date and timestamp values. Empty preserves display values.
+date_format =
+; yes = quote every field and neutralize formula-like values for spreadsheet viewing
+; no = preserve field content for ordinary or programmatic CSV use
+protect_formulas = no
+
+[plugin.html-export]
+; yes = show the bundled HTML export command; no = disable it
+enabled = yes
+
+[plugin.xlsx-export]
+; yes = show the bundled XLSX export command; no = disable it
+enabled = yes
+
+[editor.colors]
+; Use common color names or numeric curses color indexes.
+keyword = bright-cyan
+string = green
+number = orange
+comment = blue
+bind = bright-magenta
+operator = white
+
+[explain.colors]
+; Use common color names or numeric curses color indexes.
+connector = cyan
+operation = bright-yellow
+object = green
+metrics = gray
+text = white
+
+[session.tabs]
+; Managed automatically on exit. Tab indexes and cursor rows/columns are zero-based.
+active = 0

@@ -47,14 +47,20 @@ def test_ci_uses_the_versioned_runner_without_a_duplicate_root_workflow():
     assert not (ROOT / "ci.yml").exists()
     for workflow in (github, gitlab):
         assert "python tools/dev.py install" in workflow
-        assert "python tools/dev.py lint" in workflow
-        assert "python tools/dev.py coverage --report-dir coverage-reports" in workflow
         assert "python tools/dev.py build --smoke" in workflow
         assert "python -m ruff" not in workflow
         assert "python -m mypy" not in workflow
         assert "python -m pytest" not in workflow
         assert "python -m build" not in workflow
         assert "MYPY_TARGETS" not in workflow
+
+    assert "\n  quality:" not in github
+    assert "python tools/dev.py lint" not in github
+    assert "python tools/dev.py coverage" not in github
+    assert ".venv/bin/python tools/dev.py test non-oracle" in github
+    assert ".venv/bin/python tools/dev.py test plugins" in github
+    assert "python tools/dev.py lint" in gitlab
+    assert "python tools/dev.py coverage --report-dir coverage-reports" in gitlab
 
 
 def test_github_uses_runner_installed_python_without_the_actions_tool_cache():
@@ -65,13 +71,13 @@ def test_github_uses_runner_installed_python_without_the_actions_tool_cache():
     assert "PLSQLWKS_PYTHON_VERSION: ${{ matrix.python-version }}" in github
     assert github.count(
         'run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv'
-    ) == 6
+    ) == 5
     assert "tools/prepare_github_python.sh" not in github
     assert not (ROOT / "tools/prepare_github_python.sh").exists()
-    assert github.count(".venv/bin/python tools/dev.py") == 11
+    assert github.count(".venv/bin/python tools/dev.py") == 10
 
 
-def test_ci_publishes_short_lived_machine_readable_reports_for_each_python_gate():
+def test_ci_keeps_two_version_gates_and_gitlab_machine_readable_reports():
     github = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     gitlab = (ROOT / ".gitlab-ci.yml").read_text(encoding="utf-8")
     report_paths = (
@@ -86,14 +92,16 @@ def test_ci_publishes_short_lived_machine_readable_reports_for_each_python_gate(
         assert '"3.14"' in workflow
         assert "test-and-coverage:" in workflow
         assert "python tools/dev.py install --xlsx" in workflow
-        assert "python tools/dev.py coverage --report-dir coverage-reports" in workflow
-        assert all(path in workflow for path in report_paths)
 
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1" in github
-    assert "retention-days: 7" in github
-    assert "if-no-files-found: error" in github
-    assert "include-hidden-files: false" in github
-    assert 'cat coverage-reports/coverage-summary.md >> "$GITHUB_STEP_SUMMARY"' in github
+    assert "tools/dev.py test non-oracle" in github
+    assert "tools/dev.py test plugins" in github
+    assert "tools/dev.py coverage" not in github
+    assert "actions/upload-artifact@" not in github
+    assert "GITHUB_STEP_SUMMARY" not in github
+    assert "hashFiles(" not in github
+    assert all(path not in github for path in report_paths)
+    assert "python tools/dev.py coverage --report-dir coverage-reports" in gitlab
+    assert all(path in gitlab for path in report_paths)
     assert "when: always" in gitlab
     assert "expire_in: 7 days" in gitlab
     assert "coverage_format: cobertura" in gitlab

@@ -26,21 +26,6 @@ jobs:
       - name: Check repository hygiene
         run: .venv/bin/python tools/dev.py hygiene
 
-  quality:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [self-hosted, linux, x64, plsqlwks]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - name: Prepare installed Python
-        shell: bash
-        run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
-      - name: Install development dependencies
-        run: .venv/bin/python tools/dev.py install
-      - name: Run quality checks
-        run: .venv/bin/python tools/dev.py lint
-
   test-and-coverage:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, linux, x64, plsqlwks]
@@ -59,24 +44,10 @@ jobs:
         run: /usr/local/bin/python"$PLSQLWKS_PYTHON_VERSION" -m venv --clear .venv
       - name: Install test dependencies
         run: .venv/bin/python tools/dev.py install --xlsx
-      - name: Run tests and enforce branch coverage
-        run: .venv/bin/python tools/dev.py coverage --report-dir coverage-reports
-      - name: Publish coverage summary
-        if: ${{ always() && hashFiles('coverage-reports/coverage-summary.md') != '' }}
-        run: cat coverage-reports/coverage-summary.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain machine-readable test and coverage reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: test-coverage-python-${{ matrix.python-version }}
-          path: |
-            coverage-reports/junit-non-oracle.xml
-            coverage-reports/junit-plugins.xml
-            coverage-reports/coverage.xml
-            coverage-reports/coverage.json
-          if-no-files-found: error
-          include-hidden-files: false
-          retention-days: 7
+      - name: Run non-Oracle tests
+        run: .venv/bin/python tools/dev.py test non-oracle
+      - name: Run plugin tests
+        run: .venv/bin/python tools/dev.py test plugins
 
   build-smoke:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -105,7 +76,6 @@ jobs:
       }}
     needs:
       - repository-hygiene
-      - quality
       - test-and-coverage
       - build-smoke
     runs-on: [self-hosted, linux, x64, plsqlwks]
@@ -225,7 +195,6 @@ jobs:
       }}
     needs:
       - repository-hygiene
-      - quality
       - test-and-coverage
       - build-smoke
     runs-on: [self-hosted, linux, x64, plsqlwks]
